@@ -1053,6 +1053,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         task = settings.get("task", "8 - INTERNAL")
         lead_source = settings.get("lead_source", "Sterling Septic -FE")
         immediate_action = settings.get("immediate_action", "Create Work Order")
+        skip_vehicle_on_weekends = settings.get("skip_vehicle_work_orders_on_weekends", True)
 
         static_headers = self.template_data.get("static_headers", [])
         truck_assign_headers = self.template_data.get("truck_assign_headers", [])
@@ -1349,74 +1350,77 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             if f_date == db_date_key:
                                 board_date_str, existing_wos = f_date, f_wos
 
-                # Truck Assign Headers
-                for header in truck_assign_headers:
-                    name = header.get("name")
-                    start_time = header.get("start_time")
-                    duration = header.get("duration")
-                    priority = header.get("priority")
-                    h_tech = header.get("tech_name")
+                # Truck Assign Headers (Internal Vehicle Work Orders)
+                if skip_vehicle_on_weekends and current_date.weekday() >= 5:
+                    print(f"⏭️ Skipping internal vehicle work orders (truck_assign_headers) for weekend date {date_str} ({current_date.strftime('%A')}).")
+                else:
+                    for header in truck_assign_headers:
+                        name = header.get("name")
+                        start_time = header.get("start_time")
+                        duration = header.get("duration")
+                        priority = header.get("priority")
+                        h_tech = header.get("tech_name")
 
-                    # Check if the header already exists on the board for the target date
-                    if not dry_run:
-                        canon_target = self.canonical_str(name)
-                        try:
-                            t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                            time_key = t_dt.strftime("%I:%M %p")
-                            if time_key.startswith("0"): time_key = time_key[1:]
-                        except Exception:
-                            time_key = ""
-                        key = f"{canon_target}|{time_key}" if time_key else canon_target
-                        
-                        canon_h_tech = self.canonical_str(h_tech or '')
-                        
-                        processed_key = (canon_h_tech, key)
-                        template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                        target_count_idx = template_processed_counts[processed_key]
-                        
-                        # Check locally created WOs first
-                        if (db_date_key, canon_h_tech, canon_target, target_count_idx) in locally_created_wos or \
-                           (not canon_h_tech and (db_date_key, "", canon_target, target_count_idx) in locally_created_wos):
-                            print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was created in this session. Skipping creation.")
-                            continue
+                        # Check if the header already exists on the board for the target date
+                        if not dry_run:
+                            canon_target = self.canonical_str(name)
+                            try:
+                                t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
+                                time_key = t_dt.strftime("%I:%M %p")
+                                if time_key.startswith("0"): time_key = time_key[1:]
+                            except Exception:
+                                time_key = ""
+                            key = f"{canon_target}|{time_key}" if time_key else canon_target
+                            
+                            canon_h_tech = self.canonical_str(h_tech or '')
+                            
+                            processed_key = (canon_h_tech, key)
+                            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+                            target_count_idx = template_processed_counts[processed_key]
+                            
+                            # Check locally created WOs first
+                            if (db_date_key, canon_h_tech, canon_target, target_count_idx) in locally_created_wos or \
+                               (not canon_h_tech and (db_date_key, "", canon_target, target_count_idx) in locally_created_wos):
+                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was created in this session. Skipping creation.")
+                                continue
 
-                        board_count = 0
-                        for canon_tech_key, wo_list in existing_wos.items():
-                            tech_match = (
-                                not canon_h_tech or not canon_tech_key or
-                                canon_tech_key == canon_h_tech or
-                                canon_h_tech in canon_tech_key or
-                                canon_tech_key in canon_h_tech
+                            board_count = 0
+                            for canon_tech_key, wo_list in existing_wos.items():
+                                tech_match = (
+                                    not canon_h_tech or not canon_tech_key or
+                                    canon_tech_key == canon_h_tech or
+                                    canon_h_tech in canon_tech_key or
+                                    canon_tech_key in canon_h_tech
+                                )
+                                if tech_match:
+                                    for wo in wo_list:
+                                        if self.check_item_match(wo, canon_target, time_key) or (wo.get("is_appointment") and wo.get("time_key") == time_key):
+                                            board_count += 1
+                             
+                            if board_count >= target_count_idx:
+                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Skipping creation.")
+                                continue
+
+                        if dry_run:
+                            print(f"  [Dry-Run] Truck Assign Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {task}")
+                        else:
+                            res = await self.fill_and_save_work_order(
+                                customer_name=name,
+                                task=task,
+                                lead_source=lead_source,
+                                priority=priority,
+                                target_date=date_str,
+                                start_time=start_time,
+                                duration=duration,
+                                tech_name=h_tech,
+                                immediate_action=immediate_action
                             )
-                            if tech_match:
-                                for wo in wo_list:
-                                    if self.check_item_match(wo, canon_target, time_key) or (wo.get("is_appointment") and wo.get("time_key") == time_key):
-                                        board_count += 1
-                         
-                        if board_count >= target_count_idx:
-                            print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Skipping creation.")
-                            continue
-
-                    if dry_run:
-                        print(f"  [Dry-Run] Truck Assign Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {task}")
-                    else:
-                        res = await self.fill_and_save_work_order(
-                            customer_name=name,
-                            task=task,
-                            lead_source=lead_source,
-                            priority=priority,
-                            target_date=date_str,
-                            start_time=start_time,
-                            duration=duration,
-                            tech_name=h_tech,
-                            immediate_action=immediate_action
-                        )
-                        if res:
-                            locally_created_wos.add((db_date_key, canon_h_tech, canon_target, target_count_idx))
-                            # Refresh board data after save
-                            f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                            if f_date == db_date_key:
-                                board_date_str, existing_wos = f_date, f_wos
+                            if res:
+                                locally_created_wos.add((db_date_key, canon_h_tech, canon_target, target_count_idx))
+                                # Refresh board data after save
+                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                                if f_date == db_date_key:
+                                    board_date_str, existing_wos = f_date, f_wos
 
                 # Tech Jobs (e.g. SHOP, internal meetings)
                 for job in tech_jobs:

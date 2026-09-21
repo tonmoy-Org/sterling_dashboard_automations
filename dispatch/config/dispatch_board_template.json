@@ -2,7 +2,8 @@
   "general_settings": {
     "task": "8 - Internal",
     "lead_source": "Sterling Septic -FE",
-    "immediate_action": "Create Work Order"
+    "immediate_action": "Create Work Order",
+    "skip_vehicle_work_orders_on_weekends": true
   },
   "active_techs": [
     {
