@@ -66,7 +66,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if api_url:
             try:
                 import urllib.request
-                endpoint = f"{api_url}/automation/dispatch-config/" if not api_url.endswith('/api') else f"{api_url}/automation/dispatch-config/"
+                endpoint = f"{api_url}/automation/dispatch-config/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-config/"
                 req = urllib.request.Request(endpoint, headers={"User-Agent": "SterlingAutomations/1.0"})
                 with urllib.request.urlopen(req, timeout=5) as response:
                     if response.status == 200:
