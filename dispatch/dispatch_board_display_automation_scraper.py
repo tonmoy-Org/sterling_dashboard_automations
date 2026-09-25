@@ -19,23 +19,10 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-# Ensure local dispatch directory and Backend directory are on sys.path
+# Ensure local dispatch directory is on sys.path
 _dispatch_dir = os.path.dirname(os.path.abspath(__file__))
 if _dispatch_dir not in sys.path:
     sys.path.insert(0, _dispatch_dir)
-
-_backend_dir = os.path.dirname(_dispatch_dir)
-_backend_path = os.path.join(_backend_dir, "Backend")
-if os.path.exists(_backend_path) and _backend_path not in sys.path:
-    sys.path.insert(0, _backend_path)
-
-try:
-    import django
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
-    django.setup()
-    HAS_DJANGO = True
-except Exception:
-    HAS_DJANGO = False
 
 try:
     from base_scraper import BaseScraper
@@ -66,11 +53,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         self.template_data = self._load_template()
 
     def _load_history(self) -> Dict:
-        """Load persistent work order creation history from Dashboard API, Django Database, or JSON file."""
+        """Load persistent work order creation history from Dashboard API or local JSON backup file."""
         history = {}
 
-        # 1. Try fetching from Dashboard API (BACKEND_API_URL)
-        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        # 1. Try fetching from Dashboard API (BACKEND_API_URL or fallback http://127.0.0.1:8000/api)
+        api_url = os.getenv("BACKEND_API_URL", "http://127.0.0.1:8000/api").rstrip("/")
         if api_url:
             try:
                 import urllib.request
@@ -85,27 +72,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception as e:
                 print(f"⚠️ Could not fetch tracking history from Dashboard API ({api_url}): {e}")
 
-        # 2. Try loading from Django Database if available locally
-        if HAS_DJANGO:
-            try:
-                from status.models import DispatchBoardWOTracking
-                db_records = DispatchBoardWOTracking.objects.all()
-                for rec in db_records:
-                    history[rec.tracking_key] = {
-                        "date": str(rec.target_date),
-                        "canon_tech": rec.canon_tech,
-                        "canon_target": rec.canon_target,
-                        "occurrence": rec.occurrence,
-                        "created_at": rec.created_at.isoformat() if rec.created_at else "",
-                        "status": rec.status,
-                        "name": rec.name,
-                        "tech": rec.tech_name,
-                        "time": rec.start_time
-                    }
-            except Exception as db_err:
-                print(f"⚠️ DB History fetch note: {db_err}")
-
-        # 3. Merge with local JSON file (backup redundancy)
+        # 2. Merge with local JSON file (backup redundancy)
         if os.path.exists(self.history_path):
             try:
                 with open(self.history_path, "r", encoding="utf-8") as f:
@@ -128,7 +95,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             print(f"⚠️ Failed to save creation history to JSON file: {e}")
 
     def is_wo_created(self, history: Dict, date_key: str, canon_tech: str, canon_target: str, target_count_idx: int) -> bool:
-        """Check if work order has already been created/logged in persistent history (API, DB, or memory)."""
+        """Check if work order has already been created/logged in persistent history (API memory or local JSON)."""
         key1 = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         if key1 in history:
             return True
@@ -136,16 +103,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             key2 = f"{date_key}||{canon_target}|{target_count_idx}"
             if key2 in history:
                 return True
-
-        if HAS_DJANGO:
-            try:
-                from status.models import DispatchBoardWOTracking
-                if DispatchBoardWOTracking.objects.filter(tracking_key=key1).exists():
-                    return True
-                if not canon_tech and DispatchBoardWOTracking.objects.filter(tracking_key=f"{date_key}||{canon_target}|{target_count_idx}").exists():
-                    return True
-            except Exception:
-                pass
 
         return False
 
@@ -159,7 +116,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         status: str = "created",
         details: Optional[Dict] = None
     ):
-        """Record work order creation in Dashboard API, Django DB, and JSON backup file."""
+        """Record work order creation in Dashboard API and local JSON backup file."""
         key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         det = details or {}
         rec_data = {
@@ -173,8 +130,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         }
         history[key] = rec_data
 
-        # 1. Post to Central Dashboard API if BACKEND_API_URL is configured
-        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        # 1. Post to Central Dashboard API
+        api_url = os.getenv("BACKEND_API_URL", "http://127.0.0.1:8000/api").rstrip("/")
         if api_url:
             try:
                 import urllib.request
@@ -192,32 +149,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception as api_err:
                 print(f"⚠️ Failed to sync tracking record to Dashboard API: {api_err}")
 
-        # 2. Save to Django Database if available locally
-        if HAS_DJANGO:
-            try:
-                from status.models import DispatchBoardWOTracking
-                try:
-                    parsed_date = datetime.strptime(date_key, "%Y-%m-%d").date()
-                except Exception:
-                    parsed_date = datetime.now().date()
-
-                DispatchBoardWOTracking.objects.update_or_create(
-                    tracking_key=key,
-                    defaults={
-                        "target_date": parsed_date,
-                        "canon_tech": canon_tech or "",
-                        "canon_target": canon_target,
-                        "occurrence": target_count_idx,
-                        "status": status,
-                        "name": det.get("name", ""),
-                        "tech_name": det.get("tech", ""),
-                        "start_time": det.get("time", ""),
-                    }
-                )
-            except Exception as db_err:
-                print(f"⚠️ Failed to save tracking record to DB: {db_err}")
-
-        # 3. Save to Local JSON Backup File
+        # 2. Save to Local JSON Backup File
         self._save_history(history)
 
     def _load_template(self) -> Dict:
@@ -1809,9 +1741,19 @@ if __name__ == "__main__":
     if _dispatch_dir not in sys.path:
         sys.path.insert(0, _dispatch_dir)
 
-    _backend_dir = os.path.dirname(_dispatch_dir)
-    _backend_path = os.path.join(_backend_dir, "Backend")
-    if os.path.exists(_backend_path) and _backend_path not in sys.path:
+    _curr_dir = _dispatch_dir
+    _backend_path = None
+    while _curr_dir:
+        _candidate = os.path.join(_curr_dir, "Backend")
+        if os.path.exists(_candidate) and os.path.isdir(_candidate):
+            _backend_path = _candidate
+            break
+        _parent = os.path.dirname(_curr_dir)
+        if _parent == _curr_dir:
+            break
+        _curr_dir = _parent
+
+    if _backend_path and _backend_path not in sys.path:
         sys.path.insert(0, _backend_path)
 
     try:
