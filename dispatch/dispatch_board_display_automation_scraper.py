@@ -58,7 +58,129 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             "config",
             "dispatch_board_template.json"
         )
+        self.history_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "config",
+            "dispatch_board_created_history.json"
+        )
         self.template_data = self._load_template()
+
+    def _load_history(self) -> Dict:
+        """Load persistent work order creation history from Django Database (DispatchBoardWOTracking) and JSON file."""
+        history = {}
+        # 1. Try loading from Django Database if available
+        if HAS_DJANGO:
+            try:
+                from status.models import DispatchBoardWOTracking
+                db_records = DispatchBoardWOTracking.objects.all()
+                for rec in db_records:
+                    history[rec.tracking_key] = {
+                        "date": str(rec.target_date),
+                        "canon_tech": rec.canon_tech,
+                        "canon_target": rec.canon_target,
+                        "occurrence": rec.occurrence,
+                        "created_at": rec.created_at.isoformat() if rec.created_at else "",
+                        "status": rec.status,
+                        "name": rec.name,
+                        "tech": rec.tech_name,
+                        "time": rec.start_time
+                    }
+            except Exception as db_err:
+                print(f"⚠️ DB History fetch note: {db_err}")
+
+        # 2. Merge with local JSON file (backup redundancy)
+        if os.path.exists(self.history_path):
+            try:
+                with open(self.history_path, "r", encoding="utf-8") as f:
+                    file_data = json.load(f)
+                    if isinstance(file_data, dict):
+                        for k, v in file_data.items():
+                            if k not in history:
+                                history[k] = v
+            except Exception as e:
+                print(f"⚠️ Failed to load creation history JSON: {e}")
+        return history
+
+    def _save_history(self, history: Dict):
+        """Save persistent work order creation history to JSON backup file."""
+        try:
+            os.makedirs(os.path.dirname(self.history_path), exist_ok=True)
+            with open(self.history_path, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"⚠️ Failed to save creation history to JSON file: {e}")
+
+    def is_wo_created(self, history: Dict, date_key: str, canon_tech: str, canon_target: str, target_count_idx: int) -> bool:
+        """Check if work order has already been created/logged in persistent history (DB or memory)."""
+        key1 = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
+        if key1 in history:
+            return True
+        if not canon_tech:
+            key2 = f"{date_key}||{canon_target}|{target_count_idx}"
+            if key2 in history:
+                return True
+
+        if HAS_DJANGO:
+            try:
+                from status.models import DispatchBoardWOTracking
+                if DispatchBoardWOTracking.objects.filter(tracking_key=key1).exists():
+                    return True
+                if not canon_tech and DispatchBoardWOTracking.objects.filter(tracking_key=f"{date_key}||{canon_target}|{target_count_idx}").exists():
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def record_wo_created(
+        self,
+        history: Dict,
+        date_key: str,
+        canon_tech: str,
+        canon_target: str,
+        target_count_idx: int,
+        status: str = "created",
+        details: Optional[Dict] = None
+    ):
+        """Record work order creation in Django DB (DispatchBoardWOTracking) and JSON backup file."""
+        key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
+        det = details or {}
+        rec_data = {
+            "date": date_key,
+            "canon_tech": canon_tech,
+            "canon_target": canon_target,
+            "occurrence": target_count_idx,
+            "created_at": datetime.now().isoformat(),
+            "status": status,
+            **det
+        }
+        history[key] = rec_data
+
+        if HAS_DJANGO:
+            try:
+                from status.models import DispatchBoardWOTracking
+                try:
+                    parsed_date = datetime.strptime(date_key, "%Y-%m-%d").date()
+                except Exception:
+                    parsed_date = datetime.now().date()
+
+                DispatchBoardWOTracking.objects.update_or_create(
+                    tracking_key=key,
+                    defaults={
+                        "target_date": parsed_date,
+                        "canon_tech": canon_tech or "",
+                        "canon_target": canon_target,
+                        "occurrence": target_count_idx,
+                        "status": status,
+                        "name": det.get("name", ""),
+                        "tech_name": det.get("tech", ""),
+                        "start_time": det.get("time", ""),
+                    }
+                )
+            except Exception as db_err:
+                print(f"⚠️ Failed to save tracking record to DB: {db_err}")
+
+        self._save_history(history)
 
     def _load_template(self) -> Dict:
         """Load visual work order configuration template from API or local JSON file."""
@@ -1263,7 +1385,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if fetched_date == initial_target_key:
                     board_date_str, existing_wos = fetched_date, fetched_wos
 
-        locally_created_wos = set()
+        created_history = self._load_history()
+        print(f"📚 Loaded {len(created_history)} recorded entries from persistent creation history ({self.history_path}).")
 
         try:
             for d in range(days):
@@ -1334,10 +1457,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                         target_count_idx = template_processed_counts[processed_key]
                         
-                        # Check locally created WOs first
-                        if (db_date_key, canon_h_tech, canon_target, target_count_idx) in locally_created_wos or \
-                           (not canon_h_tech and (db_date_key, "", canon_target, target_count_idx) in locally_created_wos):
-                            print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was created in this session. Skipping creation.")
+                        # Check persistent creation history first
+                        if self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
+                            print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                             continue
 
                         board_count = 0
@@ -1354,7 +1476,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                         board_count += 1
                          
                         if board_count >= target_count_idx:
-                            print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) already exists on the board for tech '{h_tech}'. Skipping creation.")
+                            print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) already exists on the board for tech '{h_tech}'. Recording in persistent history & skipping creation.")
+                            self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                             continue
 
                     if dry_run:
@@ -1372,7 +1495,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             immediate_action=immediate_action
                         )
                         if res:
-                            locally_created_wos.add((db_date_key, canon_h_tech, canon_target, target_count_idx))
+                            self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
                             # Refresh board data after save
                             f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                             if f_date == db_date_key:
@@ -1406,10 +1529,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                             target_count_idx = template_processed_counts[processed_key]
                             
-                            # Check locally created WOs first
-                            if (db_date_key, canon_h_tech, canon_target, target_count_idx) in locally_created_wos or \
-                               (not canon_h_tech and (db_date_key, "", canon_target, target_count_idx) in locally_created_wos):
-                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was created in this session. Skipping creation.")
+                            # Check persistent creation history first
+                            if self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
+                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                                 continue
 
                             board_count = 0
@@ -1426,7 +1548,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                             board_count += 1
                              
                             if board_count >= target_count_idx:
-                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Skipping creation.")
+                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Recording in persistent history & skipping creation.")
+                                self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                 continue
 
                         if dry_run:
@@ -1444,7 +1567,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 immediate_action=immediate_action
                             )
                             if res:
-                                locally_created_wos.add((db_date_key, canon_h_tech, canon_target, target_count_idx))
+                                self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
                                 # Refresh board data after save
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                                 if f_date == db_date_key:
@@ -1483,9 +1606,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                         target_count_idx = template_processed_counts[processed_key]
 
-                        if (db_date_key, canon_t_tech, canon_target, target_count_idx) in locally_created_wos or \
-                           (not canon_t_tech and (db_date_key, "", canon_target, target_count_idx) in locally_created_wos):
-                            print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was created in this session. Skipping creation.")
+                        if self.is_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx):
+                            print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                             continue
 
                         board_count = 0
@@ -1502,7 +1624,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                         board_count += 1
 
                         if board_count >= target_count_idx:
-                            print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Skipping creation.")
+                            print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Recording in persistent history & skipping creation.")
+                            self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": t_tech, "time": time_key})
                             continue
 
                     if dry_run:
@@ -1521,7 +1644,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             immediate_action=immediate_action
                         )
                         if res:
-                            locally_created_wos.add((db_date_key, canon_t_tech, canon_target, target_count_idx))
+                            self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": t_tech, "time": time_key})
                             # Refresh board data after save
                             f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                             if f_date == db_date_key:
@@ -1547,9 +1670,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                         target_count_idx = template_processed_counts[processed_key]
 
-                        if (db_date_key, canon_t_assignment, canon_target, target_count_idx) in locally_created_wos or \
-                           (not canon_t_assignment and (db_date_key, "", canon_target, target_count_idx) in locally_created_wos):
-                            print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) was created in this session. Skipping creation.")
+                        if self.is_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx):
+                            print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) was previously created and recorded in history. Skipping 2nd creation.")
                             continue
 
                         board_count = 0
@@ -1572,7 +1694,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     break
                                         
                         if tech_off_for_day or board_count >= target_count_idx:
-                            print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) skipped (tech has OFF/Appointment on board).")
+                            print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) skipped (tech has OFF/Appointment on board). Recording in persistent history.")
+                            self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="existing_on_board", details={"name": t_name, "tech": t_assignment_name})
                             continue
 
                     if dry_run:
@@ -1592,7 +1715,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             task_type=task
                         )
                         if res:
-                            locally_created_wos.add((db_date_key, canon_t_assignment, canon_target, target_count_idx))
+                            self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name})
                             # Refresh board data after save
                             f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                             if f_date == db_date_key:
