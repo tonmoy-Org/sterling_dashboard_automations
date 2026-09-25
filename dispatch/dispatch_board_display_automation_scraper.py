@@ -61,7 +61,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         self.template_data = self._load_template()
 
     def _load_template(self) -> Dict:
-        """Load visual work order configuration template."""
+        """Load visual work order configuration template from API or local JSON file."""
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if api_url:
+            try:
+                import urllib.request
+                endpoint = f"{api_url}/automation/dispatch-config/" if not api_url.endswith('/api') else f"{api_url}/automation/dispatch-config/"
+                req = urllib.request.Request(endpoint, headers={"User-Agent": "SterlingAutomations/1.0"})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    if response.status == 200:
+                        remote_data = json.loads(response.read().decode('utf-8'))
+                        print(f"✅ Loaded live configuration from Dashboard API: {endpoint}")
+                        if os.path.exists(self.template_path):
+                            with open(self.template_path, "r", encoding="utf-8") as f:
+                                local_data = json.load(f)
+                                local_data.update(remote_data)
+                                return local_data
+                        return remote_data
+            except Exception as e:
+                print(f"⚠️ Could not fetch live template from API ({api_url}): {e}. Falling back to local template file.")
+
         if os.path.exists(self.template_path):
             with open(self.template_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -1055,8 +1074,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         immediate_action = settings.get("immediate_action", "Create Work Order")
         skip_vehicle_on_weekends = settings.get("skip_vehicle_work_orders_on_weekends", True)
 
-        static_headers = self.template_data.get("static_headers", [])
-        truck_assign_headers = self.template_data.get("truck_assign_headers", [])
+        static_headers = [
+            h for h in self.template_data.get("static_headers", [])
+            if h.get("active", True)
+        ]
+        truck_assign_headers = [
+            h for h in self.template_data.get("truck_assign_headers", [])
+            if h.get("active", True)
+        ]
         tech_defaults = self.template_data.get("technician_display_defaults", {})
         tech_jobs = self.template_data.get("tech_jobs", [])
 
@@ -1073,8 +1098,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 tech_metadata[name] = entry
 
         if not active_techs:
-            active_techs = [entry.get("name", "") for entry in template_techs if entry.get("name")]
+            active_techs = [entry.get("name", "") for entry in template_techs if entry.get("name") and entry.get("active", True)]
+            skipped = [entry.get("name", "") for entry in template_techs if entry.get("name") and not entry.get("active", True)]
             print(f"📋 Loaded {len(active_techs)} active technicians from template config.")
+            if skipped:
+                print(f"⏭️ Skipping {len(skipped)} inactive tech(s) from template: {', '.join(skipped)}")
 
         if start_date_str:
             parsed_dt = None
@@ -1424,11 +1452,20 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 # Tech Jobs (e.g. SHOP, internal meetings)
                 for job in tech_jobs:
+                    if not job.get("active", True):
+                        continue
+                    t_tech = job.get("tech_name")
+                    if t_tech and active_techs:
+                        canon_job_tech = self.canonical_str(t_tech)
+                        active_canon_techs = [self.canonical_str(t) for t in active_techs]
+                        if canon_job_tech not in active_canon_techs:
+                            print(f"⏭️ Skipping tech job '{job.get('name')}' because assigned technician '{t_tech}' is inactive/OFF.")
+                            continue
+
                     name = job.get("name")
                     start_time = job.get("start_time")
                     duration = job.get("duration")
                     priority = job.get("priority")
-                    t_tech = job.get("tech_name")
 
                     if not dry_run:
                         canon_target = self.canonical_str(name)

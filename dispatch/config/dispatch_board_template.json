@@ -1,13 +1,14 @@
 {
+  "skip_vehicle_work_orders_on_weekends": true,
   "general_settings": {
     "task": "8 - Internal",
     "lead_source": "Sterling Septic -FE",
-    "immediate_action": "Create Work Order",
-    "skip_vehicle_work_orders_on_weekends": true
+    "immediate_action": "Create Work Order"
   },
   "active_techs": [
     {
       "name": "MACKIE",
+      "active": true,
       "department": "pump",
       "priority": "[7] P4R (STATUS)",
       "start_time": "04:45 AM",
@@ -16,6 +17,7 @@
     },
     {
       "name": "RUSSELL",
+      "active": true,
       "department": "pump",
       "priority": "[7] P4R (STATUS)",
       "start_time": "04:45 AM",
@@ -24,6 +26,7 @@
     },
     {
       "name": "SKYLER",
+      "active": true,
       "department": "pump",
       "priority": "[7] P4R (STATUS)",
       "start_time": "04:45 AM",
@@ -32,6 +35,7 @@
     },
     {
       "name": "DANNY",
+      "active": true,
       "department": "service",
       "priority": "[7] ROUTINE (S) (STATUS)",
       "start_time": "04:45 AM",
@@ -40,6 +44,7 @@
     },
     {
       "name": "AHKEEM",
+      "active": true,
       "department": "service",
       "priority": "[7] ROUTINE (S) (STATUS)",
       "start_time": "04:45 AM",
@@ -48,6 +53,7 @@
     },
     {
       "name": "CRIS",
+      "active": true,
       "department": "service",
       "priority": "[7] ROUTINE (S) (STATUS)",
       "start_time": "04:45 AM",
@@ -60,7 +66,8 @@
       "priority": "[5] LABORER (Asset Assignment)",
       "start_time": "04:45 AM",
       "duration": "1:15",
-      "tech_name": "p 𝐆𝐞𝐧𝐞"
+      "tech_name": "p 𝐆𝐞𝐧𝐞",
+      "active": true
     },
     {
       "name": " ASHER",
@@ -68,7 +75,8 @@
       "priority": "[5] LABORER (Asset Assignment)",
       "start_time": "04:45 AM",
       "duration": "1:15",
-      "tech_name": "p2"
+      "tech_name": "p2",
+      "active": true
     },
     {
       "name": " CAMERON",
@@ -76,12 +84,14 @@
       "priority": "[7] ROUTINE (S) (STATUS)",
       "start_time": "04:45 AM",
       "duration": "1:15",
-      "tech_name": "t33　𝐂𝐚𝐦𝐞ron"
+      "tech_name": "t33　𝐂𝐚𝐦𝐞ron",
+      "active": true
     }
   ],
   "truck_assign_headers": [
     {
       "name": "🚛 | 123",
+      "active": true,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -90,6 +100,7 @@
     },
     {
       "name": "🚛 | 122",
+      "active": true,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -98,6 +109,7 @@
     },
     {
       "name": "🚛 | 124",
+      "active": true,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -106,6 +118,7 @@
     },
     {
       "name": "🛻 | 03",
+      "active": true,
       "department": "service",
       "priority": "[5] SER TR (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -114,6 +127,7 @@
     },
     {
       "name": "🛻 | 02",
+      "active": true,
       "department": "service",
       "priority": "[5] SER TR (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -122,6 +136,7 @@
     },
     {
       "name": "🛻 | 01",
+      "active": true,
       "department": "service",
       "priority": "[5] SER TR (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -135,378 +150,432 @@
       "start_time": "5:00 AM",
       "duration": "1:30",
       "priority": "[1] ROUTINE (P)",
-      "tech_name": "s3"
+      "tech_name": "s3",
+      "active": true
     },
     {
       "name": "SERVICE TRUCKS 🛻",
       "start_time": "6:45 AM",
       "duration": "1:30",
       "priority": "[2] ROUTINE (S)",
-      "tech_name": "s3"
+      "tech_name": "s3",
+      "active": true
     },
     {
       "name": "👥 | LABORERS",
       "start_time": "8:30 AM",
       "duration": "1:30",
       "priority": "[2] CORRECTIONS & UPGRADE (S)",
-      "tech_name": "s3"
+      "tech_name": "s3",
+      "active": true
     },
     {
       "name": "▭TRAILERS",
       "start_time": "10:15 AM",
       "duration": "1:30",
       "priority": "[2] EXCAVATOR (S)",
-      "tech_name": "s3"
+      "tech_name": "s3",
+      "active": true
     },
     {
       "name": "EXCAVATORS 🏗️",
       "start_time": "12:00 PM",
       "duration": "1:30",
       "priority": "[2] 2-MAN (S)",
-      "tech_name": "s3"
+      "tech_name": "s3",
+      "active": true
     },
     {
       "name": "⚠️ OUT OF SERVICE",
       "start_time": "1:45 PM",
       "duration": "1:30",
       "priority": "[4] DO NOT DISPATCH (Tracking)",
-      "tech_name": "s3"
+      "tech_name": "s3",
+      "active": true
     },
     {
       "name": "🔧 SERVICE NEEDED",
       "start_time": "3:30 PM",
       "duration": "1:30",
       "priority": "[7] 7.9",
-      "tech_name": "s3"
+      "tech_name": "s3",
+      "active": true
     },
     {
       "name": "👨‍🔧 | TECHNICIANS",
       "start_time": "5:15 PM",
       "duration": "1:30",
       "priority": "[7] 7.11 Teams",
-      "tech_name": "s3"
+      "tech_name": "s3",
+      "active": true
     },
     {
       "name": ".",
       "start_time": "1:30 AM",
       "duration": "20:00",
       "priority": "[7] BLANK SPACE",
-      "tech_name": "s4"
+      "tech_name": "s4",
+      "active": true
     },
     {
       "name": ".",
       "start_time": "1:30 AM",
       "duration": "22:00",
       "priority": "[7] BLANK SPACE",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": ".",
       "start_time": "12:00 AM",
       "duration": "24:00",
       "priority": "[7] SHOP / OPS (STATUS)",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "❌ ATTENDANCE",
       "start_time": "05:00 AM",
       "duration": "1:45",
       "priority": "[7] 7.12 SERVICE NEEDED",
-      "tech_name": "s6"
+      "tech_name": "s6",
+      "active": true
     },
     {
       "name": "❌ ATTENDANCE",
       "start_time": "05:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.12 SERVICE NEEDED",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "❌ ATTENDANCE",
       "start_time": "05:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.12 SERVICE NEEDED",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "❌ ATTENDANCE",
       "start_time": "05:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.12 SERVICE NEEDED",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "❌ ATTENDANCE",
       "start_time": "05:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.12 SERVICE NEEDED",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "❌ ATTENDANCE",
       "start_time": "05:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.12 SERVICE NEEDED",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🔻| DUMP",
       "start_time": "07:00 AM",
       "duration": "1:45",
       "priority": "[7] 7.4",
-      "tech_name": "s6"
+      "tech_name": "s6",
+      "active": true
     },
     {
       "name": "🔻| TACOMA DUMP",
       "start_time": "07:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.3 TACOMA DUMP",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🔻| TACOMA DUMP",
       "start_time": "07:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.3 TACOMA DUMP",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🔻| SHOP DUMP",
       "start_time": "07:15 AM",
       "duration": "1:30",
       "priority": "[7] 7.2",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🔻| SHOP DUMP",
       "start_time": "07:15 AM",
       "duration": "1:30",
       "priority": "[7] 7.2",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🔻| METRO DUMP",
       "start_time": "07:30 AM",
       "duration": "1:30",
       "priority": "[7] 7.1",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🔻| METRO DUMP",
       "start_time": "07:30 AM",
       "duration": "1:30",
       "priority": "[7] 7.1",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "⏫ PUMP H/T",
       "start_time": "09:00 AM",
       "duration": "1:45",
       "priority": "[7] 7.6 PUMP H/T",
-      "tech_name": "s6"
+      "tech_name": "s6",
+      "active": true
     },
     {
       "name": "⏫ PUMP H/T",
       "start_time": "09:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.5",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "⏫ PUMP H/T",
       "start_time": "09:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.5",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "⏫ PUMP H/T",
       "start_time": "09:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.5",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🍽️ BREAK",
       "start_time": "11:00 AM",
       "duration": "1:45",
       "priority": "[3] ---- 𝐃𝐎𝐍'𝐓 𝐏𝐀𝐒𝐒 ---------------------------",
-      "tech_name": "s6"
+      "tech_name": "s6",
+      "active": true
     },
     {
       "name": "🍽️ BREAK",
       "start_time": "11:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.7",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🍽️ BREAK",
       "start_time": "11:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.7",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🍽️ BREAK",
       "start_time": "11:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.7",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🍽️ BREAK",
       "start_time": "11:00 AM",
       "duration": "1:30",
       "priority": "[7] 7.7",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🏢 INTERNAL OPS.",
       "start_time": "01:00 PM",
       "duration": "1:45",
       "priority": "[4] SHOP / OPS (Tracking)",
-      "tech_name": "s6"
+      "tech_name": "s6",
+      "active": true
     },
     {
       "name": "🏡 SHOP",
       "start_time": "01:00 PM",
       "duration": "1:30",
       "priority": "[4] SHOP / OPS (Tracking)",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "✅ POST-TRIP",
       "start_time": "01:15 PM",
       "duration": "1:30",
       "priority": "[4] SHOP / OPS (Tracking)",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🔍 PRETRIP",
       "start_time": "01:30 PM",
       "duration": "1:30",
       "priority": "[4] SHOP / OPS (Tracking)",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🏢 INTERNAL OPS. 2",
       "start_time": "03:00 PM",
       "duration": "1:45",
       "priority": "[4] SHOP / OPS (Tracking)",
-      "tech_name": "s6"
+      "tech_name": "s6",
+      "active": true
     },
     {
       "name": "🔩 PARTS",
       "start_time": "03:00 PM",
       "duration": "1:30",
       "priority": "[4] SHOP / OPS (Tracking)",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🛠️ REPAIR/MAINT",
       "start_time": "03:15 PM",
       "duration": "1:30",
       "priority": "[4] SHOP / OPS (Tracking)",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "🧩 MISC",
       "start_time": "03:30 PM",
       "duration": "1:30",
       "priority": "[4] SHOP / OPS (Tracking)",
-      "tech_name": "s7"
+      "tech_name": "s7",
+      "active": true
     },
     {
       "name": "EXCUSED",
       "start_time": "05:00 AM",
       "duration": "2:30",
       "priority": "[8] EXCUSED",
-      "tech_name": "T9"
+      "tech_name": "T9",
+      "active": true
     },
     {
       "name": "PTO ( OFF EARLY )",
       "start_time": "05:00 AM",
       "duration": "2:30",
       "priority": "[8] EXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "PTO ( LATE )",
       "start_time": "05:00 AM",
       "duration": "2:30",
       "priority": "[8] EXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "SICK (LATE)",
       "start_time": "05:00 AM",
       "duration": "2:30",
       "priority": "[8] EXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "SICK ( LEAVE EARLY )",
       "start_time": "05:00 AM",
       "duration": "2:30",
       "priority": "[8] EXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "SHORT NOTICE",
       "start_time": "05:00 AM",
       "duration": "2:30",
       "priority": "[8] EXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "ABSENT",
       "start_time": "05:00 AM",
       "duration": "2:30",
       "priority": "[8] EXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "UNEXCUSED",
       "start_time": "08:00 AM",
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
-      "tech_name": "T9"
+      "tech_name": "T9",
+      "active": true
     },
     {
       "name": "NO CALL / NO SHOW",
       "start_time": "08:00 AM",
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "OFF EARLY",
       "start_time": "08:00 AM",
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "IN LATE",
       "start_time": "08:00 AM",
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "ABSENT",
       "start_time": "08:00 AM",
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     },
     {
       "name": "SHORT NOTICE",
       "start_time": "08:00 AM",
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
-      "tech_name": "T91"
+      "tech_name": "T91",
+      "active": true
     }
   ],
   "tech_jobs": [
@@ -516,7 +585,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "b 𝐌𝐚𝐜𝐤𝐢𝐞"
+      "tech_name": "b 𝐌𝐚𝐜𝐤𝐢𝐞",
+      "active": true
     },
     {
       "name": "🏡 AM SHOP",
@@ -524,7 +594,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "d 𝐑𝐮𝐬𝐬𝐞𝐥l"
+      "tech_name": "d 𝐑𝐮𝐬𝐬𝐞𝐥l",
+      "active": true
     },
     {
       "name": "🏡 AM SHOP",
@@ -532,7 +603,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "f 𝐒𝐤𝐲𝐥𝐞𝐫"
+      "tech_name": "f 𝐒𝐤𝐲𝐥𝐞𝐫",
+      "active": true
     },
     {
       "name": "🏡 AM SHOP",
@@ -540,7 +612,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "h 𝐃𝐚𝐧𝐧𝐲"
+      "tech_name": "h 𝐃𝐚𝐧𝐧𝐲",
+      "active": true
     },
     {
       "name": "🏡 AM SHOP",
@@ -548,7 +621,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "j 𝐀𝐡𝐤𝐞𝐞𝐦"
+      "tech_name": "j 𝐀𝐡𝐤𝐞𝐞𝐦",
+      "active": true
     },
     {
       "name": "🏡 AM SHOP",
@@ -556,7 +630,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "l 𝐂𝐫𝐢𝐬"
+      "tech_name": "l 𝐂𝐫𝐢𝐬",
+      "active": true
     },
     {
       "name": "🏡 AM SHOP",
@@ -564,7 +639,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "n 𝐁𝐫𝐚𝐧𝐝𝐨n"
+      "tech_name": "p 𝐆𝐞𝐧𝐞",
+      "active": true
     },
     {
       "name": "🏡 AM SHOP",
@@ -572,7 +648,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "p 𝐆𝐞𝐧𝐞"
+      "tech_name": "p2",
+      "active": true
     },
     {
       "name": "🏡 AM SHOP",
@@ -580,15 +657,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
       "duration": "0:30",
-      "tech_name": "p2"
-    },
-    {
-      "name": "🏡 AM SHOP",
-      "department": "excavation",
-      "priority": "[4] SHOP / OPS (Tracking)",
-      "start_time": "07:30 AM",
-      "duration": "0:30",
-      "tech_name": "t33　𝐂𝐚𝐦𝐞ron"
+      "tech_name": "t33　𝐂𝐚𝐦𝐞ron",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -596,7 +666,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "b 𝐌𝐚𝐜𝐤𝐢𝐞"
+      "tech_name": "b 𝐌𝐚𝐜𝐤𝐢𝐞",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -604,7 +675,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "d 𝐑𝐮𝐬𝐬𝐞𝐥l"
+      "tech_name": "d 𝐑𝐮𝐬𝐬𝐞𝐥l",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -612,7 +684,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "f 𝐒𝐤𝐲𝐥𝐞𝐫"
+      "tech_name": "f 𝐒𝐤𝐲𝐥𝐞𝐫",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -620,7 +693,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "h 𝐃𝐚𝐧𝐧𝐲"
+      "tech_name": "h 𝐃𝐚𝐧𝐧𝐲",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -628,7 +702,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "j 𝐀𝐡𝐤𝐞𝐞𝐦"
+      "tech_name": "j 𝐀𝐡𝐤𝐞𝐞𝐦",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -636,7 +711,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "l 𝐂𝐫𝐢𝐬"
+      "tech_name": "l 𝐂𝐫𝐢𝐬",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -644,7 +720,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "n 𝐁𝐫𝐚𝐧𝐝𝐨n"
+      "tech_name": "p 𝐆𝐞𝐧𝐞",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -652,7 +729,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "p 𝐆𝐞𝐧𝐞"
+      "tech_name": "p2",
+      "active": true
     },
     {
       "name": "🏡 PM SHOP",
@@ -660,15 +738,8 @@
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 PM",
       "duration": "0:30",
-      "tech_name": "p2"
-    },
-    {
-      "name": "🏡 PM SHOP",
-      "department": "excavation",
-      "priority": "[4] SHOP / OPS (Tracking)",
-      "start_time": "07:30 PM",
-      "duration": "0:30",
-      "tech_name": "t33　𝐂𝐚𝐦𝐞ron"
+      "tech_name": "t33　𝐂𝐚𝐦𝐞ron",
+      "active": true
     }
   ]
 }
