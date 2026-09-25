@@ -66,9 +66,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         self.template_data = self._load_template()
 
     def _load_history(self) -> Dict:
-        """Load persistent work order creation history from Django Database (DispatchBoardWOTracking) and JSON file."""
+        """Load persistent work order creation history from Dashboard API, Django Database, or JSON file."""
         history = {}
-        # 1. Try loading from Django Database if available
+
+        # 1. Try fetching from Dashboard API (BACKEND_API_URL)
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if api_url:
+            try:
+                import urllib.request
+                endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
+                req = urllib.request.Request(endpoint, headers={"User-Agent": "SterlingAutomations/1.0"})
+                with urllib.request.urlopen(req, timeout=6) as response:
+                    if response.status == 200:
+                        remote_history = json.loads(response.read().decode('utf-8'))
+                        if isinstance(remote_history, dict):
+                            history.update(remote_history)
+                            print(f"✅ Loaded {len(remote_history)} central tracking entries from Dashboard API ({endpoint}).")
+            except Exception as e:
+                print(f"⚠️ Could not fetch tracking history from Dashboard API ({api_url}): {e}")
+
+        # 2. Try loading from Django Database if available locally
         if HAS_DJANGO:
             try:
                 from status.models import DispatchBoardWOTracking
@@ -88,7 +105,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception as db_err:
                 print(f"⚠️ DB History fetch note: {db_err}")
 
-        # 2. Merge with local JSON file (backup redundancy)
+        # 3. Merge with local JSON file (backup redundancy)
         if os.path.exists(self.history_path):
             try:
                 with open(self.history_path, "r", encoding="utf-8") as f:
@@ -111,7 +128,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             print(f"⚠️ Failed to save creation history to JSON file: {e}")
 
     def is_wo_created(self, history: Dict, date_key: str, canon_tech: str, canon_target: str, target_count_idx: int) -> bool:
-        """Check if work order has already been created/logged in persistent history (DB or memory)."""
+        """Check if work order has already been created/logged in persistent history (API, DB, or memory)."""
         key1 = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         if key1 in history:
             return True
@@ -142,7 +159,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         status: str = "created",
         details: Optional[Dict] = None
     ):
-        """Record work order creation in Django DB (DispatchBoardWOTracking) and JSON backup file."""
+        """Record work order creation in Dashboard API, Django DB, and JSON backup file."""
         key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         det = details or {}
         rec_data = {
@@ -156,6 +173,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         }
         history[key] = rec_data
 
+        # 1. Post to Central Dashboard API if BACKEND_API_URL is configured
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if api_url:
+            try:
+                import urllib.request
+                endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
+                req_data = json.dumps(rec_data).encode('utf-8')
+                req = urllib.request.Request(
+                    endpoint,
+                    data=req_data,
+                    headers={"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    if response.status in (200, 201):
+                        print(f"✅ Synced tracking record '{key}' to Central Dashboard API.")
+            except Exception as api_err:
+                print(f"⚠️ Failed to sync tracking record to Dashboard API: {api_err}")
+
+        # 2. Save to Django Database if available locally
         if HAS_DJANGO:
             try:
                 from status.models import DispatchBoardWOTracking
@@ -180,6 +217,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception as db_err:
                 print(f"⚠️ Failed to save tracking record to DB: {db_err}")
 
+        # 3. Save to Local JSON Backup File
         self._save_history(history)
 
     def _load_template(self) -> Dict:
