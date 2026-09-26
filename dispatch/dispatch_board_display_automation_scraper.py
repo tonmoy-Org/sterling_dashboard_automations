@@ -104,6 +104,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if key2 in history:
                 return True
 
+        # Check if history dict has any recorded entry matching date, canon_target, and occurrence
+        # to handle cases where a technician is removed and re-added with modified tech column formatting
+        for k, v in history.items():
+            if isinstance(v, dict):
+                if (v.get("date") == date_key or k.startswith(f"{date_key}|")) and v.get("canon_target") == canon_target and v.get("occurrence") == target_count_idx:
+                    return True
+
         return False
 
     def record_wo_created(
@@ -1188,6 +1195,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if name:
                 tech_priorities[name] = entry.get("priority")
                 tech_metadata[name] = entry
+                c_name = self.canonical_str(name)
+                tech_priorities[c_name] = entry.get("priority")
+                tech_metadata[c_name] = entry
 
         if not active_techs:
             active_techs = [entry.get("name", "") for entry in template_techs if entry.get("name") and entry.get("active", True)]
@@ -1625,11 +1635,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     t_name = tech
                     
                     # Fetch specific metadata for this tech, or fallback to defaults
-                    meta = tech_metadata.get(t_name, {})
+                    meta = tech_metadata.get(t_name) or tech_metadata.get(self.canonical_str(t_name)) or {}
                     start_time = meta.get("start_time") or tech_defaults.get("start_time")
                     duration = meta.get("duration") or tech_defaults.get("duration")
                     t_assignment_name = meta.get("tech_name", tech)
-                    priority = tech_priorities.get(t_name) or tech_defaults.get("priority")
+                    priority = tech_priorities.get(t_name) or tech_priorities.get(self.canonical_str(t_name)) or tech_defaults.get("priority")
 
                     # Check if the technician completed WO already exists on the board for the target date
                     if not dry_run:
