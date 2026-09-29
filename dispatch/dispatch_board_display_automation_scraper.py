@@ -1538,20 +1538,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             
                             # Check persistent creation history first
                             if self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
-                                # History says created — but verify it's actually on the board
-                                _hist_board_count = 0
-                                for _ck, _wl in existing_wos.items():
-                                    _tm = (not canon_h_tech or not _ck or _ck == canon_h_tech or canon_h_tech in _ck or _ck in canon_h_tech)
-                                    if _tm:
-                                        for _wo in _wl:
-                                            if not _wo.get("is_appointment"):
-                                                if _wo.get("canon_customer", "") == canon_target and (not time_key or not _wo.get("time_key") or time_key == _wo.get("time_key")):
-                                                    _hist_board_count += 1
-                                if _hist_board_count >= target_count_idx:
-                                    print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and confirmed on board. Skipping.")
-                                    continue
-                                else:
-                                    print(f"🔁 Truck assign header '{name}' in history but NOT found on board — will recreate.")
+                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
+                                continue
 
                             board_count = 0
                             for canon_tech_key, wo_list in existing_wos.items():
@@ -1646,20 +1634,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         target_count_idx = template_processed_counts[processed_key]
 
                         if self.is_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx):
-                            # History says created — but verify it's actually on the board
-                            _hist_board_count = 0
-                            for _ck, _wl in existing_wos.items():
-                                _tm = (not canon_t_tech or not _ck or _ck == canon_t_tech or canon_t_tech in _ck or _ck in canon_t_tech)
-                                if _tm:
-                                    for _wo in _wl:
-                                        if not _wo.get("is_appointment"):
-                                            if _wo.get("canon_customer", "") == canon_target and (not time_key or not _wo.get("time_key") or time_key == _wo.get("time_key")):
-                                                _hist_board_count += 1
-                            if _hist_board_count >= target_count_idx:
-                                print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and confirmed on board. Skipping.")
-                                continue
-                            else:
-                                print(f"🔁 Tech job '{name}' in history but NOT found on board — will recreate.")
+                            print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
+                            continue
 
                         board_count = 0
                         for canon_tech_key, wo_list in existing_wos.items():
