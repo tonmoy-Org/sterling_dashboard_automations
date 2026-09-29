@@ -1564,27 +1564,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 )
                                 if tech_match:
                                      for wo in wo_list:
-                                         # For non-appointment WOs: only skip if EXACT same name matches at same time
+                                         # Skip ONLY if EXACT same name exists on board at same time
                                          if not wo.get("is_appointment"):
                                              c_cust = wo.get("canon_customer", "")
                                              w_time = wo.get("time_key", "")
                                              name_match = c_cust == canon_target
                                              time_match = not time_key or not w_time or time_key == w_time
                                              if name_match and time_match:
-                                                 board_count += 1
-                                         else:
-                                             # For appointments (PTO/OFF/SICK): check time range overlap
-                                             match_found = False
-                                             if wo.get("start_time_obj") and wo.get("end_time_obj"):
-                                                 try:
-                                                     target_t = datetime.strptime(time_key, "%I:%M %p").time()
-                                                     if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                         match_found = True
-                                                 except Exception:
-                                                     pass
-                                             if not match_found and wo.get("time_key") == time_key:
-                                                 match_found = True
-                                             if match_found:
                                                  board_count += 1
                              
                             if board_count >= target_count_idx:
@@ -1660,27 +1646,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             )
                             if tech_match:
                                  for wo in wo_list:
-                                     # For non-appointment WOs: only skip if EXACT same name matches at same time
+                                     # Skip ONLY if EXACT same name exists on board at same time
                                      if not wo.get("is_appointment"):
                                          c_cust = wo.get("canon_customer", "")
                                          w_time = wo.get("time_key", "")
                                          name_match = c_cust == canon_target
                                          time_match = not time_key or not w_time or time_key == w_time
                                          if name_match and time_match:
-                                             board_count += 1
-                                     else:
-                                         # For appointments (PTO/OFF/SICK): check time range overlap
-                                         match_found = False
-                                         if wo.get("start_time_obj") and wo.get("end_time_obj"):
-                                             try:
-                                                 target_t = datetime.strptime(time_key, "%I:%M %p").time()
-                                                 if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                     match_found = True
-                                             except Exception:
-                                                 pass
-                                         if not match_found and wo.get("time_key") == time_key:
-                                             match_found = True
-                                         if match_found:
                                              board_count += 1
 
                         if board_count >= target_count_idx:
