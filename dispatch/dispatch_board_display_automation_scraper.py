@@ -95,34 +95,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             print(f"⚠️ Failed to save creation history to JSON file: {e}")
 
     def is_wo_created(self, history: Dict, date_key: str, canon_tech: str, canon_target: str, target_count_idx: int) -> bool:
-        """Check if work order has already been created/logged in persistent history (API memory or local JSON).
-        Only returns True for entries with status='created' (actually created by automation).
-        Entries with status='existing_on_board' are not considered as 'created' to allow re-checking on future runs.
-        """
-        def _is_actually_created(entry) -> bool:
-            """Return True only if entry was actually created (not just seen on board)."""
-            if isinstance(entry, dict):
-                return entry.get("status", "created") == "created"
-            return True  # legacy entries (no status field) assume created
-
+        """Check if work order has already been created/logged in persistent history (API memory or local JSON)."""
         key1 = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         if key1 in history:
-            if _is_actually_created(history[key1]):
-                return True
-
+            return True
         if not canon_tech:
             key2 = f"{date_key}||{canon_target}|{target_count_idx}"
             if key2 in history:
-                if _is_actually_created(history[key2]):
-                    return True
+                return True
 
         # Check if history dict has any recorded entry matching date, canon_target, and occurrence
         # to handle cases where a technician is removed and re-added with modified tech column formatting
         for k, v in history.items():
             if isinstance(v, dict):
                 if (v.get("date") == date_key or k.startswith(f"{date_key}|")) and v.get("canon_target") == canon_target and v.get("occurrence") == target_count_idx:
-                    if _is_actually_created(v):
-                        return True
+                    return True
 
         return False
 
@@ -1551,8 +1538,20 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             
                             # Check persistent creation history first
                             if self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
-                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                                continue
+                                # History says created — but verify it's actually on the board
+                                _hist_board_count = 0
+                                for _ck, _wl in existing_wos.items():
+                                    _tm = (not canon_h_tech or not _ck or _ck == canon_h_tech or canon_h_tech in _ck or _ck in canon_h_tech)
+                                    if _tm:
+                                        for _wo in _wl:
+                                            if not _wo.get("is_appointment"):
+                                                if _wo.get("canon_customer", "") == canon_target and (not time_key or not _wo.get("time_key") or time_key == _wo.get("time_key")):
+                                                    _hist_board_count += 1
+                                if _hist_board_count >= target_count_idx:
+                                    print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and confirmed on board. Skipping.")
+                                    continue
+                                else:
+                                    print(f"🔁 Truck assign header '{name}' in history but NOT found on board — will recreate.")
 
                             board_count = 0
                             for canon_tech_key, wo_list in existing_wos.items():
@@ -1564,13 +1563,27 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 )
                                 if tech_match:
                                      for wo in wo_list:
-                                         # Skip ONLY if EXACT same name exists on board at same time
+                                         # For non-appointment WOs: only skip if EXACT same name matches at same time
                                          if not wo.get("is_appointment"):
                                              c_cust = wo.get("canon_customer", "")
                                              w_time = wo.get("time_key", "")
                                              name_match = c_cust == canon_target
                                              time_match = not time_key or not w_time or time_key == w_time
                                              if name_match and time_match:
+                                                 board_count += 1
+                                         else:
+                                             # For appointments (PTO/OFF/SICK): check time range overlap
+                                             match_found = False
+                                             if wo.get("start_time_obj") and wo.get("end_time_obj"):
+                                                 try:
+                                                     target_t = datetime.strptime(time_key, "%I:%M %p").time()
+                                                     if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
+                                                         match_found = True
+                                                 except Exception:
+                                                     pass
+                                             if not match_found and wo.get("time_key") == time_key:
+                                                 match_found = True
+                                             if match_found:
                                                  board_count += 1
                              
                             if board_count >= target_count_idx:
@@ -1633,8 +1646,20 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         target_count_idx = template_processed_counts[processed_key]
 
                         if self.is_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx):
-                            print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                            continue
+                            # History says created — but verify it's actually on the board
+                            _hist_board_count = 0
+                            for _ck, _wl in existing_wos.items():
+                                _tm = (not canon_t_tech or not _ck or _ck == canon_t_tech or canon_t_tech in _ck or _ck in canon_t_tech)
+                                if _tm:
+                                    for _wo in _wl:
+                                        if not _wo.get("is_appointment"):
+                                            if _wo.get("canon_customer", "") == canon_target and (not time_key or not _wo.get("time_key") or time_key == _wo.get("time_key")):
+                                                _hist_board_count += 1
+                            if _hist_board_count >= target_count_idx:
+                                print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and confirmed on board. Skipping.")
+                                continue
+                            else:
+                                print(f"🔁 Tech job '{name}' in history but NOT found on board — will recreate.")
 
                         board_count = 0
                         for canon_tech_key, wo_list in existing_wos.items():
@@ -1646,13 +1671,27 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             )
                             if tech_match:
                                  for wo in wo_list:
-                                     # Skip ONLY if EXACT same name exists on board at same time
+                                     # For non-appointment WOs: only skip if EXACT same name matches at same time
                                      if not wo.get("is_appointment"):
                                          c_cust = wo.get("canon_customer", "")
                                          w_time = wo.get("time_key", "")
                                          name_match = c_cust == canon_target
                                          time_match = not time_key or not w_time or time_key == w_time
                                          if name_match and time_match:
+                                             board_count += 1
+                                     else:
+                                         # For appointments (PTO/OFF/SICK): check time range overlap
+                                         match_found = False
+                                         if wo.get("start_time_obj") and wo.get("end_time_obj"):
+                                             try:
+                                                 target_t = datetime.strptime(time_key, "%I:%M %p").time()
+                                                 if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
+                                                     match_found = True
+                                             except Exception:
+                                                 pass
+                                         if not match_found and wo.get("time_key") == time_key:
+                                             match_found = True
+                                         if match_found:
                                              board_count += 1
 
                         if board_count >= target_count_idx:
