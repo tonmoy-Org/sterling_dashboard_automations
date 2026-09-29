@@ -95,21 +95,34 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             print(f"⚠️ Failed to save creation history to JSON file: {e}")
 
     def is_wo_created(self, history: Dict, date_key: str, canon_tech: str, canon_target: str, target_count_idx: int) -> bool:
-        """Check if work order has already been created/logged in persistent history (API memory or local JSON)."""
+        """Check if work order has already been created/logged in persistent history (API memory or local JSON).
+        Only returns True for entries with status='created' (actually created by automation).
+        Entries with status='existing_on_board' are not considered as 'created' to allow re-checking on future runs.
+        """
+        def _is_actually_created(entry) -> bool:
+            """Return True only if entry was actually created (not just seen on board)."""
+            if isinstance(entry, dict):
+                return entry.get("status", "created") == "created"
+            return True  # legacy entries (no status field) assume created
+
         key1 = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         if key1 in history:
-            return True
+            if _is_actually_created(history[key1]):
+                return True
+
         if not canon_tech:
             key2 = f"{date_key}||{canon_target}|{target_count_idx}"
             if key2 in history:
-                return True
+                if _is_actually_created(history[key2]):
+                    return True
 
         # Check if history dict has any recorded entry matching date, canon_target, and occurrence
         # to handle cases where a technician is removed and re-added with modified tech column formatting
         for k, v in history.items():
             if isinstance(v, dict):
                 if (v.get("date") == date_key or k.startswith(f"{date_key}|")) and v.get("canon_target") == canon_target and v.get("occurrence") == target_count_idx:
-                    return True
+                    if _is_actually_created(v):
+                        return True
 
         return False
 
