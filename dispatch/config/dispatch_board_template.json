@@ -479,6 +479,7 @@
       "duration": "2:30",
       "priority": "[8] EXCUSED",
       "tech_name": "T9",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -487,6 +488,7 @@
       "duration": "2:30",
       "priority": "[8] EXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -495,6 +497,7 @@
       "duration": "2:30",
       "priority": "[8] EXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -503,6 +506,7 @@
       "duration": "2:30",
       "priority": "[8] EXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -511,6 +515,7 @@
       "duration": "2:30",
       "priority": "[8] EXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -519,6 +524,7 @@
       "duration": "2:30",
       "priority": "[8] EXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -527,6 +533,7 @@
       "duration": "2:30",
       "priority": "[8] EXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -535,6 +542,7 @@
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
       "tech_name": "T9",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -543,6 +551,7 @@
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -551,6 +560,7 @@
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -559,6 +569,7 @@
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -567,6 +578,7 @@
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     },
     {
@@ -575,6 +587,7 @@
       "duration": "2:30",
       "priority": "[8] UNEXCUSED",
       "tech_name": "T91",
+      "task": "9 - HR",
       "active": true
     }
   ],

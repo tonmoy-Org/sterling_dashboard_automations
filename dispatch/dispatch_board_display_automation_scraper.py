@@ -1446,6 +1446,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     duration = header.get("duration")
                     priority = header.get("priority")
                     h_tech = header.get("tech_name")
+                    h_task = header.get("task", task)
 
                     # Check if the header already exists on the board for the target date
                     if not dry_run:
@@ -1488,11 +1489,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             continue
 
                     if dry_run:
-                        print(f"  [Dry-Run] Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {task}")
+                        print(f"  [Dry-Run] Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
                     else:
                         res = await self.fill_and_save_work_order(
                             customer_name=name,
-                            task=task,
+                            task=h_task,
                             lead_source=lead_source,
                             priority=priority,
                             target_date=date_str,
@@ -1518,6 +1519,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         duration = header.get("duration")
                         priority = header.get("priority")
                         h_tech = header.get("tech_name")
+                        h_task = header.get("task", task)
 
                         # Check if the header already exists on the board for the target date
                         if not dry_run:
@@ -1580,11 +1582,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 continue
 
                         if dry_run:
-                            print(f"  [Dry-Run] Truck Assign Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {task}")
+                            print(f"  [Dry-Run] Truck Assign Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
                         else:
                             res = await self.fill_and_save_work_order(
                                 customer_name=name,
-                                task=task,
+                                task=h_task,
                                 lead_source=lead_source,
                                 priority=priority,
                                 target_date=date_str,
@@ -1616,6 +1618,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     start_time = job.get("start_time")
                     duration = job.get("duration")
                     priority = job.get("priority")
+                    j_task = job.get("task", task)
 
                     if not dry_run:
                         canon_target = self.canonical_str(name)
@@ -1676,11 +1679,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             continue
 
                     if dry_run:
-                        print(f"  [Dry-Run] Tech Job: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {t_tech} | Task: {task}")
+                        print(f"  [Dry-Run] Tech Job: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {t_tech} | Task: {j_task}")
                     else:
                         res = await self.fill_and_save_work_order(
                             customer_name=name,
-                            task=task,
+                            task=j_task,
                             lead_source=lead_source,
                             priority=priority,
                             target_date=date_str,
