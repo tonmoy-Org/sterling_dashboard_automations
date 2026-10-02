@@ -1607,14 +1607,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     if not job.get("active", True):
                         continue
                     t_tech = job.get("tech_name")
-                    if t_tech and active_techs:
+                    if t_tech and template_techs:
                         canon_job_tech = self.canonical_str(t_tech)
                         tech_is_active = False
-                        for a_tech in active_techs:
-                            canon_a = self.canonical_str(a_tech)
-                            if (canon_job_tech == canon_a or 
-                                canon_job_tech in canon_a or 
-                                canon_a in canon_job_tech):
+                        for entry in template_techs:
+                            if not entry.get("active", True):
+                                continue
+                            c_name = self.canonical_str(entry.get("name", ""))
+                            c_tname = self.canonical_str(entry.get("tech_name", ""))
+                            if (canon_job_tech == c_name or canon_job_tech in c_name or c_name in canon_job_tech or
+                                canon_job_tech == c_tname or canon_job_tech in c_tname or c_tname in canon_job_tech):
                                 tech_is_active = True
                                 break
                         if not tech_is_active:
