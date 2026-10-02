@@ -19,4 +19,6 @@ services:
       - ./dispatch/config:/app/config
       - ./dispatch/assets:/app/assets
       - ./dispatch/run_standalone.py:/app/run_standalone.py
+      - ./dispatch/dispatch_board_display_automation_scraper.py:/app/dispatch_board_display_automation_scraper.py
+      - ./dispatch/base_scraper.py:/app/base_scraper.py
     command: python run_standalone.py --live --days 31 --loop --port 3000
