@@ -1609,9 +1609,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     t_tech = job.get("tech_name")
                     if t_tech and active_techs:
                         canon_job_tech = self.canonical_str(t_tech)
-                        active_canon_techs = [self.canonical_str(t) for t in active_techs]
-                        if canon_job_tech not in active_canon_techs:
-                            print(f"⏭️ Skipping tech job '{job.get('name')}' because assigned technician '{t_tech}' is inactive/OFF.")
+                        tech_is_active = False
+                        for a_tech in active_techs:
+                            canon_a = self.canonical_str(a_tech)
+                            if (canon_job_tech == canon_a or 
+                                canon_job_tech in canon_a or 
+                                canon_a in canon_job_tech):
+                                tech_is_active = True
+                                break
+                        if not tech_is_active:
+                            print(f"⏭️ Skipping tech job '{job.get('name')}' because assigned technician '{t_tech}' is inactive in template config.")
                             continue
 
                     name = job.get("name")
