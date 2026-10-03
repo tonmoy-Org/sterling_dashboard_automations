@@ -94,21 +94,33 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         except Exception as e:
             print(f"⚠️ Failed to save creation history to JSON file: {e}")
 
+    @staticmethod
+    def _is_created_record(v) -> bool:
+        """Only records that were actually created by this automation are trusted for skipping.
+        'existing_on_board' records are re-verified against the live board every run, so a
+        false-positive board match never permanently blocks a work order from being created."""
+        return isinstance(v, dict) and v.get("status", "created") == "created"
+
     def is_wo_created(self, history: Dict, date_key: str, canon_tech: str, canon_target: str, target_count_idx: int) -> bool:
         """Check if work order has already been created/logged in persistent history (API memory or local JSON)."""
         key1 = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
-        if key1 in history:
+        if key1 in history and self._is_created_record(history[key1]):
             return True
         if not canon_tech:
             key2 = f"{date_key}||{canon_target}|{target_count_idx}"
-            if key2 in history:
+            if key2 in history and self._is_created_record(history[key2]):
                 return True
 
         # Check if history dict has any recorded entry matching date, canon_target, and occurrence
         # to handle cases where a technician is removed and re-added with modified tech column formatting
+        # NOTE: the technician must still (fuzzy) match, otherwise one tech's 'AM SHOP' would
+        # incorrectly block every other tech's 'AM SHOP' for the same date.
         for k, v in history.items():
-            if isinstance(v, dict):
-                if (v.get("date") == date_key or k.startswith(f"{date_key}|")) and v.get("canon_target") == canon_target and v.get("occurrence") == target_count_idx:
+            if not self._is_created_record(v):
+                continue
+            if (v.get("date") == date_key or k.startswith(f"{date_key}|")) and v.get("canon_target") == canon_target and v.get("occurrence") == target_count_idx:
+                rec_tech = v.get("canon_tech") or ""
+                if rec_tech == canon_tech or (rec_tech and canon_tech and (rec_tech in canon_tech or canon_tech in rec_tech)):
                     return True
 
         return False
@@ -159,6 +171,88 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         # 2. Save to Local JSON Backup File
         self._save_history(history)
 
+    @staticmethod
+    def _extract_jwt_from_response(data) -> Optional[str]:
+        """Find a JWT access token in common login response shapes
+        (e.g. {"access": ...}, {"token": ...}, {"data": {"accessToken": ...}}, {"tokens": {"access": ...}})."""
+        token_keys = ("access", "access_token", "accessToken", "token", "jwt", "id_token", "idToken", "auth_token")
+        if isinstance(data, dict):
+            for k in token_keys:
+                v = data.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            for v in data.values():
+                if isinstance(v, (dict, list)):
+                    found = DispatchBoardDisplayAutomationScraper._extract_jwt_from_response(v)
+                    if found:
+                        return found
+        elif isinstance(data, list):
+            for v in data:
+                found = DispatchBoardDisplayAutomationScraper._extract_jwt_from_response(v)
+                if found:
+                    return found
+        return None
+
+    def _get_api_auth_headers(self) -> Dict[str, str]:
+        """
+        Build Authorization header for protected Dashboard API endpoints.
+        Priority:
+          1. BACKEND_API_TOKEN (static JWT / token from .env)
+          2. Login with BACKEND_API_EMAIL + BACKEND_API_PASSWORD at BACKEND_LOGIN_PATH (default: /auth/login)
+        Returns {} if no credentials are configured or login fails.
+        """
+        static_token = os.getenv("BACKEND_API_TOKEN", "").strip()
+        if static_token:
+            return {"Authorization": static_token if " " in static_token else f"Bearer {static_token}"}
+
+        email = os.getenv("BACKEND_API_EMAIL", "").strip()
+        password = os.getenv("BACKEND_API_PASSWORD", "")
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if not (email and password and api_url):
+            print("⚠️ BACKEND_API_EMAIL / BACKEND_API_PASSWORD not set in .env - calling Dashboard API without JWT.")
+            return {}
+
+        import urllib.request, urllib.error
+        base = api_url if api_url.endswith("/api") else f"{api_url}/api"
+        login_path = os.getenv("BACKEND_LOGIN_PATH", "/auth/login").strip() or "/auth/login"
+        endpoint = f"{base}/{login_path.lstrip('/')}"
+        body = json.dumps({"email": email, "password": password}).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers={"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+                token = None
+                try:
+                    token = self._extract_jwt_from_response(json.loads(raw))
+                except Exception:
+                    pass
+                # Fallback: some backends return the JWT only as an HttpOnly cookie
+                if not token:
+                    for cookie in response.headers.get_all("Set-Cookie") or []:
+                        name, _, rest = cookie.partition("=")
+                        if name.strip().lower() in ("access", "access_token", "accesstoken", "token", "jwt"):
+                            token = rest.split(";", 1)[0].strip()
+                            break
+                if token:
+                    print(f"🔐 Logged in to Dashboard API as {email} (JWT acquired).")
+                    return {"Authorization": f"Bearer {token}"}
+                print(f"⚠️ Dashboard API login succeeded but no JWT found in response: {raw[:200]}")
+        except urllib.error.HTTPError as he:
+            err_body = ""
+            try:
+                err_body = he.read().decode("utf-8", errors="replace")[:200]
+            except Exception:
+                pass
+            print(f"⚠️ Dashboard API login failed ({endpoint}): HTTP {he.code} {err_body}")
+        except Exception as e:
+            print(f"⚠️ Dashboard API login error ({endpoint}): {e}")
+        return {}
+
     def _load_template(self) -> Dict:
         """Load visual work order configuration template from API or local JSON file."""
         api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
@@ -166,8 +260,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             try:
                 import urllib.request
                 endpoint = f"{api_url}/automation/dispatch-config/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-config/"
-                req = urllib.request.Request(endpoint, headers={"User-Agent": "SterlingAutomations/1.0"})
-                with urllib.request.urlopen(req, timeout=5) as response:
+                headers = {"User-Agent": "SterlingAutomations/1.0"}
+                headers.update(self._get_api_auth_headers())
+                req = urllib.request.Request(endpoint, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as response:
                     if response.status == 200:
                         remote_data = json.loads(response.read().decode('utf-8'))
                         print(f"✅ Loaded live configuration from Dashboard API: {endpoint}")
