@@ -34,6 +34,15 @@
       "tech_name": "f 𝐒𝐤𝐲𝐥𝐞𝐫"
     },
     {
+      "name": " KELVIN",
+      "active": true,
+      "department": "pump",
+      "priority": "[7] P4R (STATUS)",
+      "start_time": "04:45 AM",
+      "duration": "1:15",
+      "tech_name": "f2"
+    },
+    {
       "name": "DANNY",
       "active": true,
       "department": "service",
@@ -76,6 +85,24 @@
       "start_time": "04:45 AM",
       "duration": "1:15",
       "tech_name": "p2",
+      "active": true
+    },
+    {
+      "name": " JACOB",
+      "department": "excavation",
+      "priority": "[5] LABORER (Asset Assignment)",
+      "start_time": "04:45 AM",
+      "duration": "1:15",
+      "tech_name": "p4 𝗝𝗮𝗰𝗼𝗯",
+      "active": true
+    },
+    {
+      "name": "KYLE",
+      "department": "excavation",
+      "priority": "[5] LABORER (Asset Assignment)",
+      "start_time": "04:45 AM",
+      "duration": "1:15",
+      "tech_name": "p6 𝗞𝘆𝗹𝗲",
       "active": true
     },
     {
@@ -674,6 +701,33 @@
       "active": true
     },
     {
+      "name": "🏡 AM SHOP",
+      "department": "pump",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "start_time": "07:30 AM",
+      "duration": "0:30",
+      "tech_name": "f2",
+      "active": true
+    },
+    {
+      "name": "🏡 AM SHOP",
+      "department": "excavation",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "start_time": "07:30 AM",
+      "duration": "0:30",
+      "tech_name": "p4 𝗝𝗮𝗰𝗼𝗯",
+      "active": true
+    },
+    {
+      "name": "🏡 AM SHOP",
+      "department": "excavation",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "start_time": "07:30 AM",
+      "duration": "0:30",
+      "tech_name": "p6 𝗞𝘆𝗹𝗲",
+      "active": true
+    },
+    {
       "name": "🏡 PM SHOP",
       "department": "pump",
       "priority": "[4] SHOP / OPS (Tracking)",
@@ -752,6 +806,33 @@
       "start_time": "07:30 PM",
       "duration": "0:30",
       "tech_name": "t33　𝐂𝐚𝐦𝐞ron",
+      "active": true
+    },
+    {
+      "name": "🏡 PM SHOP",
+      "department": "pump",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "start_time": "07:30 PM",
+      "duration": "0:30",
+      "tech_name": "f2",
+      "active": true
+    },
+    {
+      "name": "🏡 PM SHOP",
+      "department": "excavation",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "start_time": "07:30 PM",
+      "duration": "0:30",
+      "tech_name": "p4 𝗝𝗮𝗰𝗼𝗯",
+      "active": true
+    },
+    {
+      "name": "🏡 PM SHOP",
+      "department": "excavation",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "start_time": "07:30 PM",
+      "duration": "0:30",
+      "tech_name": "p6 𝗞𝘆𝗹𝗲",
       "active": true
     }
   ]

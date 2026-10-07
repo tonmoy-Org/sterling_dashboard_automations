@@ -45,18 +45,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             "config",
             "dispatch_board_template.json"
         )
-        self.history_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "config",
-            "dispatch_board_created_history.json"
-        )
         self.template_data = self._load_template()
 
     def _load_history(self) -> Dict:
-        """Load persistent work order creation history from Dashboard API or local JSON backup file."""
+        """Load persistent work order creation history from Dashboard API."""
         history = {}
 
-        # 1. Try fetching from Dashboard API (BACKEND_API_URL or fallback http://127.0.0.1:8000/api)
+        # Fetch from Dashboard API (BACKEND_API_URL or fallback http://127.0.0.1:8000/api)
         api_url = os.getenv("BACKEND_API_URL", "http://127.0.0.1:8000/api").rstrip("/")
         if api_url:
             try:
@@ -72,27 +67,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception as e:
                 print(f"⚠️ Could not fetch tracking history from Dashboard API ({api_url}): {e}")
 
-        # 2. Merge with local JSON file (backup redundancy)
-        if os.path.exists(self.history_path):
-            try:
-                with open(self.history_path, "r", encoding="utf-8") as f:
-                    file_data = json.load(f)
-                    if isinstance(file_data, dict):
-                        for k, v in file_data.items():
-                            if k not in history:
-                                history[k] = v
-            except Exception as e:
-                print(f"⚠️ Failed to load creation history JSON: {e}")
         return history
-
-    def _save_history(self, history: Dict):
-        """Save persistent work order creation history to JSON backup file."""
-        try:
-            os.makedirs(os.path.dirname(self.history_path), exist_ok=True)
-            with open(self.history_path, "w", encoding="utf-8") as f:
-                json.dump(history, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"⚠️ Failed to save creation history to JSON file: {e}")
 
     @staticmethod
     def _is_created_record(v) -> bool:
@@ -135,7 +110,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         status: str = "created",
         details: Optional[Dict] = None
     ):
-        """Record work order creation in Dashboard API and local JSON backup file."""
+        """Record work order creation in Dashboard API."""
         key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         det = details or {}
         rec_data = {
@@ -149,7 +124,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         }
         history[key] = rec_data
 
-        # 1. Post to Central Dashboard API
+        # Post to Central Dashboard API
         api_url = os.getenv("BACKEND_API_URL", "http://127.0.0.1:8000/api").rstrip("/")
         if api_url:
             try:
@@ -167,9 +142,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         print(f"✅ Synced tracking record '{key}' to Central Dashboard API.")
             except Exception as api_err:
                 print(f"⚠️ Failed to sync tracking record to Dashboard API: {api_err}")
-
-        # 2. Save to Local JSON Backup File
-        self._save_history(history)
 
     @staticmethod
     def _extract_jwt_from_response(data) -> Optional[str]:
@@ -270,7 +242,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         if os.path.exists(self.template_path):
                             with open(self.template_path, "r", encoding="utf-8") as f:
                                 local_data = json.load(f)
-                                local_data.update(remote_data)
+                                for key, value in remote_data.items():
+                                    if key in local_data and isinstance(local_data[key], list) and isinstance(value, list):
+                                        for item in value:
+                                            if item not in local_data[key]:
+                                                local_data[key].append(item)
+                                    elif key in local_data and isinstance(local_data[key], dict) and isinstance(value, dict):
+                                        local_data[key].update(value)
+                                    else:
+                                        local_data[key] = value
                                 return local_data
                         return remote_data
             except Exception as e:
@@ -1489,7 +1469,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     board_date_str, existing_wos = fetched_date, fetched_wos
 
         created_history = self._load_history()
-        print(f"📚 Loaded {len(created_history)} recorded entries from persistent creation history ({self.history_path}).")
+        print(f"📚 Loaded {len(created_history)} recorded entries from Central Dashboard API.")
 
         try:
             for d in range(days):
