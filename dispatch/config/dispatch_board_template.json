@@ -104,15 +104,6 @@
       "duration": "1:15",
       "tech_name": "p6 𝗞𝘆𝗹𝗲",
       "active": true
-    },
-    {
-      "name": " CAMERON",
-      "department": "excavation",
-      "priority": "[7] ROUTINE (S) (STATUS)",
-      "start_time": "04:45 AM",
-      "duration": "1:15",
-      "tech_name": "t33　𝐂𝐚𝐦𝐞ron",
-      "active": true
     }
   ],
   "truck_assign_headers": [
