@@ -160,16 +160,6 @@
       "start_time": "06:00 AM",
       "duration": "1:00",
       "tech_name": "l 𝐂𝐫𝐢𝐬"
-    }
-  ],
-  "static_headers": [
-    {
-      "name": "🚛| PUMP TRUCKS",
-      "start_time": "5:00 AM",
-      "duration": "1:30",
-      "priority": "[1] ROUTINE (P)",
-      "tech_name": "s3",
-      "active": true
     },
     {
       "name": "🚛 | 90",
@@ -209,14 +199,6 @@
       "duration": "1:00",
       "priority": "[5] PT (Asset Assignment)",
       "tech_name": "s4",
-      "active": true
-    },
-    {
-      "name": "SERVICE TRUCKS 🛻",
-      "start_time": "6:45 AM",
-      "duration": "1:30",
-      "priority": "[2] ROUTINE (S)",
-      "tech_name": "s3",
       "active": true
     },
     {
@@ -260,14 +242,6 @@
       "active": true
     },
     {
-      "name": "👥 | SUPPORT",
-      "start_time": "8:30 AM",
-      "duration": "1:30",
-      "priority": "[2] CORRECTIONS & UPGRADE (S)",
-      "tech_name": "s3",
-      "active": true
-    },
-    {
       "name": "👥 | GENE",
       "start_time": "8:30 AM",
       "duration": "1:00",
@@ -297,14 +271,6 @@
       "duration": "1:00",
       "priority": "[5] LABORER (Asset Assignment)",
       "tech_name": "s4",
-      "active": true
-    },
-    {
-      "name": "▭TRAILERS",
-      "start_time": "10:15 AM",
-      "duration": "1:30",
-      "priority": "[2] EXCAVATOR (S)",
-      "tech_name": "s3",
       "active": true
     },
     {
@@ -356,14 +322,6 @@
       "active": true
     },
     {
-      "name": "EXCAVATORS 🏗️",
-      "start_time": "12:00 PM",
-      "duration": "1:30",
-      "priority": "[2] 2-MAN (S)",
-      "tech_name": "s3",
-      "active": true
-    },
-    {
       "name": "🏗️ | U-17 02",
       "start_time": "12:00 PM",
       "duration": "1:00",
@@ -385,6 +343,48 @@
       "duration": "1:00",
       "priority": "[5] EXC (Asset Assignment)",
       "tech_name": "s4",
+      "active": true
+    }
+  ],
+  "static_headers": [
+    {
+      "name": "🚛| PUMP TRUCKS",
+      "start_time": "5:00 AM",
+      "duration": "1:30",
+      "priority": "[1] ROUTINE (P)",
+      "tech_name": "s3",
+      "active": true
+    },
+    {
+      "name": "SERVICE TRUCKS 🛻",
+      "start_time": "6:45 AM",
+      "duration": "1:30",
+      "priority": "[2] ROUTINE (S)",
+      "tech_name": "s3",
+      "active": true
+    },
+    {
+      "name": "👥 | SUPPORT",
+      "start_time": "8:30 AM",
+      "duration": "1:30",
+      "priority": "[2] CORRECTIONS & UPGRADE (S)",
+      "tech_name": "s3",
+      "active": true
+    },
+    {
+      "name": "▭TRAILERS",
+      "start_time": "10:15 AM",
+      "duration": "1:30",
+      "priority": "[2] EXCAVATOR (S)",
+      "tech_name": "s3",
+      "active": true
+    },
+    {
+      "name": "EXCAVATORS 🏗️",
+      "start_time": "12:00 PM",
+      "duration": "1:30",
+      "priority": "[2] 2-MAN (S)",
+      "tech_name": "s3",
       "active": true
     },
     {
