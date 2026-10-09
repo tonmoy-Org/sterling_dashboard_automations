@@ -172,11 +172,91 @@
       "active": true
     },
     {
+      "name": "🚛 | 90",
+      "start_time": "5:00 AM",
+      "duration": "1:00",
+      "priority": "[5] PT (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🚛 | 123",
+      "start_time": "5:00 AM",
+      "duration": "1:00",
+      "priority": "[5] PT (Asset Assignment)",
+      "tech_name": "s5",
+      "active": true
+    },
+    {
+      "name": "🚛 | 122",
+      "start_time": "5:00 AM",
+      "duration": "1:00",
+      "priority": "[5] PT (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🚛 | 124",
+      "start_time": "5:15 AM",
+      "duration": "1:00",
+      "priority": "[5] PT (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🚛 | 87",
+      "start_time": "5:30 AM",
+      "duration": "1:00",
+      "priority": "[5] PT (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
       "name": "SERVICE TRUCKS 🛻",
       "start_time": "6:45 AM",
       "duration": "1:30",
       "priority": "[2] ROUTINE (S)",
       "tech_name": "s3",
+      "active": true
+    },
+    {
+      "name": "🛻 | 01",
+      "start_time": "6:45 AM",
+      "duration": "1:00",
+      "priority": "[5] SER TR (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🛻 | 02",
+      "start_time": "6:45 AM",
+      "duration": "1:00",
+      "priority": "[5] SER TR (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🛻 | 03",
+      "start_time": "6:45 AM",
+      "duration": "1:00",
+      "priority": "[5] SER TR (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🛻 | 71",
+      "start_time": "7:00 AM",
+      "duration": "1:00",
+      "priority": "[5] SER TR (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🛻 | 04",
+      "start_time": "7:00 AM",
+      "duration": "1:00",
+      "priority": "[5] SER TR (Asset Assignment)",
+      "tech_name": "s4",
       "active": true
     },
     {
@@ -188,6 +268,38 @@
       "active": true
     },
     {
+      "name": "👥 | GENE",
+      "start_time": "8:30 AM",
+      "duration": "1:00",
+      "priority": "[5] LABORER (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | KYLE",
+      "start_time": "8:30 AM",
+      "duration": "1:00",
+      "priority": "[5] LABORER (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | JACOB",
+      "start_time": "8:30 AM",
+      "duration": "1:00",
+      "priority": "[5] LABORER (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | ASHER",
+      "start_time": "8:30 AM",
+      "duration": "1:00",
+      "priority": "[5] LABORER (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
       "name": "▭TRAILERS",
       "start_time": "10:15 AM",
       "duration": "1:30",
@@ -196,11 +308,83 @@
       "active": true
     },
     {
+      "name": "▭ | T-2 10k TILT",
+      "start_time": "10:15 AM",
+      "duration": "1:00",
+      "priority": "[5] TRAI (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "▭ | T-3 10k TILT",
+      "start_time": "10:15 AM",
+      "duration": "1:00",
+      "priority": "[5] TRAI (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "▭ | T-4 DUMP 10K",
+      "start_time": "10:30 AM",
+      "duration": "1:00",
+      "priority": "[5] TRAI (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "▭ | T-1 7K TILT",
+      "start_time": "10:30 AM",
+      "duration": "1:00",
+      "priority": "[5] TRAI (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "▭ | T-05 💧",
+      "start_time": "10:45 AM",
+      "duration": "1:00",
+      "priority": "[5] TRAI (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "▭ | T-6 14K TILT",
+      "start_time": "10:45 AM",
+      "duration": "1:00",
+      "priority": "[5] TRAI (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
       "name": "EXCAVATORS 🏗️",
       "start_time": "12:00 PM",
       "duration": "1:30",
       "priority": "[2] 2-MAN (S)",
       "tech_name": "s3",
+      "active": true
+    },
+    {
+      "name": "🏗️ | U-17 02",
+      "start_time": "12:00 PM",
+      "duration": "1:00",
+      "priority": "[5] EXC (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🏗️ | U-17 01",
+      "start_time": "12:00 PM",
+      "duration": "1:00",
+      "priority": "[5] EXC (Asset Assignment)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "🏗️ | U-40 03",
+      "start_time": "12:15 PM",
+      "duration": "1:00",
+      "priority": "[5] EXC (Asset Assignment)",
+      "tech_name": "s4",
       "active": true
     },
     {
@@ -225,6 +409,62 @@
       "duration": "1:30",
       "priority": "[7] 7.11 Teams",
       "tech_name": "s3",
+      "active": true
+    },
+    {
+      "name": "👥 | KELVIN",
+      "start_time": "5:15 PM",
+      "duration": "1:00",
+      "priority": "[7] P4R (STATUS)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | MACKIE",
+      "start_time": "5:15 PM",
+      "duration": "1:00",
+      "priority": "[7] P4R (STATUS)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | RUSSELL",
+      "start_time": "5:15 PM",
+      "duration": "1:00",
+      "priority": "[7] P4R (STATUS)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | SKYLER",
+      "start_time": "5:15 PM",
+      "duration": "1:00",
+      "priority": "[7] P4R (STATUS)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | CRIS",
+      "start_time": "5:30 PM",
+      "duration": "1:00",
+      "priority": "[7] ROUTINE (S) (STATUS)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | AHKEEM",
+      "start_time": "5:30 PM",
+      "duration": "1:00",
+      "priority": "[7] ROUTINE (S) (STATUS)",
+      "tech_name": "s4",
+      "active": true
+    },
+    {
+      "name": "👥 | DANNY",
+      "start_time": "5:30 PM",
+      "duration": "1:00",
+      "priority": "[7] ROUTINE (S) (STATUS)",
+      "tech_name": "s4",
       "active": true
     },
     {
@@ -684,15 +924,6 @@
     },
     {
       "name": "🏡 AM SHOP",
-      "department": "excavation",
-      "priority": "[4] SHOP / OPS (Tracking)",
-      "start_time": "07:30 AM",
-      "duration": "0:30",
-      "tech_name": "t33　𝐂𝐚𝐦𝐞ron",
-      "active": true
-    },
-    {
-      "name": "🏡 AM SHOP",
       "department": "pump",
       "priority": "[4] SHOP / OPS (Tracking)",
       "start_time": "07:30 AM",
@@ -788,15 +1019,6 @@
       "start_time": "07:30 PM",
       "duration": "0:30",
       "tech_name": "p2",
-      "active": true
-    },
-    {
-      "name": "🏡 PM SHOP",
-      "department": "excavation",
-      "priority": "[4] SHOP / OPS (Tracking)",
-      "start_time": "07:30 PM",
-      "duration": "0:30",
-      "tech_name": "t33　𝐂𝐚𝐦𝐞ron",
       "active": true
     },
     {
