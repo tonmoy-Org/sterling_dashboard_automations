@@ -19,10 +19,8 @@ if _dispatch_dir not in sys.path:
 try:
     from base_scraper import BaseScraper, get_pst_today_str, get_pst_now
 except ImportError:
-    try:
-        from Backend.automation.scrapers.base_scraper import BaseScraper, get_pst_today_str, get_pst_now  # type: ignore
-    except ImportError:
-        from automation.scrapers.base_scraper import BaseScraper, get_pst_today_str, get_pst_now  # type: ignore
+    from dispatch.base_scraper import BaseScraper, get_pst_today_str, get_pst_now  # type: ignore
+
 
 
 class AssetAssignmentScraper(BaseScraper):

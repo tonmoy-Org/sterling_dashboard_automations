@@ -29,10 +29,14 @@ if _dispatch_dir not in sys.path:
 try:
     from base_scraper import BaseScraper
 except ImportError:
-    try:
-        from Backend.automation.scrapers.base_scraper import BaseScraper  # type: ignore
-    except ImportError:
-        from automation.scrapers.base_scraper import BaseScraper  # type: ignore
+    from dispatch.base_scraper import BaseScraper  # type: ignore
+
+try:
+    from asset_assignment_scraper import AssetAssignmentScraper
+except ImportError:
+    from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
+
+
 
 class DispatchBoardDisplayAutomationScraper(BaseScraper):
     """
@@ -241,20 +245,27 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     if response.status == 200:
                         remote_data = json.loads(response.read().decode('utf-8'))
                         print(f"✅ Loaded live configuration from Dashboard API: {endpoint}")
+                        local_data = {}
                         if os.path.exists(self.template_path):
-                            with open(self.template_path, "r", encoding="utf-8") as f:
-                                local_data = json.load(f)
-                                for key, value in remote_data.items():
-                                    if key in local_data and isinstance(local_data[key], list) and isinstance(value, list):
-                                        for item in value:
-                                            if item not in local_data[key]:
-                                                local_data[key].append(item)
-                                    elif key in local_data and isinstance(local_data[key], dict) and isinstance(value, dict):
-                                        local_data[key].update(value)
-                                    else:
-                                        local_data[key] = value
-                                return local_data
-                        return remote_data
+                            try:
+                                with open(self.template_path, "r", encoding="utf-8") as f:
+                                    local_data = json.load(f)
+                            except Exception:
+                                local_data = {}
+
+                        # Overwrite with live remote settings (truck assignments, techs, headers)
+                        for key, value in remote_data.items():
+                            local_data[key] = value
+
+                        # Cache live data back to local template file for offline fallback
+                        try:
+                            with open(self.template_path, "w", encoding="utf-8") as f:
+                                json.dump(local_data, f, indent=2, ensure_ascii=False)
+                            print(f"💾 Cached live template data to {self.template_path}")
+                        except Exception as cache_err:
+                            print(f"⚠️ Could not cache template data to local file: {cache_err}")
+
+                        return local_data
             except Exception as e:
                 print(f"⚠️ Could not fetch live template from API ({api_url}): {e}. Falling back to local template file.")
 
@@ -1422,12 +1433,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             async def handle_response(response):
                 nonlocal board_data
                 if "GetDispatchBoardData" in response.url:
+                    # Only parse successful POST responses (skip OPTIONS preflight or cancelled/aborted redirects)
+                    if response.status != 200 or response.request.method != "POST":
+                        return
                     try:
                         text = await response.text()
-                        board_data = json.loads(text)
-                        print("📡 Intercepted Dispatch Board API data successfully.")
+                        if text:
+                            board_data = json.loads(text)
+                            print("📡 Intercepted Dispatch Board API data successfully.")
                     except Exception as e:
-                        print(f"⚠️ Failed to parse intercepted board data: {e}")
+                        # Chromium discards response body from CDP memory during rapid page redirects/navigation
+                        if "getResponseBody" not in str(e):
+                            print(f"⚠️ Failed to parse intercepted board data: {e}")
 
             self.page.on("response", handle_response)
             
@@ -1873,10 +1890,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             try:
                                 from asset_assignment_scraper import AssetAssignmentScraper
                             except ImportError:
-                                try:
-                                    from dispatch.asset_assignment_scraper import AssetAssignmentScraper
-                                except ImportError:
-                                    from automation.scrapers.asset_assignment_scraper import AssetAssignmentScraper
+                                from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
                             self.asset_scraper = AssetAssignmentScraper(template_path=self.template_path)
                             self.asset_scraper.playwright = self.playwright
                             self.asset_scraper.browser = self.browser
