@@ -12,6 +12,8 @@ import random
 from datetime import datetime, timedelta
 import time
 import traceback
+import urllib.request
+import urllib.error
 from typing import List, Dict, Optional, Callable
 
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -1202,6 +1204,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         except Exception as err:
             print(f"❌ Error in fill_and_save_work_order for '{customer_name}': {err}")
+            return False
+
     async def check_and_handle_session(self, on_progress: Optional[Callable] = None) -> bool:
         """Check if FieldEdge logged out (e.g. concurrent login from another location). If logged out, wait 30m and retry."""
         if not self.page:

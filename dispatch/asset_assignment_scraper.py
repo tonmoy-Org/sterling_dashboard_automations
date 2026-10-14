@@ -3,6 +3,8 @@ import sys
 import json
 import asyncio
 from datetime import datetime, timedelta
+import urllib.request
+import urllib.error
 from typing import Optional, Tuple, Dict, Any, List
 
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
