@@ -12,6 +12,7 @@ __pycache__/
 *.lock
 *.log
 dispatch/config/status_state.json
+dispatch/scraped_asset_assignments.json
 
 # IDE & OS files
 .vscode/

@@ -14,6 +14,15 @@
     "dispatch_board_date_input_xpath": "//input[@name='Start Date'] | //input[@placeholder='Date']",
     "dispatch_board_time_input_xpath": "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Start Time')]/following::input[1] | //input[@placeholder='Time']",
     "dispatch_board_duration_input_xpath": "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task Duration')]/following::input[contains(@class,'base-input')][1] | //td[contains(@class, 'new-assignment-only')]//input[@placeholder='0']",
-    "dispatch_board_save_btn_xpath": "//button[contains(@class,'confirm') and .//span[normalize-space()='Save']]"
+    "dispatch_board_save_btn_xpath": "//button[contains(@class,'confirm') and .//span[normalize-space()='Save']]",
+    "_comment_asset_assignment": "Asset Assignment scraper selectors and filters",
+    "asset_assignment_url": "https://login.fieldedge.com/Dispatch",
+    "status_name": "Assigned",
+    "status_assigned_xpath": "//div[contains(@class,'cell-pos-1x3')]//div[contains(@class,'circle-btn') and @title='Assigned'] | //div[contains(@class,'circle-btn') and @title='Assigned'] | //*[@title='Assigned']",
+    "date_filter_dropdown_xpath": "//div[contains(@class, 'filter-dropdown')][.//span[normalize-space()='Date']] | //span[normalize-space()='Date']/ancestor::div[contains(@class, 'filter-dropdown')] | //div[contains(@class, 'date-filter')] | //div[contains(@class, 'time-filter')]",
+    "date_start_input_xpath": ".cell-pos-1x1 input[placeholder='MM/DD/YYYY']",
+    "date_end_input_xpath": ".cell-pos-1x3 input[placeholder='MM/DD/YYYY']",
+    "date_select_button_xpath": "//button[not(@disabled) and .//span[normalize-space()='Select']] | //button[not(@disabled) and normalize-space()='Select']",
+    "apply_button_xpath": "//button[contains(@class, 'filter-button') and contains(., 'Apply')] | //button[contains(@class, 'confirm') and contains(., 'Apply')] | //button[contains(@class, 'plot-map-button')] | //button[normalize-space()='Apply']"
   }
 ]

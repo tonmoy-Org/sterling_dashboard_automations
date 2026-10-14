@@ -94,9 +94,11 @@ class BaseScraper:
         try:
             self.playwright = await async_playwright().start()
 
+            viewport_width = int(os.getenv("VIEWPORT_WIDTH", "1280"))
+            viewport_height = int(os.getenv("VIEWPORT_HEIGHT", "720"))
+
             chrome_args = [
-                "--start-maximized",
-                "--window-size=1920,1080",
+                f"--window-size={viewport_width},{viewport_height}",
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
@@ -141,7 +143,7 @@ class BaseScraper:
                 print("✅ Browser launched: bundled Chromium (fallback)")
 
             context_kwargs = dict(
-                viewport={"width": 1920, "height": 1080},
+                viewport={"width": viewport_width, "height": viewport_height},
                 locale="en-US",
                 timezone_id="America/Los_Angeles",
                 user_agent=(
