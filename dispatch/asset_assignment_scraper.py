@@ -159,7 +159,7 @@ class AssetAssignmentScraper(BaseScraper):
     def format_date(self, date_str: str) -> str:
         if not date_str:
             return ""
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d", "%m/%d/%y", "%m-%d-%y"):
             try:
                 return datetime.strptime(date_str.strip(), fmt).strftime("%m/%d/%Y")
             except ValueError:
@@ -1049,6 +1049,116 @@ class AssetAssignmentScraper(BaseScraper):
     async def click_work_order(self, work_order_number: str) -> bool:
         return await self.click_and_reconcile_work_order(work_order_number)
 
+    async def reconcile_single_date(
+        self,
+        date_str: str,
+        click_wos: bool = True,
+        status_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Reconcile asset assignment work orders for a single date.
+        Can run standalone or be invoked from Dispatch Board Display Automation using an existing page.
+        """
+        try:
+            if not self.page:
+                await self.initialize()
+
+            target_url = (
+                self.rules.get('asset_assignment_url')
+                or self.rules.get('web_url')
+                or 'https://login.fieldedge.com/Dispatch'
+            )
+
+            # Ensure page is on Dispatch grid
+            cur_url = self.page.url or ""
+            if "Dispatch" not in cur_url or "#/DispatchBoard" in cur_url or "DispatchBoard" in cur_url:
+                print(f"Navigating to Asset Assignment URL: {target_url}")
+                await self.page.goto(target_url, wait_until='domcontentloaded')
+                await self.page.wait_for_timeout(3000)
+
+            if "Login" in (self.page.url or ""):
+                await self.login_fieldedge()
+                if target_url and "Login" not in self.page.url:
+                    await self.page.goto(target_url, wait_until='domcontentloaded')
+                    await self.page.wait_for_timeout(3000)
+
+            # Weekend skip check
+            dt = None
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d", "%m/%d/%y", "%m-%d-%y"):
+                try:
+                    dt = datetime.strptime(date_str.strip(), fmt)
+                    break
+                except ValueError:
+                    pass
+
+            skip_weekends = self.template_data.get("skip_vehicle_work_orders_on_weekends", True)
+            if dt and skip_weekends and dt.weekday() in (5, 6):
+                print(f"⏭️ Skipping weekend date {date_str} (Saturday/Sunday) for asset reconciliation.")
+                return {"truck_assign_headers": [], "count": 0, "reassignments": 0, "checked": 0}
+
+            target_status = status_name or self.rules.get('status_name', 'Assigned')
+            await self.select_status(target_status)
+
+            # Fetch fresh template configuration from Dashboard API so latest changes are always live
+            self.template_data = self._load_template()
+
+            normalized_date = self.format_date(date_str)
+            print(f"Setting Date filter: {normalized_date} to {normalized_date}")
+            await self.set_date_filter(normalized_date, normalized_date)
+
+            print("Applying filters...")
+            await self.apply_filters()
+
+            scraped_result = await self.scrape_asset_assignments()
+            truck_headers = scraped_result.get("truck_assign_headers", [])
+
+            total_reconciled = 0
+            total_checked = 0
+
+            if truck_headers:
+                print(f"📊 Found {len(truck_headers)} truck_assign_headers on {normalized_date}:")
+                for r in truck_headers:
+                    try:
+                        print(f"  - {r['name']} -> Current Tech: {r['tech_name']} | WO #{r['work_order_number']}")
+                    except Exception:
+                        safe_name = str(r.get('name', '')).encode('ascii', errors='replace').decode()
+                        safe_tech = str(r.get('tech_name', '')).encode('ascii', errors='replace').decode()
+                        print(f"  - {safe_name} -> Current Tech: {safe_tech} | WO #{r.get('work_order_number')}")
+
+                if click_wos:
+                    print(f"\n🖱️ Reconciling {len(truck_headers)} truck work orders with Dashboard config for {normalized_date}...")
+                    for idx, r in enumerate(truck_headers, 1):
+                        wo_num = r.get("work_order_number")
+                        truck_name = r.get("name")
+                        expected_tech = self.get_expected_tech_for_truck(truck_name)
+
+                        if not expected_tech:
+                            print(f"[{idx}/{len(truck_headers)}] Truck '{truck_name}' is inactive or has no expected tech in Dashboard config. Skipping.")
+                            continue
+
+                        if wo_num:
+                            total_checked += 1
+                            print(f"\n[{idx}/{len(truck_headers)}] Checking WO #{wo_num} ({truck_name}) on {normalized_date}...")
+                            updated = await self.click_and_reconcile_work_order(
+                                work_order_number=wo_num,
+                                truck_name=truck_name,
+                                expected_tech=expected_tech
+                            )
+                            if updated:
+                                total_reconciled += 1
+            else:
+                print(f"⚠️ No truck_assign_headers found on {normalized_date}.")
+
+            return {
+                "truck_assign_headers": truck_headers,
+                "count": len(truck_headers),
+                "reassignments": total_reconciled,
+                "checked": total_checked
+            }
+        except Exception as e:
+            print(f"❌ Error during asset reconciliation on {date_str}: {e}")
+            return {"truck_assign_headers": [], "count": 0, "reassignments": 0, "checked": 0, "error": str(e)}
+
     async def run(
         self,
         start_date: Optional[str] = None,
@@ -1118,7 +1228,7 @@ class AssetAssignmentScraper(BaseScraper):
             pst_now = self.get_pst_now()
             start_dt = pst_now
             if start_date:
-                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d"):
+                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d", "%m/%d/%y", "%m-%d-%y"):
                     try:
                         start_dt = datetime.strptime(start_date.strip(), fmt)
                         break
@@ -1127,7 +1237,7 @@ class AssetAssignmentScraper(BaseScraper):
 
             if end_date:
                 end_dt = None
-                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d"):
+                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d", "%m/%d/%y", "%m-%d-%y"):
                     try:
                         end_dt = datetime.strptime(end_date.strip(), fmt)
                         break
@@ -1152,63 +1262,19 @@ class AssetAssignmentScraper(BaseScraper):
                 current_dt = start_dt + timedelta(days=d)
                 date_str = current_dt.strftime('%m/%d/%Y')
 
-                # Weekend skip check
-                skip_weekends = self.template_data.get("skip_vehicle_work_orders_on_weekends", True)
-                if skip_weekends and current_dt.weekday() in (5, 6):
-                    print(f"\n⏭️ Skipping weekend date {date_str} (Saturday/Sunday).")
-                    continue
-
                 print(f"\n" + "=" * 60)
                 print(f"🗓️ Processing Date [{d + 1}/{num_days}]: {date_str}")
                 print(f"=" * 60)
 
-                # Fetch fresh template configuration from Dashboard API so latest changes are always live
-                self.template_data = self._load_template()
-
-                print(f"Setting Date filter: {date_str} to {date_str}")
-                await self.set_date_filter(date_str, date_str)
-
-                print("Applying filters...")
-                await self.apply_filters()
-
-                scraped_result = await self.scrape_asset_assignments()
-                truck_headers = scraped_result.get("truck_assign_headers", [])
-
-                if truck_headers:
-                    print(f"📊 Found {len(truck_headers)} truck_assign_headers on {date_str}:")
-                    for r in truck_headers:
-                        try:
-                            print(f"  - {r['name']} -> Current Tech: {r['tech_name']} | WO #{r['work_order_number']}")
-                        except Exception:
-                            safe_name = str(r.get('name', '')).encode('ascii', errors='replace').decode()
-                            safe_tech = str(r.get('tech_name', '')).encode('ascii', errors='replace').decode()
-                            print(f"  - {safe_name} -> Current Tech: {safe_tech} | WO #{r.get('work_order_number')}")
-
-                    all_truck_headers.extend(truck_headers)
-
-                    if click_wos:
-                        print(f"\n🖱️ Reconciling {len(truck_headers)} truck work orders with Dashboard config for {date_str}...")
-                        for idx, r in enumerate(truck_headers, 1):
-                            wo_num = r.get("work_order_number")
-                            truck_name = r.get("name")
-                            expected_tech = self.get_expected_tech_for_truck(truck_name)
-
-                            if not expected_tech:
-                                print(f"[{idx}/{len(truck_headers)}] Truck '{truck_name}' is inactive or has no expected tech in Dashboard config. Skipping.")
-                                continue
-
-                            if wo_num:
-                                total_checked += 1
-                                print(f"\n[{idx}/{len(truck_headers)}] Checking WO #{wo_num} ({truck_name}) on {date_str}...")
-                                updated = await self.click_and_reconcile_work_order(
-                                    work_order_number=wo_num,
-                                    truck_name=truck_name,
-                                    expected_tech=expected_tech
-                                )
-                                if updated:
-                                    total_reconciled += 1
-                else:
-                    print(f"⚠️ No truck_assign_headers found on {date_str}.")
+                recon_res = await self.reconcile_single_date(
+                    date_str=date_str,
+                    click_wos=click_wos,
+                    status_name=target_status
+                )
+                headers = recon_res.get("truck_assign_headers", [])
+                all_truck_headers.extend(headers)
+                total_checked += recon_res.get("checked", 0)
+                total_reconciled += recon_res.get("reassignments", 0)
 
             print(f"\n" + "=" * 60)
             print(f"✅ Asset Assignment run completed: Checked {total_checked} work orders across {num_days} days, reassignments performed: {total_reconciled}")

@@ -1498,7 +1498,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 template_processed_counts = {}
 
                 if not dry_run:
-                    if board_date_str != db_date_key:
+                    if board_date_str != db_date_key or "DispatchBoard" not in (self.page.url or ""):
                         print(f"🗓️ Navigating UI date picker to {db_date_key}...")
                         nav_ok = await self.navigate_to_board_date(current_date)
                         print(f"🔄 Fetching board data for target date {db_date_key}...")
@@ -1858,6 +1858,37 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 if not dry_run:
                     _records_processed += 1
+
+                    # Step 2: On the SAME date, run Asset Assignment Reconciler to verify & reconcile truck assignments!
+                    formatted_current_date = current_date.strftime("%m/%d/%Y")
+                    print(f"\n" + "-" * 60)
+                    print(f"🚛 [Step 2: Asset Assignment] Checking & Reconciling truck assignments for {formatted_current_date}...")
+                    print(f"-" * 60)
+                    try:
+                        if not hasattr(self, 'asset_scraper') or self.asset_scraper is None:
+                            try:
+                                from asset_assignment_scraper import AssetAssignmentScraper
+                            except ImportError:
+                                try:
+                                    from dispatch.asset_assignment_scraper import AssetAssignmentScraper
+                                except ImportError:
+                                    from automation.scrapers.asset_assignment_scraper import AssetAssignmentScraper
+                            self.asset_scraper = AssetAssignmentScraper(template_path=self.template_path)
+                            self.asset_scraper.playwright = self.playwright
+                            self.asset_scraper.browser = self.browser
+                            self.asset_scraper.context = self.context
+                            self.asset_scraper.page = self.page
+
+                        self.asset_scraper.template_data = self.template_data
+                        recon_result = await self.asset_scraper.reconcile_single_date(
+                            date_str=formatted_current_date,
+                            click_wos=True
+                        )
+                        recon_cnt = recon_result.get('checked', 0)
+                        recon_fixed = recon_result.get('reassignments', 0)
+                        print(f"✅ [Step 2: Asset Assignment] Completed for {formatted_current_date}: Checked {recon_cnt} truck work orders, Reassigned {recon_fixed}.")
+                    except Exception as asset_err:
+                        print(f"⚠️ [Step 2: Asset Assignment] Note/Error on {formatted_current_date}: {asset_err}")
 
             print("\n🎉 Dispatch Board Display Automation Finished Successfully!")
             self.progress_info = {
