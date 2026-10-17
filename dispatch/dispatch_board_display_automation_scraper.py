@@ -7,6 +7,7 @@ on the FieldEdge Dispatch Board up to 30 days in advance.
 import os
 import sys
 import json
+import re
 import asyncio
 import random
 from datetime import datetime, timedelta
@@ -31,10 +32,9 @@ try:
 except ImportError:
     from dispatch.base_scraper import BaseScraper  # type: ignore
 
-try:
-    from asset_assignment_scraper import AssetAssignmentScraper
-except ImportError:
-    from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
+
+
+
 
 
 
@@ -46,11 +46,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
     def __init__(self, template_path: Optional[str] = None):
         super().__init__()
         self.scraper_name = "dispatch-board-display-automation"
-        self.template_path = template_path or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "config",
-            "dispatch_board_template.json"
-        )
+        if template_path:
+            self.template_path = template_path
+        else:
+            _curr = os.path.dirname(os.path.abspath(__file__))
+            _candidate1 = os.path.join(_curr, "config", "dispatch_board_template.json")
+            _candidate2 = os.path.join(os.path.dirname(_curr), "config", "dispatch_board_template.json")
+            self.template_path = _candidate1 if os.path.exists(_candidate1) else _candidate2
         self.template_data = self._load_template()
 
     def _load_history(self) -> Dict:
@@ -302,9 +304,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return strings
 
     @staticmethod
-    def check_item_match(wo: Dict, canon_target: str, time_key: Optional[str] = None, require_customer_match: bool = False) -> bool:
+    def check_item_match(
+        wo: Dict,
+        canon_target: str,
+        time_key: Optional[str] = None,
+        require_customer_match: bool = False,
+        is_service_wo: bool = False
+    ) -> bool:
         """Check if a target canonical string matches a schedule item object."""
         if not canon_target:
+            return False
+
+        wo_is_sn = bool(wo.get("is_service_needed"))
+        if is_service_wo and not wo_is_sn:
+            return False
+        if not is_service_wo and wo_is_sn:
             return False
 
         w_time = wo.get("time_key", "")
@@ -312,11 +326,17 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
 
         c_cust = wo.get("canon_customer", "")
-        c_comb = wo.get("canon_combined", "")
         c_strings = wo.get("canon_strings", [])
 
-        if require_customer_match:
-            if c_cust and (canon_target == c_cust or canon_target in c_cust or c_cust in canon_target):
+        # For customer match or short targets (<= 4 chars, e.g. '71', '01', '03', '04', '90'):
+        # NEVER do raw substring search in combined text, because short numbers match zip codes (98371),
+        # phone numbers, lat/long, timestamps, balances, and IDs.
+        if require_customer_match or len(canon_target) <= 4:
+            if c_cust == canon_target:
+                return True
+            if canon_target in c_strings:
+                return True
+            if c_cust and (c_cust.startswith(canon_target) or c_cust.endswith(canon_target)):
                 return True
             return False
 
@@ -324,19 +344,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if canon_target in c_strings:
             return True
 
-        # Exact match in customer name
-        if c_cust and canon_target == c_cust:
+        # Exact match or substring in customer name
+        if c_cust and (canon_target == c_cust or canon_target in c_cust or c_cust in canon_target):
             return True
 
-        # Match in combined string
-        if c_comb and (canon_target == c_comb or canon_target in c_comb):
+        # Match in combined string (only for longer target strings >= 5 chars)
+        c_comb = wo.get("canon_combined", "")
+        if c_comb and len(canon_target) >= 5 and (canon_target == c_comb or canon_target in c_comb):
             return True
-
-        # Substring in any extracted string (if target is at least 3 chars long)
-        if len(canon_target) >= 3:
-            for s in c_strings:
-                if s and (canon_target in s or (len(s) >= 3 and s in canon_target)):
-                    return True
 
         return False
 
@@ -376,22 +391,44 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     cust_name = str(item.get("CustomerName") or item.get("Customer") or item.get("Name") or item.get("Title") or "")
                     canon_customer = self.canonical_str(cust_name)
                     
-                    dt_str = item.get("ScheduleDateTime")
+                    dt_str = (
+                        item.get("ScheduleDateTime") or
+                        item.get("ScheduledDateTime") or
+                        item.get("ScheduledFrom") or
+                        item.get("StartDateTime") or
+                        item.get("StartTime")
+                    )
                     time_key = ""
                     if dt_str:
-                        try:
-                            dt_str_clean = dt_str.replace("Z", "").replace("T", " ").split(".")[0].strip()
-                            local_dt = datetime.strptime(dt_str_clean, "%Y-%m-%d %H:%M:%S")
-                            time_key = local_dt.strftime("%I:%M %p")
-                            if time_key.startswith("0"): time_key = time_key[1:]
-                        except Exception:
-                            pass
+                        dt_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
+                        for fmt in [
+                            "%Y-%m-%d %H:%M:%S",
+                            "%Y-%m-%d %H:%M",
+                            "%I:%M %p",
+                            "%H:%M:%S",
+                            "%H:%M"
+                        ]:
+                            try:
+                                local_dt = datetime.strptime(dt_clean, fmt)
+                                time_key = local_dt.strftime("%I:%M %p")
+                                if time_key.startswith("0"): time_key = time_key[1:]
+                                break
+                            except Exception:
+                                pass
+
+                    item_prio = str(item.get("Priority") or item.get("PriorityName") or item.get("PriorityDescription") or "")
+                    is_sn = (
+                        "service needed" in item_prio.lower() or
+                        "7.12" in item_prio or
+                        any("service needed" in s.lower() or "7.12" in s for s in canon_strings)
+                    )
                             
                     existing_wos[canon_tech].append({
                         "canon_customer": canon_customer,
                         "canon_strings": canon_strings,
                         "canon_combined": canon_combined,
                         "time_key": time_key,
+                        "is_service_needed": is_sn,
                         "is_appointment": False
                     })
 
@@ -784,7 +821,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         tech_name: Optional[str] = None,
         mark_completed: bool = False,
         immediate_action: str = "Create Work Order",
-        task_type: Optional[str] = None
+        task_type: Optional[str] = None,
+        summary_note: Optional[str] = None
     ) -> bool:
         """
         Fill the FieldEdge Create Work Order modal form and Save.
@@ -953,12 +991,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception as e:
                 print(f"  Note on Date/Time/Duration fields: {e}")
 
+            # Blur active input field first to ensure Vue v-model reactivity commits data
+            try:
+                await self.page.evaluate("() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }")
+            except Exception:
+                pass
+
             save_btn = None
             for save_sel in [
                 "//button[contains(@class,'confirm') and .//span[normalize-space()='Save']]",
                 "//*[@id='scroll-container']/div/div[5]/div/button[3]",
                 "div.on-bottom-modal button.confirm_hsagT",
                 "button.confirm_hsagT",
+                "button:has-text('Save')",
             ]:
                 try:
                     loc = self.page.locator(save_sel).last
@@ -976,30 +1021,125 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     print(f"⚠️ Save button not visible for '{customer_name}'. Aborting.")
                     return False
 
-            print(f"  -> Waiting 2s for Vue inputs to debounce before saving...")
-            await self.page.wait_for_timeout(2000)
-            await save_btn.click(force=True)
+            print(f"  -> Waiting for form to validate and Save button to be ready...")
+            await self.page.wait_for_timeout(1500)
+
+            # Wait up to 5s for Vue to enable the Save button naturally
+            for _ in range(20):
+                try:
+                    is_disabled = await save_btn.get_attribute("disabled")
+                    btn_class = await save_btn.get_attribute("class") or ""
+                    aria_disabled = await save_btn.get_attribute("aria-disabled")
+                    if is_disabled is None and "disabled" not in btn_class and aria_disabled != "true":
+                        break
+                except Exception:
+                    pass
+                await self.page.wait_for_timeout(250)
+
+            await save_btn.scroll_into_view_if_needed()
+            await self.page.wait_for_timeout(400)
+
+            try:
+                await save_btn.click(timeout=5000)
+            except Exception as click_err:
+                print(f"  -> Direct click fallback ({click_err}), clicking via JS...")
+                await self.page.evaluate("(btn) => { if (btn) btn.click(); }", await save_btn.element_handle())
+
             print(f"✅ Clicked Save for: '{customer_name}'")
 
             # -- WAIT FOR SAVE TO COMPLETE --
-            # Wait for the modal to disappear to guarantee the save was processed by the server
-            try:
-                modal = self.page.locator("div.create-workorder-form-grid").first
-                print("  -> Waiting for Save to process (modal to close)...")
-                
-                modal_closed = False
-                try:
-                    await modal.wait_for(state="hidden", timeout=3000)
+            # Wait for modal to disappear to guarantee the save was processed by the FieldEdge server
+            customer_xpath_val = self.rules.get(
+                'dispatch_board_customer_xpath',
+                "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]"
+            )
+            customer_field = self.page.locator(customer_xpath_val).first
+
+            print("  -> Waiting for Save to process (modal to close)...")
+            modal_closed = False
+            _save_start = time.time()
+            _reclicked_save = False
+
+            # Wait 1.5s after click so request starts and UI transitions
+            await self.page.wait_for_timeout(1500)
+
+            while time.time() - _save_start < 30:
+                # Check for redirect to DispatchSummary (for technician work orders)
+                current_url = self.page.url
+                if "DispatchSummary" in current_url:
                     modal_closed = True
+                    break
+
+                # Check if any error toast or banner appeared
+                try:
+                    err_text = await self.page.evaluate("""
+                        () => {
+                            const selectors = [
+                                '.toast-error', '.toast-message', '.error-message',
+                                '.validation-message', '.v-messages__message', '.alert-danger',
+                                '[role="alert"]', '.notification-error', '.modal-error'
+                            ];
+                            for (const sel of selectors) {
+                                const el = document.querySelector(sel);
+                                if (el && el.offsetParent !== null) {
+                                    const txt = (el.textContent || '').trim();
+                                    if (txt) return txt;
+                                }
+                            }
+                            return '';
+                        }
+                    """)
+                    if err_text:
+                        print(f"  ⚠️ Error/notice detected on page: '{err_text}'")
                 except Exception:
                     pass
-                
-                if modal_closed:
-                    print("  -> Save processed successfully (modal closed).")
-                else:
-                    print("  -> Save processed (proceeding without waiting for modal to hide in UI).")
-            except Exception as e:
-                print(f"  ⚠️ Unexpected error while waiting for modal to close: {e}")
+
+                # Check if modal indicators are still visible
+                save_btn_visible = False
+                try:
+                    if await save_btn.count() > 0 and await save_btn.is_visible():
+                        save_btn_visible = True
+                except Exception:
+                    save_btn_visible = False
+
+                customer_visible = False
+                try:
+                    if await customer_field.count() > 0 and await customer_field.is_visible():
+                        customer_visible = True
+                except Exception:
+                    customer_visible = False
+
+                modal_container_visible = False
+                try:
+                    modal_cont = self.page.locator("div.on-bottom-modal, div.create-workorder-form-grid, .modal.show, .modal-open, .v-dialog--active").first
+                    if await modal_cont.count() > 0 and await modal_cont.is_visible():
+                        modal_container_visible = True
+                except Exception:
+                    modal_container_visible = False
+
+                # Modal is closed ONLY when both save button and customer field are no longer visible
+                if not save_btn_visible and not customer_visible and not modal_container_visible:
+                    modal_closed = True
+                    elapsed = round(time.time() - _save_start, 1)
+                    print(f"  -> Save processed successfully (modal closed in {elapsed}s).")
+                    break
+
+                # If 10s passed and modal is still visible without errors, try clicking save once more
+                if time.time() - _save_start >= 10.0 and not _reclicked_save:
+                    _reclicked_save = True
+                    print("  -> Modal still open after 10s, attempting single re-click on Save...")
+                    try:
+                        await save_btn.click(timeout=3000)
+                    except Exception:
+                        pass
+
+                await self.page.wait_for_timeout(1000)
+
+            if not modal_closed:
+                print(f"  ❌ Modal did not close after 30s for '{customer_name}'. Work order save was not confirmed!")
+                return False
+
+            await self.page.wait_for_timeout(2000)
 
             if mark_completed:
                 # Active technician flow → FieldEdge redirects to DispatchSummary after save
@@ -1039,6 +1179,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await self.page.wait_for_timeout(300)
                         except Exception:
                             pass
+
 
                         await summary_save_btn.scroll_into_view_if_needed()
                         print("  -> Waiting for DispatchSummary Save button to be enabled & interactable...")
@@ -1299,6 +1440,17 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             h for h in self.template_data.get("truck_assign_headers", [])
             if h.get("active", True)
         ]
+
+        # Exempt Out of Service vehicles from appearing anywhere on the dispatch board
+        oos_names = {
+            self.canonical_str(s.get("asset_name", ""))
+            for s in self.template_data.get("out_of_service_assets", [])
+            if s.get("active", True)
+        }
+        if oos_names:
+            static_headers = [h for h in static_headers if self.canonical_str(h.get("name", "")) not in oos_names]
+            truck_assign_headers = [h for h in truck_assign_headers if self.canonical_str(h.get("name", "")) not in oos_names]
+            print(f"🚫 Exempted {len(oos_names)} Out of Service vehicle(s) from dispatch board headers.")
         tech_defaults = self.template_data.get("technician_display_defaults", {})
         tech_jobs = self.template_data.get("tech_jobs", [])
 
@@ -1349,67 +1501,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 start_dt = self.get_pst_now().date()
         else:
             start_dt = self.get_pst_now().date()
-
-        # Process Lock - Prevent multiple simultaneous runs of this scraper
-        import atexit
-
-        def _is_pid_running(pid: int) -> bool:
-            if pid <= 0:
-                return False
-            try:
-                if os.name == 'nt':
-                    import ctypes
-                    SYNCHRONIZE = 0x00100000
-                    process = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-                    if process:
-                        ctypes.windll.kernel32.CloseHandle(process)
-                        return True
-                    return False
-                else:
-                    os.kill(pid, 0)
-                    return True
-            except Exception:
-                return False
-
-        lock_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dispatch_board_display_automation.lock")
-        
-        def _cleanup_lock():
-            try:
-                if os.path.exists(lock_file_path):
-                    os.remove(lock_file_path)
-            except Exception:
-                pass
-                
-        atexit.register(_cleanup_lock)
-
-        if os.path.exists(lock_file_path):
-            try:
-                with open(lock_file_path, "r") as f:
-                    content = f.read().strip()
-                if content:
-                    parts = content.split("|")
-                    if len(parts) == 2:
-                        lock_pid = int(parts[0])
-                        lock_start_time = float(parts[1])
-                    else:
-                        lock_pid = 0
-                        lock_start_time = float(parts[0])
-
-                    if lock_pid > 0 and lock_pid != os.getpid() and lock_pid != 1 and _is_pid_running(lock_pid):
-                        if time.time() - lock_start_time < 7200:
-                            print(f"⛔ SCRAPER IS ALREADY RUNNING (PID {lock_pid}, Started {round((time.time() - lock_start_time)/60, 1)} mins ago). Exiting to prevent duplicate creation.")
-                            return
-                    else:
-                        print(f"🧹 Found stale lock file from inactive process (PID {lock_pid}). Cleaning up lock...")
-            except Exception:
-                pass
-            _cleanup_lock()
-
-        try:
-            with open(lock_file_path, "w") as f:
-                f.write(f"{os.getpid()}|{time.time()}")
-        except Exception:
-            pass
 
         print(f"🚀 Starting Dispatch Board Display Automation for next {days} days...")
         if dry_run:
@@ -1548,13 +1639,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     # Check if the header already exists on the board for the target date
                     if not dry_run:
                         canon_target = self.canonical_str(name)
+                        is_service_wo = bool(
+                            header.get('is_service_needed_duplicate') or
+                            (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
+                        )
+                        tracking_target = f"{canon_target}_serviceneeded" if is_service_wo else canon_target
                         try:
                             t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
                             time_key = t_dt.strftime("%I:%M %p")
                             if time_key.startswith("0"): time_key = time_key[1:]
                         except Exception:
                             time_key = ""
-                        key = f"{canon_target}|{time_key}" if time_key else canon_target
+                        key = f"{tracking_target}|{time_key}" if time_key else tracking_target
                         
                         canon_h_tech = self.canonical_str(h_tech or '')
                         
@@ -1562,32 +1658,40 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                         target_count_idx = template_processed_counts[processed_key]
                         
-                        # Check persistent creation history first
-                        if self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
-                            print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                            continue
+                        # Check persistent creation history first (bypassed to check live board state directly)
+                        # if self.is_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx):
+                        #     print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
+                        #     continue
 
                         board_count = 0
                         for canon_tech_key, wo_list in existing_wos.items():
-                            tech_match = (
-                                not canon_h_tech or not canon_tech_key or
-                                canon_tech_key == canon_h_tech or
-                                canon_h_tech in canon_tech_key or
-                                canon_tech_key in canon_h_tech
-                            )
+                            if canon_h_tech:
+                                tech_match = (
+                                    canon_tech_key == canon_h_tech or
+                                    canon_h_tech in canon_tech_key or
+                                    canon_tech_key in canon_h_tech
+                                )
+                            else:
+                                tech_match = not canon_tech_key
+
                             if tech_match:
                                 for wo in wo_list:
-                                    if self.check_item_match(wo, canon_target, time_key):
+                                    if self.check_item_match(wo, canon_target, time_key, is_service_wo=is_service_wo):
                                         board_count += 1
                          
                         if board_count >= target_count_idx:
                             print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) already exists on the board for tech '{h_tech}'. Recording in persistent history & skipping creation.")
-                            self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                            self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                             continue
 
                     if dry_run:
                         print(f"  [Dry-Run] Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
                     else:
+                        is_service_wo = bool(
+                            header.get('is_service_needed_duplicate') or
+                            (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
+                        )
+                        header_summary = header.get('service_note', '') if is_service_wo else None
                         res = await self.fill_and_save_work_order(
                             customer_name=name,
                             task=h_task,
@@ -1597,10 +1701,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             start_time=start_time,
                             duration=duration,
                             tech_name=h_tech,
-                            immediate_action=immediate_action
+                            immediate_action=immediate_action,
+                            summary_note=None
                         )
                         if res:
-                            self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
+                            self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
                             # Refresh board data after save
                             f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                             if f_date == db_date_key:
@@ -1634,6 +1739,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             processed_key = (canon_h_tech, key)
                             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                             target_count_idx = template_processed_counts[processed_key]
+
+                            is_service_needed_asset = any(
+                                self.canonical_str(s.get("asset_name", "")) == canon_target
+                                for s in self.template_data.get("service_needed_assets", [])
+                                if s.get("active", True)
+                            )
                             
                             # Check persistent creation history first
                             if self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
@@ -1655,7 +1766,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                              c_cust = wo.get("canon_customer", "")
                                              w_time = wo.get("time_key", "")
                                              name_match = c_cust == canon_target
-                                             time_match = not time_key or not w_time or time_key == w_time
+                                             time_match = is_service_needed_asset or not time_key or not w_time or time_key == w_time
                                              if name_match and time_match:
                                                  board_count += 1
                                          else:
@@ -1690,7 +1801,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 start_time=start_time,
                                 duration=duration,
                                 tech_name=h_tech,
-                                immediate_action=immediate_action
+                                immediate_action=immediate_action,
+                                summary_note=None
                             )
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
@@ -1797,7 +1909,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             duration=duration,
                             tech_name=t_tech,
                             mark_completed=True,
-                            immediate_action=immediate_action
+                            immediate_action=immediate_action,
+                            summary_note=None
                         )
                         if res:
                             self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": t_tech, "time": time_key})
@@ -1868,7 +1981,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             tech_name=t_assignment_name,
                             mark_completed=True,
                             immediate_action=immediate_action,
-                            task_type=task
+                            task_type=task,
+                            summary_note=None
                         )
                         if res:
                             self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name})
@@ -1880,33 +1994,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if not dry_run:
                     _records_processed += 1
 
-                    # Step 2: On the SAME date, run Asset Assignment Reconciler to verify & reconcile truck assignments!
-                    formatted_current_date = current_date.strftime("%m/%d/%Y")
-                    print(f"\n" + "-" * 60)
-                    print(f"🚛 [Step 2: Asset Assignment] Checking & Reconciling truck assignments for {formatted_current_date}...")
-                    print(f"-" * 60)
-                    try:
-                        if not hasattr(self, 'asset_scraper') or self.asset_scraper is None:
-                            try:
-                                from asset_assignment_scraper import AssetAssignmentScraper
-                            except ImportError:
-                                from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
-                            self.asset_scraper = AssetAssignmentScraper(template_path=self.template_path)
-                            self.asset_scraper.playwright = self.playwright
-                            self.asset_scraper.browser = self.browser
-                            self.asset_scraper.context = self.context
-                            self.asset_scraper.page = self.page
 
-                        self.asset_scraper.template_data = self.template_data
-                        recon_result = await self.asset_scraper.reconcile_single_date(
-                            date_str=formatted_current_date,
-                            click_wos=True
-                        )
-                        recon_cnt = recon_result.get('checked', 0)
-                        recon_fixed = recon_result.get('reassignments', 0)
-                        print(f"✅ [Step 2: Asset Assignment] Completed for {formatted_current_date}: Checked {recon_cnt} truck work orders, Reassigned {recon_fixed}.")
-                    except Exception as asset_err:
-                        print(f"⚠️ [Step 2: Asset Assignment] Note/Error on {formatted_current_date}: {asset_err}")
 
             print("\n🎉 Dispatch Board Display Automation Finished Successfully!")
             self.progress_info = {
@@ -1928,15 +2016,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             print(f"Scraping error: {e}")
             _error_occurred = f"{str(e)}\n{traceback.format_exc()}"
         finally:
-            # Clean up process lock file
-            try:
-                if os.path.exists(lock_file_path):
-                    os.remove(lock_file_path)
-            except Exception:
-                pass
-
-            if not dry_run and self.browser:
-                await self.browser.close()
+            if not dry_run:
+                await self.cleanup()
 
             # -- Execution completion summary --
             _elapsed = time.time() - _start_time
@@ -1944,7 +2025,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 print(f"⚠️ Execution finished with ERROR ({round(_elapsed, 1)}s):")
                 print(_error_occurred)
             else:
-                print(f"🎉 Execution completed successfully in {round(_elapsed, 1)}s")
+                print(f"🎉 Execution completed successfully in {round(_elapsed, 1)}s (Processed {_records_processed} records)")
 
 if __name__ == "__main__":
     import os
@@ -1954,28 +2035,6 @@ if __name__ == "__main__":
     _dispatch_dir = os.path.dirname(os.path.abspath(__file__))
     if _dispatch_dir not in sys.path:
         sys.path.insert(0, _dispatch_dir)
-
-    _curr_dir = _dispatch_dir
-    _backend_path = None
-    while _curr_dir:
-        _candidate = os.path.join(_curr_dir, "Backend")
-        if os.path.exists(_candidate) and os.path.isdir(_candidate):
-            _backend_path = _candidate
-            break
-        _parent = os.path.dirname(_curr_dir)
-        if _parent == _curr_dir:
-            break
-        _curr_dir = _parent
-
-    if _backend_path and _backend_path not in sys.path:
-        sys.path.insert(0, _backend_path)
-
-    try:
-        import django
-        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
-        django.setup()
-    except Exception:
-        pass
 
     parser = argparse.ArgumentParser(description="Run Dispatch Board Display Automation Scraper (Standalone)")
     parser.add_argument("--days", type=int, default=2, help="Number of days to process (default: 2)")

@@ -1,5 +1,7 @@
 {
   "skip_vehicle_work_orders_on_weekends": true,
+  "service_needed_assets": [],
+  "out_of_service_assets": [],
   "general_settings": {
     "task": "8 - Internal",
     "lead_source": "Sterling Septic -FE",
@@ -109,7 +111,7 @@
   "truck_assign_headers": [
     {
       "name": "🚛 | 123",
-      "active": true,
+      "active": false,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -123,7 +125,7 @@
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
       "duration": "1:00",
-      "tech_name": "d 𝐑𝐮𝐬𝐬𝐞𝐥l"
+      "tech_name": ""
     },
     {
       "name": "🚛 | 124",
@@ -160,6 +162,42 @@
       "start_time": "06:00 AM",
       "duration": "1:00",
       "tech_name": "l 𝐂𝐫𝐢𝐬"
+    },
+    {
+      "name": "🚛 | 122",
+      "active": true,
+      "department": "pump",
+      "priority": "[5] PT (Asset Assignment)",
+      "start_time": "06:00 AM",
+      "duration": "1:00",
+      "tech_name": ""
+    },
+    {
+      "name": "🚛 | 87",
+      "active": true,
+      "department": "pump",
+      "priority": "[5] PT (Asset Assignment)",
+      "start_time": "06:00 AM",
+      "duration": "1:00",
+      "tech_name": ""
+    },
+    {
+      "name": "🛻 | 01",
+      "active": true,
+      "department": "service",
+      "priority": "[5] SER TR (Asset Assignment)",
+      "start_time": "06:00 AM",
+      "duration": "1:00",
+      "tech_name": ""
+    },
+    {
+      "name": "🛻 | 71",
+      "active": true,
+      "department": "service",
+      "priority": "[5] SER TR (Asset Assignment)",
+      "start_time": "06:00 AM",
+      "duration": "1:00",
+      "tech_name": ""
     }
   ],
   "static_headers": [
