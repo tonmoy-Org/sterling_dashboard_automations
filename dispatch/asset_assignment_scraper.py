@@ -2047,6 +2047,8 @@ class AssetAssignmentScraper(BaseScraper):
 
         try:
             await self.initialize()
+            # Reload live template configuration from Dashboard API (Single Source of Truth)
+            self.template_data = self._load_template()
 
             target_url = (
                 url

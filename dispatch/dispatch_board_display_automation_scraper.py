@@ -1425,6 +1425,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception:
                 pass
 
+        # Reload live template configuration from Dashboard API (Single Source of Truth)
+        self.template_data = self._load_template()
 
         settings = self.template_data.get("general_settings", {})
         task = settings.get("task", "8 - INTERNAL")
