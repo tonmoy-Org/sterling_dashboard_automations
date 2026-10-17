@@ -120,7 +120,7 @@
     },
     {
       "name": "🚛 | 90",
-      "active": true,
+      "active": false,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -165,7 +165,7 @@
     },
     {
       "name": "🚛 | 122",
-      "active": true,
+      "active": false,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -174,7 +174,7 @@
     },
     {
       "name": "🚛 | 87",
-      "active": true,
+      "active": false,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -183,7 +183,7 @@
     },
     {
       "name": "🛻 | 01",
-      "active": true,
+      "active": false,
       "department": "service",
       "priority": "[5] SER TR (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -192,7 +192,7 @@
     },
     {
       "name": "🛻 | 71",
-      "active": true,
+      "active": false,
       "department": "service",
       "priority": "[5] SER TR (Asset Assignment)",
       "start_time": "06:00 AM",
@@ -1085,6 +1085,128 @@
       "duration": "0:30",
       "tech_name": "p6 𝗞𝘆𝗹𝗲",
       "active": true
+    }
+  ],
+  "available_assets": [
+    {
+      "name": "🚛 | 123",
+      "category": "Truck",
+      "department": "pump",
+      "assigned_tech": "b 𝐌𝐚𝐜𝐤𝐢𝐞"
+    },
+    {
+      "name": "🚛 | 90",
+      "category": "Truck",
+      "department": "pump",
+      "assigned_tech": ""
+    },
+    {
+      "name": "🚛 | 124",
+      "category": "Truck",
+      "department": "pump",
+      "assigned_tech": "f 𝐒𝐤𝐲𝐥𝐞𝐫"
+    },
+    {
+      "name": "🛻 | 03",
+      "category": "Truck",
+      "department": "service",
+      "assigned_tech": "h 𝐃𝐚𝐧𝐧𝐲"
+    },
+    {
+      "name": "🛻 | 02",
+      "category": "Truck",
+      "department": "service",
+      "assigned_tech": "j 𝐀𝐡𝐤𝐞𝐞𝐦"
+    },
+    {
+      "name": "🛻 | 04",
+      "category": "Truck",
+      "department": "service",
+      "assigned_tech": "l 𝐂𝐫𝐢𝐬"
+    },
+    {
+      "name": "🚛 | 122",
+      "category": "Truck",
+      "department": "pump",
+      "assigned_tech": ""
+    },
+    {
+      "name": "🚛 | 87",
+      "category": "Truck",
+      "department": "pump",
+      "assigned_tech": ""
+    },
+    {
+      "name": "🛻 | 01",
+      "category": "Truck",
+      "department": "service",
+      "assigned_tech": ""
+    },
+    {
+      "name": "🛻 | 71",
+      "category": "Truck",
+      "department": "service",
+      "assigned_tech": ""
+    },
+    {
+      "name": "▭ | T-2 10k TILT",
+      "category": "Trailer",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "▭ | T-3 10k TILT",
+      "category": "Trailer",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "▭ | T-4 DUMP 10K",
+      "category": "Trailer",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "▭ | T-1 7K TILT",
+      "category": "Trailer",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "▭ | T-05 💧",
+      "category": "Trailer",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "▭ | T-6 14K TILT",
+      "category": "Trailer",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "🏗️ | U-17 02",
+      "category": "Excavator",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "🏗️ | U-17 01",
+      "category": "Excavator",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "🏗️ | U-40 03",
+      "category": "Excavator",
+      "department": "general",
+      "assigned_tech": "s4"
+    },
+    {
+      "name": "✅ POST-TRIP",
+      "category": "Trailer",
+      "department": "general",
+      "assigned_tech": "s7"
     }
   ]
 }

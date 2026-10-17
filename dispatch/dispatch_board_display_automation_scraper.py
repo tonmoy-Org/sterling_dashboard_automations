@@ -1398,7 +1398,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 return False
         return True
 
-    async def run(self, days: int = 30, dry_run: bool = False, active_techs: Optional[List[str]] = None, start_date_str: Optional[str] = None, on_progress: Optional[Callable] = None):
+    async def run(self, days: int = 30, dry_run: bool = False, active_techs: Optional[List[str]] = None, start_date_str: Optional[str] = None, on_progress: Optional[Callable] = None, skip_asset: bool = False):
         """
         Main execution method for Dispatch Board Display Automation.
         """
@@ -1996,9 +1996,60 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if not dry_run:
                     _records_processed += 1
 
+                    if not skip_asset:
+                        # Step 2: On the SAME date, run Asset Assignment Reconciler to verify & reconcile truck assignments!
+                        formatted_current_date = current_date.strftime("%m/%d/%Y")
+                        print(f"\n" + "-" * 60)
+                        print(f"🚛 [Step 2: Asset Assignment] Checking & Reconciling truck assignments for {formatted_current_date}...")
+                        print(f"-" * 60)
+                        if on_progress:
+                            try:
+                                self.progress_info["status_message"] = f"Step 2: Reconciling Asset Assignments for Day {d + 1} ({date_str})"
+                                on_progress(self.progress_info)
+                            except Exception:
+                                pass
+                        try:
+                            if not hasattr(self, 'asset_scraper') or self.asset_scraper is None:
+                                try:
+                                    from asset_assignment_scraper import AssetAssignmentScraper
+                                except ImportError:
+                                    from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
+                                self.asset_scraper = AssetAssignmentScraper(template_path=self.template_path)
 
+                            self.asset_scraper.playwright = self.playwright
+                            self.asset_scraper.browser = self.browser
+                            self.asset_scraper.context = self.context
+                            self.asset_scraper.page = self.page
+                            self.asset_scraper.template_data = self.template_data
 
-            print("\n🎉 Dispatch Board Display Automation Finished Successfully!")
+                            recon_result = await self.asset_scraper.reconcile_single_date(
+                                date_str=formatted_current_date,
+                                click_wos=True
+                            )
+                            recon_cnt = recon_result.get('checked', 0)
+                            recon_fixed = recon_result.get('reassignments', 0)
+                            print(f"✅ [Step 2: Asset Assignment] Completed for {formatted_current_date}: Checked {recon_cnt} truck work orders, Reassigned {recon_fixed}.")
+                        except Exception as asset_err:
+                            print(f"⚠️ [Step 2: Asset Assignment] Note/Error on {formatted_current_date}: {asset_err}")
+                elif not skip_asset:
+                    formatted_current_date = current_date.strftime("%m/%d/%Y")
+                    print(f"  [Dry-Run] Step 2: Would reconcile Asset Assignments for {formatted_current_date}")
+
+                # Update progress after completing Day d + 1
+                self.progress_info.update({
+                    "current_day": d + 1,
+                    "completed_days": d + 1,
+                    "remaining_days": max(0, days - (d + 1)),
+                    "percent_complete": round(((d + 1) / days) * 100, 1),
+                    "status_message": f"Completed Day {d + 1} of {days} ({date_str})"
+                })
+                if on_progress:
+                    try:
+                        on_progress(self.progress_info)
+                    except Exception:
+                        pass
+
+            print("\n🎉 Dispatch Board Display Automation & Asset Assignment Finished Successfully!")
             self.progress_info = {
                 "current_day": days,
                 "total_days": days,
@@ -2042,7 +2093,8 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=2, help="Number of days to process (default: 2)")
     parser.add_argument("--live", action="store_true", help="Run live on FieldEdge (skips dry-run)")
     parser.add_argument("--start-date", type=str, help="Starting date (e.g. 'August 15', '08/15/2026'). Defaults to today.")
+    parser.add_argument("--skip-asset", action="store_true", help="Skip running the asset assignment tool for each date")
     args = parser.parse_args()
 
     scraper = DispatchBoardDisplayAutomationScraper()
-    asyncio.run(scraper.run(days=args.days, dry_run=not args.live, start_date_str=args.start_date))
+    asyncio.run(scraper.run(days=args.days, dry_run=not args.live, start_date_str=args.start_date, skip_asset=args.skip_asset))

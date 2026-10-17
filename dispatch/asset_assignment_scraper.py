@@ -703,30 +703,24 @@ class AssetAssignmentScraper(BaseScraper):
         import re
         truck_headers = []
 
-        # Load active truck headers from template configuration
-        template_trucks = [
-            h for h in self.template_data.get("truck_assign_headers", [])
-            if h.get("active", True)
-        ]
+        # Load ALL truck headers (both active and inactive) from template configuration
+        all_template_trucks = self.template_data.get("truck_assign_headers", [])
 
-        # Extract configured tech names and truck names for matching
-        expected_tech_map = {}   # canonical_tech -> truck config
-        expected_truck_map = {}  # canonical_truck_name / number -> truck config
-
-        for h in template_trucks:
+        # Build lookup maps for known fleet trucks (exact canonical string -> config, truck digits -> config)
+        expected_truck_map = {}
+        for h in all_template_trucks:
             t_name = (h.get("name") or "").strip()
-            tech_name = (h.get("tech_name") or "").strip()
             if t_name:
                 c_name = self.canonical_str(t_name)
                 expected_truck_map[c_name] = h
-                num_m = re.search(r'\d+', t_name)
+                num_m = re.findall(r'\d+', t_name)
                 if num_m:
-                    expected_truck_map[num_m.group(0)] = h
-            if tech_name:
-                c_tech = self.canonical_str(tech_name)
-                expected_tech_map[c_tech] = h
+                    num_str = num_m[0]
+                    expected_truck_map[num_str] = h
+                    expected_truck_map[str(int(num_str))] = h
 
-        print(f"📋 Loaded {len(template_trucks)} active truck configs from template (Techs: {[h.get('tech_name') for h in template_trucks]}).")
+        active_techs_list = [h.get('tech_name') for h in all_template_trucks if h.get('active', True) and h.get('tech_name')]
+        print(f"📋 Loaded {len(all_template_trucks)} fleet truck configs from template (Active techs: {active_techs_list}).")
 
         for r in rows:
             cust = r.get("customer_name", "").strip()
@@ -738,34 +732,42 @@ class AssetAssignmentScraper(BaseScraper):
             if tech.lower() in ["s4", "s3", ""]:
                 continue
 
+            # CRITICAL: Must be a genuine truck/asset assignment work order!
+            # Regular jobs like 'INTERNAL OPS. 2', 'PRETRIP', 'PARTS', customer jobs must NEVER be treated as fleet trucks!
+            is_truck_wo = (
+                ("🚛" in cust or "🛻" in cust or "|" in cust) and
+                (
+                    "asset assignment" in prio.lower() or
+                    "ser tr" in prio.lower() or
+                    "pt (" in prio.lower() or
+                    "laborer" in prio.lower()
+                )
+            )
+            if not is_truck_wo:
+                continue
+
             c_cust = self.canonical_str(cust)
-            c_tech = self.canonical_str(tech)
 
             matched_cfg = None
 
-            # 1. Match by customer name against configured truck names/numbers
-            for c_tname, cfg in expected_truck_map.items():
-                if c_tname and (c_tname == c_cust or c_tname in c_cust or (len(c_tname) >= 2 and c_cust in c_tname)):
-                    matched_cfg = cfg
-                    break
+            # 1. Exact canonical name match against known fleet trucks
+            if c_cust in expected_truck_map:
+                matched_cfg = expected_truck_map[c_cust]
+            elif "|" in cust:
+                # Only check digits strictly from the truck number section after the pipe '|' (e.g. '01' from '🛻 | 01')
+                after_pipe = cust.split("|")[1].strip()
+                pipe_nums = re.findall(r'\d+', after_pipe)
+                if pipe_nums:
+                    for pn in (pipe_nums[0], str(int(pipe_nums[0]))):
+                        if pn in expected_truck_map:
+                            matched_cfg = expected_truck_map[pn]
+                            break
 
-            # 2. Match by tech name if tech matches one of the techs in truck_assign_headers
-            if not matched_cfg and c_tech in expected_tech_map:
-                cfg = expected_tech_map[c_tech]
-                is_wo_truck = (
-                    "🚛" in cust or "🛻" in cust or "|" in cust or
-                    "Asset Assignment" in prio or "PT" in prio or "SER TR" in prio
-                )
-                if is_wo_truck:
-                    matched_cfg = cfg
-
-            # 3. Fallback: General truck indicators
-            if not matched_cfg and ("🚛" in cust or "🛻" in cust or "|" in cust) and (
-                "Asset Assignment" in prio or "PT" in prio or "SER TR" in prio
-            ):
+            # 2. General truck indicators fallback (for ad-hoc or unlisted truck work orders)
+            if not matched_cfg:
                 matched_cfg = {
                     "name": cust,
-                    "tech_name": tech,
+                    "tech_name": "",
                     "priority": prio
                 }
 
@@ -786,6 +788,7 @@ class AssetAssignmentScraper(BaseScraper):
                 if m_dur:
                     duration = f"{m_dur.group(1)}:00"
 
+                target_tech = matched_cfg.get("tech_name") or "None (Unassigned/Inactive)"
                 truck_headers.append({
                     "name": canonical_truck_name,
                     "active": True,
@@ -798,7 +801,7 @@ class AssetAssignmentScraper(BaseScraper):
                     "scheduled_date": sched_str,
                     "asset_name": r.get("asset_name") or matched_cfg.get("name", "")
                 })
-                print(f"  🎯 Matched truck WO #{wo_num}: '{canonical_truck_name}' (Current Tech: '{tech}', Target Tech: '{matched_cfg.get('tech_name')}')")
+                print(f"  🎯 Matched truck WO #{wo_num}: '{canonical_truck_name}' (Current Tech: '{tech}', Target Tech: '{target_tech}')")
 
         return truck_headers
 
@@ -814,12 +817,16 @@ class AssetAssignmentScraper(BaseScraper):
 
     def get_expected_tech_for_truck(self, truck_name: str) -> Optional[str]:
         c_target = self.canonical_str(truck_name)
+        nums_target = re.findall(r'\d+', truck_name) if truck_name else []
         for h in self.template_data.get("truck_assign_headers", []):
             if not h.get("active", True):
                 continue
             h_name = h.get("name", "")
             c_hname = self.canonical_str(h_name)
-            if c_hname == c_target or (c_target and c_target in c_hname) or (c_hname and c_hname in c_target):
+            if c_hname == c_target:
+                return h.get("tech_name")
+            nums_h = re.findall(r'\d+', h_name) if h_name else []
+            if nums_target and nums_h and int(nums_target[0]) == int(nums_h[0]):
                 return h.get("tech_name")
         return None
 
@@ -830,7 +837,7 @@ class AssetAssignmentScraper(BaseScraper):
                 continue
             h_tech = h.get("tech_name", "")
             c_htech = self.canonical_str(h_tech)
-            if c_htech == c_tech or (c_tech and c_tech in c_htech) or (c_htech and c_htech in c_tech):
+            if c_htech == c_tech or (c_tech and c_tech in c_htech) or (c_htech and c_tech in c_htech):
                 return h
         return None
 
@@ -1025,45 +1032,94 @@ class AssetAssignmentScraper(BaseScraper):
             if not await self.click_and_open_sidepanel(work_order_number):
                 return False
 
-            await self.page.wait_for_timeout(1500)
-
-            # Locate 'Go to Work Order' link in sidepanel footer
-            goto_locators = [
-                '.footer_CRgJf a:has-text("Go to Work Order")',
-                'a:has-text("Go to Work Order")',
-                '.arrow-link-container_U04bJ a.panel-link_qAFWh',
-                '.arrow-link-container_U04bJ a',
-                'a[href*="DispatchSummary"]',
-                '.footer_CRgJf a'
-            ]
-
+            # Wait up to 10 seconds for sidepanel cards & footer to render, scrolling down container
             goto_btn = None
-            for g_loc in goto_locators:
-                loc = self.page.locator(g_loc).first
-                if await loc.count() > 0 and await loc.is_visible():
-                    goto_btn = loc
+            found_href = None
+
+            for _ in range(20):
+                await self.page.evaluate("""() => {
+                    const c = document.querySelector('.custom-scrollbar.container__Gkig') ||
+                              document.querySelector('.container__Gkig') ||
+                              document.querySelector('.custom-scrollbar');
+                    if (c) c.scrollTop = c.scrollHeight;
+                }""")
+
+                # Try candidate locators (matches 'GO TO WORK ORDER' as seen in FieldEdge sidepanel)
+                candidate_locators = [
+                    'text=/go to work order/i',
+                    '//*[contains(translate(., "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"), "GO TO WORK ORDER")]',
+                    '//a[contains(translate(., "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"), "GO TO WORK ORDER")]',
+                    '//div[contains(@class, "arrow-link")]//a',
+                    '.arrow-link-container_U04bJ a',
+                    '.arrow-link-container_U04bJ a.panel-link_qAFWh',
+                    '//div[contains(@class, "footer")]//a',
+                    '//a[contains(@href, "DispatchSummary") or contains(@href, "dispatch-summary")]',
+                    '.footer_CRgJf a',
+                    'a:has-text("GO TO WORK ORDER")',
+                    'a:has-text("Go to Work Order")'
+                ]
+                for g_loc in candidate_locators:
+                    loc = self.page.locator(g_loc).first
+                    if await loc.count() > 0:
+                        try:
+                            await loc.scroll_into_view_if_needed()
+                            goto_btn = loc
+                            break
+                        except Exception:
+                            pass
+
+                if goto_btn:
                     break
 
-            if not goto_btn:
-                print(f"  ⚠️ 'Go to Work Order' link not found in sidepanel for WO #{work_order_number}")
-                await self.close_sidepanel()
-                return False
+                # Also inspect DOM directly for any href containing DispatchSummary or work order
+                found_href = await self.page.evaluate("""() => {
+                    const links = Array.from(document.querySelectorAll('.container__Gkig a, .panel-header-container_EYC6s a, div[class*="footer"] a, a.panel-link_qAFWh, a[href*="DispatchSummary"]'));
+                    for (const a of links) {
+                        const h = a.getAttribute('href') || a.href || '';
+                        const t = (a.textContent || '').trim().toLowerCase();
+                        if (h.includes('DispatchSummary') || h.includes('dispatch') || t.includes('work order')) {
+                            return h;
+                        }
+                    }
+                    return null;
+                }""")
+                if found_href:
+                    break
 
-            print(f"  ↗️ Clicking 'Go to Work Order' for WO #{work_order_number} to open in new tab...")
+                await self.page.wait_for_timeout(500)
+
             new_page = None
-            try:
-                async with self.page.context.expect_page(timeout=10000) as new_page_info:
-                    await goto_btn.click()
-                new_page = await new_page_info.value
-            except Exception as nav_e:
-                href = await goto_btn.get_attribute("href")
-                if href:
-                    base_url = self.page.url.split("#")[0].rstrip("/")
-                    full_url = f"{base_url}/{href.lstrip('/')}" if not href.startswith("http") else href
-                    new_page = await self.page.context.new_page()
-                    await new_page.goto(full_url, wait_until="domcontentloaded")
-                else:
-                    raise nav_e
+            if not goto_btn and not found_href:
+                # Direct URL fallback: If work order number is known, DispatchSummary URL can be reached directly
+                base_url = self.page.url.split("#")[0].rstrip("/")
+                found_href = f"{base_url}/DispatchSummary/{work_order_number}"
+                print(f"  ℹ️ Attempting direct URL navigation for WO #{work_order_number}: {found_href}")
+
+            if goto_btn:
+                print(f"  ↗️ Clicking 'Go to Work Order' for WO #{work_order_number} to open in new tab...")
+                try:
+                    href = await goto_btn.get_attribute("href")
+                except Exception:
+                    href = None
+
+                try:
+                    async with self.page.context.expect_page(timeout=10000) as new_page_info:
+                        await goto_btn.click()
+                    new_page = await new_page_info.value
+                except Exception as nav_e:
+                    if href:
+                        base_url = self.page.url.split("#")[0].rstrip("/")
+                        full_url = f"{base_url}/{href.lstrip('/')}" if not href.startswith("http") else href
+                        new_page = await self.page.context.new_page()
+                        await new_page.goto(full_url, wait_until="domcontentloaded")
+                    else:
+                        raise nav_e
+            elif found_href:
+                base_url = self.page.url.split("#")[0].rstrip("/")
+                full_url = f"{base_url}/{found_href.lstrip('/')}" if not found_href.startswith("http") else found_href
+                print(f"  ↗️ Opening DispatchSummary tab via URL: {full_url}")
+                new_page = await self.page.context.new_page()
+                await new_page.goto(full_url, wait_until="domcontentloaded")
 
             await new_page.wait_for_load_state("domcontentloaded")
             await new_page.wait_for_timeout(3000)
@@ -1966,6 +2022,7 @@ class AssetAssignmentScraper(BaseScraper):
 
                         print(f"  🎯 Template expected truck for '{tech_display}' is: '{expected_truck_name}'")
 
+                        kept_matched_truck = False
                         for r_truck in t_list:
                             t_name = r_truck.get("name", "")
                             c_t_name = self.canonical_str(t_name)
@@ -1979,19 +2036,74 @@ class AssetAssignmentScraper(BaseScraper):
                                     c_t_name in c_exp_truck
                                 )
                             )
-                            if not is_match:
-                                print(f"  🚨 Truck '{t_name}' (WO #{wo_num}) is NOT assigned to '{tech_display}' in JSON template! Initiating cancellation...")
+                            if not is_match or kept_matched_truck:
+                                if is_match and kept_matched_truck:
+                                    print(f"  🚨 Duplicate expected truck '{t_name}' (WO #{wo_num}) on '{tech_display}'! Canceling duplicate...")
+                                    cancel_msg = f"Duplicate truck '{t_name}' assigned to technician '{tech_display}'."
+                                else:
+                                    print(f"  🚨 Truck '{t_name}' (WO #{wo_num}) is NOT assigned to '{tech_display}' in JSON template! Initiating cancellation...")
+                                    cancel_msg = f"Wrong truck '{t_name}' assigned to technician '{tech_display}'. Template expects '{expected_truck_name}'."
                                 if click_wos and wo_num:
                                     canceled = await self.cancel_work_order_via_dispatch_summary(
                                         work_order_number=wo_num,
                                         truck_name=t_name,
-                                        tech_name=tech_display
+                                        tech_name=tech_display,
+                                        reason=cancel_msg
                                     )
                                     if canceled:
                                         canceled_wos.add(wo_num)
                                         total_reconciled += 1
                             else:
+                                kept_matched_truck = True
                                 print(f"  ✅ Truck '{t_name}' (WO #{wo_num}) matches JSON template for '{tech_display}'. Keeping.")
+
+                # ── Duplicate Truck Detection Across Technicians ──
+                # If the same truck appears on multiple work orders, keep the one on the expected tech and cancel the other(s).
+                truck_to_wos = {}
+                for r in truck_headers:
+                    wo = r.get("work_order_number")
+                    if wo in canceled_wos:
+                        continue
+                    c_truck = self.canonical_str(r.get("name", ""))
+                    if c_truck:
+                        if c_truck not in truck_to_wos:
+                            truck_to_wos[c_truck] = []
+                        truck_to_wos[c_truck].append(r)
+
+                for c_truck, w_list in truck_to_wos.items():
+                    if len(w_list) > 1:
+                        truck_display = w_list[0].get("name", "")
+                        expected_tech = self.get_expected_tech_for_truck(truck_display)
+                        c_exp_tech = self.canonical_str(expected_tech) if expected_tech else ""
+                        print(f"\n⚠️ Truck '{truck_display}' appears {len(w_list)} times on board across work orders: {[w.get('work_order_number') for w in w_list]}")
+                        print(f"  🎯 Expected technician for '{truck_display}' is: '{expected_tech or 'None'}'")
+
+                        # Find if one is already on the expected tech
+                        best_wo = None
+                        for w in w_list:
+                            if c_exp_tech and self.canonical_str(w.get("tech_name", "")) == c_exp_tech:
+                                best_wo = w
+                                break
+                        if not best_wo:
+                            best_wo = w_list[0]
+
+                        for w in w_list:
+                            wo_num = w.get("work_order_number")
+                            t_tech = w.get("tech_name")
+                            if w == best_wo:
+                                print(f"  ✅ Keeping primary WO #{wo_num} for '{truck_display}' (Tech: '{t_tech}').")
+                            else:
+                                print(f"  🚨 Duplicate instance of truck '{truck_display}' (WO #{wo_num} on tech '{t_tech}')! Initiating cancellation...")
+                                if click_wos and wo_num:
+                                    canceled = await self.cancel_work_order_via_dispatch_summary(
+                                        work_order_number=wo_num,
+                                        truck_name=truck_display,
+                                        tech_name=t_tech,
+                                        reason=f"Duplicate work order for truck '{truck_display}'. Primary assignment kept on WO #{best_wo.get('work_order_number')}."
+                                    )
+                                    if canceled:
+                                        canceled_wos.add(wo_num)
+                                        total_reconciled += 1
 
                 # Filter out canceled work orders
                 if canceled_wos:

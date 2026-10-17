@@ -27,7 +27,7 @@ from dispatch_board_display_automation_scraper import DispatchBoardDisplayAutoma
 
 STATUS_DATA = {
     "status": "online",
-    "service": "Dispatch Board Display Automation",
+    "service": "Dispatch Board Display & Asset Assignment Automation",
     "mode": "DRY RUN",
     "days_configured": 31,
     "last_run": None,
@@ -206,7 +206,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         </thead>
                         <tbody class="divide-y divide-slate-200/70 bg-white/50">
                             <tr>
-                                <td class="px-4 sm:px-6 py-4 font-bold text-slate-900 whitespace-nowrap">dispatch-board-display-automation</td>
+                                <td class="px-4 sm:px-6 py-4 font-bold text-slate-900 whitespace-nowrap">dispatch-board-display &amp; asset-assignment</td>
                                 <td id="activeDateTd" class="px-4 sm:px-6 py-4 font-medium text-slate-800 whitespace-nowrap">Today</td>
                                 <td id="statusPillTd" class="px-4 sm:px-6 py-4 whitespace-nowrap">
                                     <span class="px-2.5 py-1 rounded-[5px] text-[11px] sm:text-xs font-semibold bg-sky-50 text-[#5c95c8] border border-sky-300 shadow-sm">RUNNING</span>
@@ -470,7 +470,8 @@ async def run_automation(args):
                     days=args.days,
                     dry_run=not args.live,
                     start_date_str=current_start_date,
-                    on_progress=on_progress_update
+                    on_progress=on_progress_update,
+                    skip_asset=getattr(args, "skip_asset", False)
                 )
 
                 # After initial successful run with an explicit start_date_str, reset it to None
@@ -517,7 +518,13 @@ async def run_automation(args):
         STATUS_DATA["last_run_pst"] = now_pst
         STATUS_DATA["last_status"] = "running"
         try:
-            await scraper.run(days=args.days, dry_run=not args.live, start_date_str=args.start_date, on_progress=on_progress_update)
+            await scraper.run(
+                days=args.days,
+                dry_run=not args.live,
+                start_date_str=args.start_date,
+                on_progress=on_progress_update,
+                skip_asset=getattr(args, "skip_asset", False)
+            )
             STATUS_DATA["last_status"] = "success"
         except Exception as e:
             STATUS_DATA["last_status"] = f"error: {str(e)}"
@@ -531,14 +538,16 @@ def main():
     parser.add_argument("--loop", action="store_true", help="Run continuously on a scheduled interval (e.g. daily)")
     parser.add_argument("--interval-hours", type=float, default=24.0, help="Interval between runs in hours when --loop is set (default: 24)")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "3000")), help="HTTP status server port (default: 3000)")
+    parser.add_argument("--skip-asset", action="store_true", help="Skip running the asset assignment tool for each date")
     args = parser.parse_args()
 
     start_status_server(args.port)
 
-    print(f"🚀 Starting Dispatch Board Display Automation Scraper (Standalone)...")
+    print(f"🚀 Starting Dispatch Board Display Automation & Asset Assignment (Standalone)...")
     print(f"   Mode: {'LIVE' if args.live else 'DRY RUN'}")
     print(f"   Days: {args.days}")
     print(f"   HTTP Status Port: {args.port}")
+    print(f"   Asset Tool: {'SKIPPED (--skip-asset)' if getattr(args, 'skip_asset', False) else 'ENABLED (Runs on same date)'}")
     if args.start_date:
         print(f"   Start Date: {args.start_date}")
     if args.loop:
