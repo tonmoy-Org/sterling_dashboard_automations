@@ -111,7 +111,7 @@
   "truck_assign_headers": [
     {
       "name": "🚛 | 123",
-      "active": false,
+      "active": true,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
