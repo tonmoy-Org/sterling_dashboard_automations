@@ -27,7 +27,7 @@ from dispatch_board_display_automation_scraper import DispatchBoardDisplayAutoma
 
 STATUS_DATA = {
     "status": "online",
-    "service": "Dispatch Board Display & Asset Assignment Automation",
+    "service": "Dispatch Board  & Asset Assignment Automation",
     "mode": "DRY RUN",
     "days_configured": 31,
     "last_run": None,
