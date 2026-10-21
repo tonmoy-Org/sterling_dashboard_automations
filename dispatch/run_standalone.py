@@ -356,19 +356,20 @@ class StatusHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 if not clean_path or not clean_path.startswith("/"):
                     clean_path = "/" + clean_path
 
-            if clean_path.startswith("/assets/") or clean_path in ("/favicon.ico", "/logo.png", "/favicon.png"):
+            if (clean_path.startswith("/assets/") or clean_path in ("/favicon.ico", "/logo.png", "/favicon.png")) and not clean_path.endswith("/assets/"):
                 asset_name = os.path.basename(clean_path)
-                candidates = [
-                    os.path.join(_dispatch_dir, "assets", asset_name),
-                    os.path.join(_dispatch_dir, "dispatch", "assets", asset_name),
-                    os.path.join(os.getcwd(), "assets", asset_name),
-                    os.path.join(os.getcwd(), "dispatch", "assets", asset_name),
-                ]
                 asset_path = None
-                for cand in candidates:
-                    if os.path.exists(cand):
-                        asset_path = cand
-                        break
+                if asset_name:
+                    candidates = [
+                        os.path.join(_dispatch_dir, "assets", asset_name),
+                        os.path.join(_dispatch_dir, "dispatch", "assets", asset_name),
+                        os.path.join(os.getcwd(), "assets", asset_name),
+                        os.path.join(os.getcwd(), "dispatch", "assets", asset_name),
+                    ]
+                    for cand in candidates:
+                        if os.path.isfile(cand):
+                            asset_path = cand
+                            break
 
                 if asset_path:
                     self.send_response(200)
