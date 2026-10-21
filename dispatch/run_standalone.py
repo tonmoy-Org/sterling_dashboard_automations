@@ -27,7 +27,7 @@ from dispatch_board_display_automation_scraper import DispatchBoardDisplayAutoma
 
 STATUS_DATA = {
     "status": "online",
-    "service": "Dispatch Board  & Asset Assignment Automation",
+    "service": "Dispatch Board & Asset Assignment Automation",
     "mode": "DRY RUN",
     "days_configured": 31,
     "last_run": None,
@@ -63,7 +63,9 @@ def load_status_state():
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
+                    data.pop("service", None)
                     STATUS_DATA.update(data)
+                    STATUS_DATA["service"] = "Dispatch Board & Asset Assignment Automation"
                     print("✅ Loaded persisted status state from config/status_state.json")
         except Exception as e:
             print(f"⚠️ Failed to load status state: {e}")
@@ -150,7 +152,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <h1 class="text-2xl sm:text-4xl font-extrabold text-white tracking-tight mb-2 drop-shadow-lg">Sterling Services Operations Status</h1>
                 <div id="bannerUpdatedText" class="text-xs sm:text-sm text-[#76AADA] font-bold mb-3 drop-shadow-md">Updated 0s ago • PST Timezone</div>
                 <p class="text-xs sm:text-sm leading-relaxed text-slate-100 font-medium max-w-3xl mx-auto px-2 drop-shadow-md">
-                    Welcome to the Sterling Septic & Plumbing LLC Dispatch Board Display Automation Status Page. This system automatically pre-creates 30-day static visual aid work orders and technician display schedules on the FieldEdge Dispatch Board to ensure smooth dispatch operations. Monitor live automation sync progress, active target dates, and real-time FieldEdge session status below.
+                    Welcome to the Sterling Septic & Plumbing LLC Dispatch Board & Asset Assignment Automation Status Page. This system automatically pre-creates 30-day static visual aid work orders, technician display schedules, and asset assignments on the FieldEdge Dispatch Board to ensure smooth dispatch operations. Monitor live automation sync progress, active target dates, and real-time FieldEdge session status below.
                 </p>
             </div>
 
@@ -197,7 +199,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <table class="w-full min-w-[700px] text-left text-xs sm:text-sm text-slate-800 border-collapse">
                         <thead class="bg-white/40 backdrop-blur-md text-slate-700 font-bold uppercase text-[10px] sm:text-[11px] tracking-wider border-b border-slate-200/60">
                             <tr>
-                                <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Scraper Name</th>
+                                <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Service / Scraper Name</th>
                                 <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Active Target Date</th>
                                 <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Status</th>
                                 <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Batch Progress</th>
@@ -206,7 +208,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         </thead>
                         <tbody class="divide-y divide-slate-200/70 bg-white/50">
                             <tr>
-                                <td class="px-4 sm:px-6 py-4 font-bold text-slate-900 whitespace-nowrap">dispatch-board-display &amp; asset-assignment</td>
+                                <td id="serviceNameTd" class="px-4 sm:px-6 py-4 font-bold text-slate-900 whitespace-nowrap">Dispatch Board &amp; Asset Assignment Automation</td>
                                 <td id="activeDateTd" class="px-4 sm:px-6 py-4 font-medium text-slate-800 whitespace-nowrap">Today</td>
                                 <td id="statusPillTd" class="px-4 sm:px-6 py-4 whitespace-nowrap">
                                     <span class="px-2.5 py-1 rounded-[5px] text-[11px] sm:text-xs font-semibold bg-sky-50 text-[#5c95c8] border border-sky-300 shadow-sm">RUNNING</span>
@@ -253,6 +255,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 document.getElementById('pctLabel').innerText = pct + '%';
                 document.getElementById('progressBarFill').style.width = pct + '%';
                 
+                if (data.service && document.getElementById('serviceNameTd')) {
+                    document.getElementById('serviceNameTd').innerText = data.service;
+                }
+
                 document.getElementById('activeDateTd').innerText = p.current_date || 'Today';
                 document.getElementById('progressTd').innerText = 'Day ' + displayDay + ' of ' + total + ' (' + rem + ' Days Left)';
 
