@@ -73,7 +73,7 @@ def load_status_state():
 load_status_state()
 
 
-HTML_TEMPLATE = """<!DOCTYPE html>
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -117,13 +117,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         #fieldedgeDot {
             border-radius: 9999px !important;
         }
+        /* Hide ugly system scrollbars while preserving smooth scrolling */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
     </style>
 </head>
 <body class="text-slate-800 font-sans antialiased min-h-screen flex flex-col justify-between font-normal relative" style="background: linear-gradient(180deg, rgba(15, 23, 42, 0.35) 0%, rgba(30, 41, 59, 0.30) 100%), url('/assets/arrival-window.jpg') center / cover no-repeat fixed;">
 
     <!-- Top Site Header (Frosted Glass Navbar - Full Background Image Visible) -->
     <header class="bg-white/35 backdrop-blur-xl border-b border-white/30 shadow-sm sticky top-0 z-50">
-        <div class="max-w-6xl mx-auto px-4 sm:px-8 py-3 flex justify-between items-center">
+        <div class="max-w-[1400px] mx-auto px-4 sm:px-8 py-3 flex justify-between items-center">
             <!-- Left: Company Logo -->
             <div class="flex items-center">
                 <a href="javascript:void(0)" class="flex items-center">
@@ -145,13 +153,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- Main Content Area -->
     <main class="w-full py-6 sm:py-8 flex-grow">
-        <div class="max-w-6xl mx-auto px-4 sm:px-8 space-y-6">
+        <div class="max-w-[1400px] mx-auto px-4 sm:px-8 space-y-6">
 
             <!-- Hero Section (Clean Text Directly on Background Image) -->
             <div class="py-2 sm:py-4 text-center">
                 <h1 class="text-2xl sm:text-4xl font-extrabold text-white tracking-tight mb-2 drop-shadow-lg">Sterling Services Operations Status</h1>
                 <div id="bannerUpdatedText" class="text-xs sm:text-sm text-[#76AADA] font-bold mb-3 drop-shadow-md">Updated 0s ago • PST Timezone</div>
-                <p class="text-xs sm:text-sm leading-relaxed text-slate-100 font-medium max-w-3xl mx-auto px-2 drop-shadow-md">
+                <p class="text-xs sm:text-sm leading-relaxed text-slate-100 font-medium max-w-4xl mx-auto px-2 drop-shadow-md">
                     Welcome to the Sterling Septic & Plumbing LLC Dispatch Board & Asset Assignment Automation Status Page. This system automatically pre-creates 30-day static visual aid work orders, technician display schedules, and asset assignments on the FieldEdge Dispatch Board to ensure smooth dispatch operations. Monitor live automation sync progress, active target dates, and real-time FieldEdge session status below.
                 </p>
             </div>
@@ -194,27 +202,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                 </div>
 
-                <!-- Table Wrap (Mobile Responsive Horizontal Scroll - Strictly Single Line Text) -->
-                <div class="overflow-x-auto w-full">
-                    <table class="w-full min-w-[700px] text-left text-xs sm:text-sm text-slate-800 border-collapse">
+                <!-- Table Wrap (Mobile Responsive - No System Scrollbar) -->
+                <div class="overflow-x-auto w-full no-scrollbar">
+                    <table class="w-full text-left text-xs sm:text-sm text-slate-800 border-collapse">
                         <thead class="bg-white/40 backdrop-blur-md text-slate-700 font-bold uppercase text-[10px] sm:text-[11px] tracking-wider border-b border-slate-200/60">
                             <tr>
-                                <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Service / Scraper Name</th>
-                                <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Active Target Date</th>
-                                <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Status</th>
-                                <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Batch Progress</th>
-                                <th class="px-4 sm:px-6 py-3.5 whitespace-nowrap">Last Sync Time (PST)</th>
+                                <th class="px-4 sm:px-5 py-3.5 whitespace-nowrap">Service / Scraper Name</th>
+                                <th class="px-4 sm:px-5 py-3.5 whitespace-nowrap">Active Target Date</th>
+                                <th class="px-4 sm:px-5 py-3.5 whitespace-nowrap">Status</th>
+                                <th class="px-4 sm:px-5 py-3.5 whitespace-nowrap">Batch Progress</th>
+                                <th class="px-4 sm:px-5 py-3.5 whitespace-nowrap">Last Sync Time (PST)</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-200/70 bg-white/50">
                             <tr>
-                                <td id="serviceNameTd" class="px-4 sm:px-6 py-4 font-bold text-slate-900 whitespace-nowrap">Dispatch Board &amp; Asset Assignment Automation</td>
-                                <td id="activeDateTd" class="px-4 sm:px-6 py-4 font-medium text-slate-800 whitespace-nowrap">Today</td>
-                                <td id="statusPillTd" class="px-4 sm:px-6 py-4 whitespace-nowrap">
+                                <td id="serviceNameTd" class="px-4 sm:px-5 py-3.5 sm:py-4 font-bold text-slate-900 whitespace-nowrap">Dispatch Board &amp; Asset Assignment Automation</td>
+                                <td id="activeDateTd" class="px-4 sm:px-5 py-3.5 sm:py-4 font-medium text-slate-800 whitespace-nowrap">Today</td>
+                                <td id="statusPillTd" class="px-4 sm:px-5 py-3.5 sm:py-4 whitespace-nowrap">
                                     <span class="px-2.5 py-1 rounded-[5px] text-[11px] sm:text-xs font-semibold bg-sky-50 text-[#5c95c8] border border-sky-300 shadow-sm">RUNNING</span>
                                 </td>
-                                <td id="progressTd" class="px-4 sm:px-6 py-4 font-medium text-slate-800 whitespace-nowrap">Day 0 of 30 (30 Days Left)</td>
-                                <td id="lastSyncTd" class="px-4 sm:px-6 py-4 font-medium text-slate-800 whitespace-nowrap">-</td>
+                                <td id="progressTd" class="px-4 sm:px-5 py-3.5 sm:py-4 font-medium text-slate-800 whitespace-nowrap">Day 0 of 30 (30 Days Left)</td>
+                                <td id="lastSyncTd" class="px-4 sm:px-5 py-3.5 sm:py-4 font-medium text-slate-800 whitespace-nowrap">-</td>
                             </tr>
                         </tbody>
                     </table>
