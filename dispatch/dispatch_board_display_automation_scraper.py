@@ -15,6 +15,7 @@ import time
 import traceback
 import urllib.request
 import urllib.error
+import unicodedata
 from typing import List, Dict, Optional, Callable
 
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -30,7 +31,10 @@ if _dispatch_dir not in sys.path:
 try:
     from base_scraper import BaseScraper
 except ImportError:
-    from dispatch.base_scraper import BaseScraper  # type: ignore
+    try:
+        from automation.scrapers.base_scraper import BaseScraper  # type: ignore
+    except ImportError:
+        from dispatch.base_scraper import BaseScraper  # type: ignore
 
 
 
@@ -56,33 +60,37 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         self.template_data = self._load_template()
 
     def _load_history(self) -> Dict:
-        """Load persistent work order creation history from Dashboard API."""
+        """Load persistent work order creation history from Central Dashboard API."""
         history = {}
 
-        # Fetch from Dashboard API (BACKEND_API_URL or fallback http://127.0.0.1:8000/api)
-        api_url = os.getenv("BACKEND_API_URL", "http://127.0.0.1:8000/api").rstrip("/")
+        # Sync from Dashboard API if configured and reachable
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
         if api_url:
             try:
                 import urllib.request
                 endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
-                req = urllib.request.Request(endpoint, headers={"User-Agent": "SterlingAutomations/1.0"})
-                with urllib.request.urlopen(req, timeout=6) as response:
+                headers = {"User-Agent": "SterlingAutomations/1.0"}
+                headers.update(self._get_api_auth_headers())
+                req = urllib.request.Request(endpoint, headers=headers)
+                with urllib.request.urlopen(req, timeout=5) as response:
                     if response.status == 200:
                         remote_history = json.loads(response.read().decode('utf-8'))
                         if isinstance(remote_history, dict):
                             history.update(remote_history)
-                            print(f"✅ Loaded {len(remote_history)} central tracking entries from Dashboard API ({endpoint}).")
+                            print(f"✅ Synced {len(remote_history)} central tracking entries from Dashboard API.")
             except Exception as e:
-                print(f"⚠️ Could not fetch tracking history from Dashboard API ({api_url}): {e}")
+                print(f"ℹ️ API history sync skipped ({e}). Proceeding with in-memory tracking.")
 
         return history
 
     @staticmethod
     def _is_created_record(v) -> bool:
-        """Only records that were actually created by this automation are trusted for skipping.
-        'existing_on_board' records are re-verified against the live board every run, so a
-        false-positive board match never permanently blocks a work order from being created."""
-        return isinstance(v, dict) and v.get("status", "created") == "created"
+        """Records that were created by automation or confirmed existing on the board are trusted for skipping.
+        This respects manual edits in FieldEdge and prevents redundant recreations."""
+        if isinstance(v, dict):
+            status = v.get("status", "")
+            return status in ("created", "existing_on_board", "completed")
+        return False
 
     def is_wo_created(self, history: Dict, date_key: str, canon_tech: str, canon_target: str, target_count_idx: int) -> bool:
         """Check if work order has already been created/logged in persistent history (API memory or local JSON)."""
@@ -95,9 +103,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 return True
 
         # Check if history dict has any recorded entry matching date, canon_target, and occurrence
-        # to handle cases where a technician is removed and re-added with modified tech column formatting
-        # NOTE: the technician must still (fuzzy) match, otherwise one tech's 'AM SHOP' would
-        # incorrectly block every other tech's 'AM SHOP' for the same date.
         for k, v in history.items():
             if not self._is_created_record(v):
                 continue
@@ -107,6 +112,112 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     return True
 
         return False
+
+    def is_date_fully_completed(
+        self,
+        history: Dict,
+        db_date_key: str,
+        static_headers: List[Dict],
+        truck_assign_headers: List[Dict],
+        tech_jobs: List[Dict],
+        active_techs: List[str],
+        is_weekend: bool,
+        skip_vehicle_on_weekends: bool,
+        force: bool = False
+    ) -> bool:
+        """
+        Check if all items for db_date_key have already been recorded in history.
+        If force=True, always returns False so all items are verified/created on FieldEdge.
+        """
+        if force:
+            return False
+
+        template_processed_counts = {}
+
+        # 1. Static Headers
+        for header in static_headers:
+            name = header.get("name")
+            start_time = header.get("start_time")
+            h_tech = header.get("tech_name")
+            canon_target = self.canonical_str(name)
+            is_service_wo = bool(
+                header.get('is_service_needed_duplicate') or
+                (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
+            )
+            tracking_target = f"{canon_target}_serviceneeded" if is_service_wo else canon_target
+            try:
+                t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
+                time_key = t_dt.strftime("%I:%M %p")
+                if time_key.startswith("0"): time_key = time_key[1:]
+            except Exception:
+                time_key = ""
+            key = f"{tracking_target}|{time_key}" if time_key else tracking_target
+            canon_h_tech = self.canonical_str(h_tech or '')
+            processed_key = (canon_h_tech, key)
+            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+            target_count_idx = template_processed_counts[processed_key]
+
+            if not self.is_wo_created(history, db_date_key, canon_h_tech, tracking_target, target_count_idx):
+                return False
+
+        # 2. Truck Assign Headers (if not weekend or not skipped)
+        if not (is_weekend and skip_vehicle_on_weekends):
+            for header in truck_assign_headers:
+                name = header.get("name")
+                start_time = header.get("start_time")
+                h_tech = header.get("tech_name")
+                canon_target = self.canonical_str(name)
+                try:
+                    t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
+                    time_key = t_dt.strftime("%I:%M %p")
+                    if time_key.startswith("0"): time_key = time_key[1:]
+                except Exception:
+                    time_key = ""
+                key = f"{canon_target}|{time_key}" if time_key else canon_target
+                canon_h_tech = self.canonical_str(h_tech or '')
+                processed_key = (canon_h_tech, key)
+                template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+                target_count_idx = template_processed_counts[processed_key]
+
+                if not self.is_wo_created(history, db_date_key, canon_h_tech, canon_target, target_count_idx):
+                    return False
+
+        # 3. Tech Jobs
+        for job in tech_jobs:
+            if not job.get("active", True):
+                continue
+            name = job.get("name")
+            start_time = job.get("start_time")
+            t_tech = job.get("tech_name")
+            canon_target = self.canonical_str(name)
+            try:
+                t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
+                time_key = t_dt.strftime("%I:%M %p")
+                if time_key.startswith("0"): time_key = time_key[1:]
+            except Exception:
+                time_key = ""
+            key = f"{canon_target}|{time_key}" if time_key else canon_target
+            canon_t_tech = self.canonical_str(t_tech or '')
+            processed_key = (canon_t_tech, key)
+            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+            target_count_idx = template_processed_counts[processed_key]
+
+            if not self.is_wo_created(history, db_date_key, canon_t_tech, canon_target, target_count_idx):
+                return False
+
+        # 4. Active Tech Completed Work Orders
+        for tech in active_techs:
+            t_assignment_name = tech
+            canon_target = self.canonical_str(tech)
+            canon_t_assignment = self.canonical_str(t_assignment_name or '')
+            processed_key = (canon_t_assignment, canon_target)
+            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+            target_count_idx = template_processed_counts[processed_key]
+
+            if not self.is_wo_created(history, db_date_key, canon_t_assignment, canon_target, target_count_idx):
+                return False
+
+        return True
 
     def record_wo_created(
         self,
@@ -132,24 +243,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         }
         history[key] = rec_data
 
-        # Post to Central Dashboard API
-        api_url = os.getenv("BACKEND_API_URL", "http://127.0.0.1:8000/api").rstrip("/")
+        # Sync to Central Dashboard API if reachable
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
         if api_url:
             try:
                 import urllib.request
                 endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
                 req_data = json.dumps(rec_data).encode('utf-8')
+                headers = {"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"}
+                headers.update(self._get_api_auth_headers())
                 req = urllib.request.Request(
                     endpoint,
                     data=req_data,
-                    headers={"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"},
+                    headers=headers,
                     method="POST"
                 )
-                with urllib.request.urlopen(req, timeout=5) as response:
+                with urllib.request.urlopen(req, timeout=4) as response:
                     if response.status in (200, 201):
-                        print(f"✅ Synced tracking record '{key}' to Central Dashboard API.")
-            except Exception as api_err:
-                print(f"⚠️ Failed to sync tracking record to Dashboard API: {api_err}")
+                        pass
+            except Exception:
+                pass
 
     @staticmethod
     def _extract_jwt_from_response(data) -> Optional[str]:
@@ -287,6 +400,29 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if not norm:
             norm = str(t).strip().lower()
         return norm
+
+    @staticmethod
+    def is_tech_match(tech1: str, tech2: str) -> bool:
+        """Compare two technician names matching across single-letter prefixes, unicode bold, and full names."""
+        if not tech1 or not tech2:
+            return False
+        import unicodedata, re
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech1))).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech2))).lower()
+        if not c1 or not c2:
+            return False
+        if c1 == c2:
+            return True
+        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
+        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
+        for w1 in words1:
+            for w2 in words2:
+                if w1 == w2 or (len(w1) >= 4 and w1 in w2) or (len(w2) >= 4 and w2 in w1):
+                    return True
+        if len(c1) >= 4 and len(c2) >= 4:
+            if c1 in c2 or c2 in c1:
+                return True
+        return False
 
     @staticmethod
     def _extract_all_strings_recursive(obj) -> List[str]:
@@ -692,14 +828,38 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 print(f"❌ Retry also failed: {retry_err}")
                 return False
 
+    async def close_create_wo_modal(self):
+        """Close Create Work Order modal if open without saving to prevent unwanted changes."""
+        try:
+            cancel_candidates = [
+                "button:has-text('Cancel')",
+                "button.cancel_button",
+                ".modal-header .close",
+                "button.close",
+                "[aria-label='Close']",
+                ".modal-close"
+            ]
+            for cand in cancel_candidates:
+                btn = self.page.locator(cand).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    await btn.click(force=True)
+                    await self.page.wait_for_timeout(500)
+                    return True
+            await self.page.keyboard.press("Escape")
+            await self.page.wait_for_timeout(800)
+            return True
+        except Exception:
+            return False
+
     async def select_dropdown_option(self, dropdown_selector: str, option_text: str, press_enter: bool = True) -> bool:
         """
         Robust dropdown option selection for FieldEdge Vue-select dropdowns.
-        Works accurately on both Windows local and Linux headless servers.
+        Works accurately on both Windows local and Linux headless servers with Unicode NFKD support.
         """
         if not option_text:
             return True
 
+        import unicodedata
         try:
             dropdown = self.page.locator(dropdown_selector).first
             try:
@@ -724,7 +884,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 pass
 
             # Type option text into search input
-            await search_input.fill(option_text)
+            clean_search = unicodedata.normalize('NFKD', option_text).strip()
+            clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
+
+            # For typing: use exact option_text directly as configured in JSON template
+            # (e.g. 'l 𝐂𝐫𝐢𝐬', 'f 𝐒𝐤𝐲𝐥𝐞𝐫', '8 - Internal', etc.) so Vue-select matches precisely
+            type_text = option_text.strip()
+            await search_input.fill(type_text)
             await self.page.wait_for_timeout(600)
 
             if press_enter:
@@ -753,55 +919,181 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     except Exception:
                         pass
 
+                # If still 0 options and searching with emoji/symbols (e.g. '🚛 | 124'), fallback to clean truck digits
+                if (await options.count()) == 0:
+                    m_dig = re.search(r'\b\d{2,4}\b', clean_search)
+                    if m_dig and m_dig.group(0) != clean_search:
+                        fallback_term = m_dig.group(0)
+                        print(f"  -> No options found for '{clean_search}'. Retrying customer search with clean truck number '{fallback_term}'...")
+                        try:
+                            await search_input.focus()
+                            await search_input.fill("")
+                            await search_input.fill(fallback_term)
+                            await self.page.wait_for_timeout(400)
+                            await search_input.press("Enter")
+                            await self.page.wait_for_timeout(3000)
+                            try:
+                                await options.first.wait_for(state="visible", timeout=5000)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+            else:
+                # If not press_enter and 0 options found, fallback:
+                if (await options.count()) == 0:
+                    # If clean_core is different from option_text, try searching clean_core
+                    if clean_core and clean_core != option_text:
+                        try:
+                            await search_input.focus()
+                            await search_input.fill("")
+                            await search_input.fill(clean_core)
+                            await self.page.wait_for_timeout(500)
+                            try:
+                                await options.first.wait_for(state="visible", timeout=2000)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    # If still 0 options, clear input to reveal full list of dropdown options
+                    if (await options.count()) == 0:
+                        try:
+                            await search_input.focus()
+                            await search_input.fill("")
+                            await self.page.wait_for_timeout(500)
+                            try:
+                                await options.first.wait_for(state="visible", timeout=3000)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
             count = await options.count()
             clicked = False
-            target_norm = option_text.strip().lower()
+            raw_target = option_text.strip()
+            target_norm = clean_search.lower()
             target_canon = self.canonical_str(option_text)
+            m_core = re.sub(r'^[a-z0-9]\s*', '', target_norm)
+            core_name = m_core if len(m_core) >= 3 else target_norm
 
-            # Pass 1: Look for exact match
+            # Pass 0: Exact raw string match (matches exact JSON name like 'l 𝐂𝐫𝐢𝐬')
             for i in range(count):
                 opt = options.nth(i)
                 if await opt.is_visible():
                     raw_text = await opt.text_content()
-                    if raw_text and raw_text.strip().lower() == target_norm:
+                    if raw_text and raw_text.strip() == raw_target:
                         await opt.scroll_into_view_if_needed()
                         await opt.click(force=True)
                         clicked = True
                         break
 
-            # Pass 2: Partial match if exact match not found
+            # Pass 0.5: Exact raw substring match
             if not clicked:
                 for i in range(count):
                     opt = options.nth(i)
                     if await opt.is_visible():
                         raw_text = await opt.text_content()
-                        if raw_text and target_norm in raw_text.strip().lower():
-                            await opt.scroll_into_view_if_needed()
-                            await opt.click(force=True)
-                            clicked = True
-                            break
+                        if raw_text:
+                            s_raw = raw_text.strip()
+                            if raw_target in s_raw or s_raw in raw_target:
+                                await opt.scroll_into_view_if_needed()
+                                await opt.click(force=True)
+                                clicked = True
+                                break
 
-            # Pass 3: Canonical match (ignore special chars/whitespace)
+            # Pass 1: Look for exact normalized match
+            if not clicked:
+                for i in range(count):
+                    opt = options.nth(i)
+                    if await opt.is_visible():
+                        raw_text = await opt.text_content()
+                        if raw_text:
+                            norm_raw = unicodedata.normalize('NFKD', raw_text).strip().lower()
+                            if norm_raw == target_norm or norm_raw == clean_core.lower():
+                                await opt.scroll_into_view_if_needed()
+                                await opt.click(force=True)
+                                clicked = True
+                                break
+
+            # Pass 2: Canonical match (ignore special chars/whitespace/unicode fonts)
             if not clicked and target_canon:
                 for i in range(count):
                     opt = options.nth(i)
                     if await opt.is_visible():
                         raw_text = await opt.text_content()
-                        if raw_text and target_canon in self.canonical_str(raw_text):
+                        if raw_text and (target_canon == self.canonical_str(raw_text) or self.canonical_str(clean_core) == self.canonical_str(raw_text)):
                             await opt.scroll_into_view_if_needed()
                             await opt.click(force=True)
                             clicked = True
                             break
 
-            # Fallback if no option clicked directly
+            # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
+            if not clicked and core_name and len(core_name) >= 3:
+                for i in range(count):
+                    opt = options.nth(i)
+                    if await opt.is_visible():
+                        raw_text = await opt.text_content()
+                        if raw_text:
+                            norm_raw = unicodedata.normalize('NFKD', raw_text).strip().lower()
+                            canon_raw = self.canonical_str(raw_text)
+                            if core_name in norm_raw or core_name in canon_raw:
+                                await opt.scroll_into_view_if_needed()
+                                await opt.click(force=True)
+                                clicked = True
+                                break
+
+            # Pass 4: Technician name matching using is_tech_match
             if not clicked:
-                if count > 0:
-                    first_opt = options.first
-                    if await first_opt.is_visible():
-                        await first_opt.click(force=True)
-                        clicked = True
-                elif press_enter:
+                for i in range(count):
+                    opt = options.nth(i)
+                    if await opt.is_visible():
+                        raw_text = await opt.text_content()
+                        if raw_text and (self.is_tech_match(raw_text, option_text) or self.is_tech_match(raw_text, clean_search) or self.is_tech_match(raw_text, clean_core)):
+                            await opt.scroll_into_view_if_needed()
+                            await opt.click(force=True)
+                            clicked = True
+                            break
+
+            # Pass 4: Substring match (minimum 4 characters)
+            if not clicked and len(target_norm) >= 4:
+                for i in range(count):
+                    opt = options.nth(i)
+                    if await opt.is_visible():
+                        raw_text = await opt.text_content()
+                        if raw_text:
+                            norm_raw = unicodedata.normalize('NFKD', raw_text).strip().lower()
+                            if target_norm in norm_raw or norm_raw in target_norm:
+                                await opt.scroll_into_view_if_needed()
+                                await opt.click(force=True)
+                                clicked = True
+                                break
+
+            # Pass 5: Truck number / digits match (e.g. '124' in '🚛 | 124')
+            if not clicked:
+                m_digits = re.search(r'\b\d{2,4}\b', target_canon)
+                if m_digits:
+                    d_target = m_digits.group(0)
+                    for i in range(count):
+                        opt = options.nth(i)
+                        if await opt.is_visible():
+                            raw_text = await opt.text_content()
+                            if raw_text:
+                                c_raw = self.canonical_str(raw_text)
+                                if d_target in c_raw:
+                                    await opt.scroll_into_view_if_needed()
+                                    await opt.click(force=True)
+                                    clicked = True
+                                    break
+
+            # Handle completion or safe failure (NO BLIND FALLBACK to first_opt!)
+            if not clicked:
+                if press_enter:
+                    # For customer search, enter selects current highlighted input
                     await search_input.press("Enter")
+                    await self.page.wait_for_timeout(500)
+                    return True
+                else:
+                    print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
+                    return False
 
             await self.page.wait_for_timeout(500)
             return True
@@ -870,9 +1162,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 await self.page.wait_for_timeout(2000)
 
             if not _form_ready:
-                # Last resort: wait a bit more and continue anyway
-                print(f"  -> Form not ready after {_max_load_wait}s. Continuing anyway...")
-                await self.page.wait_for_timeout(3000)
+                print(f"  ❌ Form not ready after {_max_load_wait}s (Customer '{customer_name}' data did not load). Aborting safely.")
+                await self.close_create_wo_modal()
+                return False
 
             print(f"  [2/7] Immediate Action: '{immediate_action}'")
             ia_xpath = self.rules.get(
@@ -912,8 +1204,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     'dispatch_board_tech_name_xpath',
                     "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Primary Tech')]/following::div[contains(@class,'v-select')][1]"
                 )
-                # Use simple dropdown selector
-                await self.select_dropdown_option(tech_xpath, tech_name, press_enter=False)
+                # Select using exact tech_name from JSON template (e.g. 'l 𝐂𝐫𝐢𝐬', 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
+                tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=False)
+                if not tech_selected:
+                    # Fallback: try clean tech name if available
+                    clean_tech_name = None
+                    canon_tn = self.canonical_str(tech_name)
+                    for entry in self.template_data.get("active_techs", []):
+                        c_tname = self.canonical_str(entry.get("tech_name", ""))
+                        c_name = self.canonical_str(entry.get("name", ""))
+                        if canon_tn and (canon_tn == c_tname or canon_tn == c_name):
+                            clean_tech_name = entry.get("name", "")
+                            break
+                    if not clean_tech_name:
+                        norm_tn = unicodedata.normalize('NFKD', tech_name).strip()
+                        m_stripped = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', norm_tn).strip()
+                        clean_tech_name = m_stripped if len(m_stripped) >= 3 else tech_name
+                    if clean_tech_name and clean_tech_name != tech_name:
+                        print(f"  -> Retrying Primary Tech selection with fallback name '{clean_tech_name}'...")
+                        tech_selected = await self.select_dropdown_option(tech_xpath, clean_tech_name, press_enter=False)
+
+                if not tech_selected:
+                    print(f"❌ Failed to match and select expected technician '{tech_name}'. Aborting work order to prevent wrong/duplicate assignment.")
+                    await self.close_create_wo_modal()
+                    return False
                 # Smart wait: wait for Date field to become enabled (it's disabled until Tech is assigned)
                 print(f"  -> Waiting for Date/Time fields to become active...")
                 try:
@@ -1036,19 +1350,36 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     pass
                 await self.page.wait_for_timeout(250)
 
-            await save_btn.scroll_into_view_if_needed()
-            await self.page.wait_for_timeout(400)
+            async def _trigger_save_click():
+                if not save_btn:
+                    return
+                try:
+                    await save_btn.scroll_into_view_if_needed()
+                    await save_btn.click(timeout=3000, force=True)
+                except Exception:
+                    pass
+                try:
+                    await self.page.evaluate("""
+                        (btn) => {
+                            if (!btn) return;
+                            btn.scrollIntoView({ block: 'center', inline: 'center' });
+                            const span = btn.querySelector('span') || btn.querySelector('.content_YwYtM') || btn;
+                            const evts = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+                            for (const ev of evts) {
+                                btn.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }));
+                                if (span && span !== btn) {
+                                    span.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }));
+                                }
+                            }
+                        }
+                    """, await save_btn.element_handle())
+                except Exception:
+                    pass
 
-            try:
-                await save_btn.click(timeout=5000)
-            except Exception as click_err:
-                print(f"  -> Direct click fallback ({click_err}), clicking via JS...")
-                await self.page.evaluate("(btn) => { if (btn) btn.click(); }", await save_btn.element_handle())
-
+            await _trigger_save_click()
             print(f"✅ Clicked Save for: '{customer_name}'")
 
             # -- WAIT FOR SAVE TO COMPLETE --
-            # Wait for modal to disappear to guarantee the save was processed by the FieldEdge server
             customer_xpath_val = self.rules.get(
                 'dispatch_board_customer_xpath',
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]"
@@ -1058,19 +1389,38 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             print("  -> Waiting for Save to process (modal to close)...")
             modal_closed = False
             _save_start = time.time()
-            _reclicked_save = False
+            _last_reclick = _save_start
 
-            # Wait 1.5s after click so request starts and UI transitions
             await self.page.wait_for_timeout(1500)
 
             while time.time() - _save_start < 30:
-                # Check for redirect to DispatchSummary (for technician work orders)
+                # 1. Check for redirect to DispatchSummary (for technician work orders)
                 current_url = self.page.url
                 if "DispatchSummary" in current_url:
                     modal_closed = True
                     break
 
-                # Check if any error toast or banner appeared
+                # 2. Check for conflict/confirmation dialogs (e.g. Schedule Conflict / Confirm / Yes)
+                for conf_sel in [
+                    "//div[contains(@class,'v-dialog') or contains(@class,'modal')]//button[contains(@class,'confirm') or contains(.,'Confirm') or contains(.,'Yes') or contains(.,'Save Anyway') or contains(.,'Proceed') or contains(.,'Continue')]",
+                    "button:has-text('Confirm'):visible",
+                    "button:has-text('Yes'):visible",
+                    "button:has-text('Save Anyway'):visible",
+                    "button:has-text('Proceed'):visible",
+                ]:
+                    try:
+                        conf_btn = self.page.locator(conf_sel).last
+                        if await conf_btn.count() > 0 and await conf_btn.is_visible():
+                            btn_text = (await conf_btn.text_content() or '').strip()
+                            if btn_text and 'Save' not in btn_text:
+                                print(f"  -> Found confirmation/conflict popup button '{btn_text}'. Clicking to confirm...")
+                                await conf_btn.click(force=True)
+                                await self.page.wait_for_timeout(1000)
+                                break
+                    except Exception:
+                        pass
+
+                # 3. Check if any error toast or banner appeared
                 try:
                     err_text = await self.page.evaluate("""
                         () => {
@@ -1094,7 +1444,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 except Exception:
                     pass
 
-                # Check if modal indicators are still visible
+                # 4. Check if modal indicators are still visible
                 save_btn_visible = False
                 try:
                     if await save_btn.count() > 0 and await save_btn.is_visible():
@@ -1111,7 +1461,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 modal_container_visible = False
                 try:
-                    modal_cont = self.page.locator("div.on-bottom-modal, div.create-workorder-form-grid, .modal.show, .modal-open, .v-dialog--active").first
+                    modal_cont = self.page.locator("div.on-bottom-modal, div.create-workorder-form-grid").first
                     if await modal_cont.count() > 0 and await modal_cont.is_visible():
                         modal_container_visible = True
                 except Exception:
@@ -1124,19 +1474,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     print(f"  -> Save processed successfully (modal closed in {elapsed}s).")
                     break
 
-                # If 10s passed and modal is still visible without errors, try clicking save once more
-                if time.time() - _save_start >= 10.0 and not _reclicked_save:
-                    _reclicked_save = True
-                    print("  -> Modal still open after 10s, attempting single re-click on Save...")
-                    try:
-                        await save_btn.click(timeout=3000)
-                    except Exception:
-                        pass
+                # 5. Every 5 seconds, if still open, re-click Save
+                if (time.time() - _last_reclick) >= 5.0:
+                    _last_reclick = time.time()
+                    print("  -> Modal still open, re-clicking Save button...")
+                    await _trigger_save_click()
 
                 await self.page.wait_for_timeout(1000)
 
             if not modal_closed:
                 print(f"  ❌ Modal did not close after 30s for '{customer_name}'. Work order save was not confirmed!")
+                print("  -> Closing stuck modal to ensure subsequent work orders are not blocked...")
+                await self.close_create_wo_modal()
                 return False
 
             await self.page.wait_for_timeout(2000)
@@ -1398,7 +1747,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 return False
         return True
 
-    async def run(self, days: int = 30, dry_run: bool = False, active_techs: Optional[List[str]] = None, start_date_str: Optional[str] = None, on_progress: Optional[Callable] = None, skip_asset: bool = False):
+    async def run(self, days: int = 30, dry_run: bool = False, active_techs: Optional[List[str]] = None, start_date_str: Optional[str] = None, on_progress: Optional[Callable] = None, skip_asset: bool = False, force: bool = False):
         """
         Main execution method for Dispatch Board Display Automation.
         """
@@ -1590,6 +1939,39 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 current_date = start_dt + timedelta(days=d)
                 date_str = f"{current_date.month}/{current_date.day}/{current_date.strftime('%y')}"
                 db_date_key = current_date.strftime("%Y-%m-%d")
+                is_weekend = current_date.weekday() >= 5
+
+                # ── SMART SKIP CHECK: Are Stage 1 template items already completed in history? ──
+                skip_stage1 = False
+                if not dry_run and not force and self.is_date_fully_completed(
+                    history=created_history,
+                    db_date_key=db_date_key,
+                    static_headers=static_headers,
+                    truck_assign_headers=truck_assign_headers,
+                    tech_jobs=tech_jobs,
+                    active_techs=active_techs,
+                    is_weekend=is_weekend,
+                    skip_vehicle_on_weekends=skip_vehicle_on_weekends,
+                    force=force
+                ):
+                    print(f"\n⚡ [Smart Skip: Stage 1] All template items for {date_str} ({db_date_key}) are already recorded in history.")
+                    print(f"   Skipping Stage 1 template creation to preserve manual edits. Proceeding directly to Stage 2 (Asset Assignment)...\n")
+                    skip_stage1 = True
+                    if skip_asset:
+                        _records_processed += 1
+                        self.progress_info.update({
+                            "current_day": d + 1,
+                            "completed_days": d + 1,
+                            "remaining_days": max(0, days - (d + 1)),
+                            "percent_complete": round(((d + 1) / days) * 100, 1),
+                            "status_message": f"Completed Day {d + 1} of {days} ({date_str}) [Smart Skip]"
+                        })
+                        if on_progress:
+                            try:
+                                on_progress(self.progress_info)
+                            except Exception:
+                                pass
+                        continue
 
                 self.progress_info = {
                     "current_day": d + 1,
@@ -1610,114 +1992,28 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 print(f"\n--- Processing Date: {date_str} (Day {d + 1}/{days}) ---")
 
                 template_processed_counts = {}
+                if not skip_stage1:
 
-                if not dry_run:
-                    if board_date_str != db_date_key or "DispatchBoard" not in (self.page.url or ""):
-                        print(f"🗓️ Navigating UI date picker to {db_date_key}...")
-                        nav_ok = await self.navigate_to_board_date(current_date)
-                        print(f"🔄 Fetching board data for target date {db_date_key}...")
-                        fetched_date, fetched_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                        if fetched_date == db_date_key:
-                            board_date_str = fetched_date
-                            existing_wos = fetched_wos
-                        elif nav_ok:
-                            # Fallback: URL navigation succeeded, update board_date_str and use fetched_wos if available
-                            board_date_str = db_date_key
-                            existing_wos = fetched_wos or {}
-                        else:
-                            print(f"⛔ Board date '{board_date_str}' does NOT match target date '{db_date_key}' and dynamic fetch could not confirm board state.")
-                            print(f"⛔ Skipping creation for date {db_date_key} to prevent duplicate work orders.")
-                            continue
-
-                # Static Header Banners
-                for header in static_headers:
-                    name = header.get("name")
-                    start_time = header.get("start_time")
-                    duration = header.get("duration")
-                    priority = header.get("priority")
-                    h_tech = header.get("tech_name")
-                    h_task = header.get("task", task)
-
-                    # Check if the header already exists on the board for the target date
                     if not dry_run:
-                        canon_target = self.canonical_str(name)
-                        is_service_wo = bool(
-                            header.get('is_service_needed_duplicate') or
-                            (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
-                        )
-                        tracking_target = f"{canon_target}_serviceneeded" if is_service_wo else canon_target
-                        try:
-                            t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                            time_key = t_dt.strftime("%I:%M %p")
-                            if time_key.startswith("0"): time_key = time_key[1:]
-                        except Exception:
-                            time_key = ""
-                        key = f"{tracking_target}|{time_key}" if time_key else tracking_target
-                        
-                        canon_h_tech = self.canonical_str(h_tech or '')
-                        
-                        processed_key = (canon_h_tech, key)
-                        template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                        target_count_idx = template_processed_counts[processed_key]
-                        
-                        # Check persistent creation history first (bypassed to check live board state directly)
-                        # if self.is_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx):
-                        #     print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                        #     continue
-
-                        board_count = 0
-                        for canon_tech_key, wo_list in existing_wos.items():
-                            if canon_h_tech:
-                                tech_match = (
-                                    canon_tech_key == canon_h_tech or
-                                    canon_h_tech in canon_tech_key or
-                                    canon_tech_key in canon_h_tech
-                                )
+                        if board_date_str != db_date_key or "DispatchBoard" not in (self.page.url or ""):
+                            print(f"🗓️ Navigating UI date picker to {db_date_key}...")
+                            nav_ok = await self.navigate_to_board_date(current_date)
+                            print(f"🔄 Fetching board data for target date {db_date_key}...")
+                            fetched_date, fetched_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                            if fetched_date == db_date_key:
+                                board_date_str = fetched_date
+                                existing_wos = fetched_wos
+                            elif nav_ok:
+                                # Fallback: URL navigation succeeded, update board_date_str and use fetched_wos if available
+                                board_date_str = db_date_key
+                                existing_wos = fetched_wos or {}
                             else:
-                                tech_match = not canon_tech_key
+                                print(f"⛔ Board date '{board_date_str}' does NOT match target date '{db_date_key}' and dynamic fetch could not confirm board state.")
+                                print(f"⛔ Skipping creation for date {db_date_key} to prevent duplicate work orders.")
+                                continue
 
-                            if tech_match:
-                                for wo in wo_list:
-                                    if self.check_item_match(wo, canon_target, time_key, is_service_wo=is_service_wo):
-                                        board_count += 1
-                         
-                        if board_count >= target_count_idx:
-                            print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) already exists on the board for tech '{h_tech}'. Recording in persistent history & skipping creation.")
-                            self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
-                            continue
-
-                    if dry_run:
-                        print(f"  [Dry-Run] Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
-                    else:
-                        is_service_wo = bool(
-                            header.get('is_service_needed_duplicate') or
-                            (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
-                        )
-                        header_summary = header.get('service_note', '') if is_service_wo else None
-                        res = await self.fill_and_save_work_order(
-                            customer_name=name,
-                            task=h_task,
-                            lead_source=lead_source,
-                            priority=priority,
-                            target_date=date_str,
-                            start_time=start_time,
-                            duration=duration,
-                            tech_name=h_tech,
-                            immediate_action=immediate_action,
-                            summary_note=None
-                        )
-                        if res:
-                            self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
-                            # Refresh board data after save
-                            f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                            if f_date == db_date_key:
-                                board_date_str, existing_wos = f_date, f_wos
-
-                # Truck Assign Headers (Internal Vehicle Work Orders)
-                if skip_vehicle_on_weekends and current_date.weekday() >= 5:
-                    print(f"⏭️ Skipping internal vehicle work orders (truck_assign_headers) for weekend date {date_str} ({current_date.strftime('%A')}).")
-                else:
-                    for header in truck_assign_headers:
+                    # Static Header Banners
+                    for header in static_headers:
                         name = header.get("name")
                         start_time = header.get("start_time")
                         duration = header.get("duration")
@@ -1728,6 +2024,246 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         # Check if the header already exists on the board for the target date
                         if not dry_run:
                             canon_target = self.canonical_str(name)
+                            is_service_wo = bool(
+                                header.get('is_service_needed_duplicate') or
+                                (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
+                            )
+                            tracking_target = f"{canon_target}_serviceneeded" if is_service_wo else canon_target
+                            try:
+                                t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
+                                time_key = t_dt.strftime("%I:%M %p")
+                                if time_key.startswith("0"): time_key = time_key[1:]
+                            except Exception:
+                                time_key = ""
+                            key = f"{tracking_target}|{time_key}" if time_key else tracking_target
+                        
+                            canon_h_tech = self.canonical_str(h_tech or '')
+                        
+                            processed_key = (canon_h_tech, key)
+                            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+                            target_count_idx = template_processed_counts[processed_key]
+                        
+                            # Check persistent creation history first
+                            if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx):
+                                print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
+                                continue
+
+                            board_count = 0
+                            for canon_tech_key, wo_list in existing_wos.items():
+                                if canon_h_tech:
+                                    tech_match = (
+                                        canon_tech_key == canon_h_tech or
+                                        canon_h_tech in canon_tech_key or
+                                        canon_tech_key in canon_h_tech
+                                    )
+                                else:
+                                    tech_match = not canon_tech_key
+
+                                if tech_match:
+                                    for wo in wo_list:
+                                        if self.check_item_match(wo, canon_target, time_key, is_service_wo=is_service_wo):
+                                            board_count += 1
+                         
+                            if board_count >= target_count_idx:
+                                print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) already exists on the board for tech '{h_tech}'. Recording in persistent history & skipping creation.")
+                                self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                continue
+
+                        if dry_run:
+                            print(f"  [Dry-Run] Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
+                        else:
+                            is_service_wo = bool(
+                                header.get('is_service_needed_duplicate') or
+                                (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
+                            )
+                            header_summary = header.get('service_note', '') if is_service_wo else None
+                            res = await self.fill_and_save_work_order(
+                                customer_name=name,
+                                task=h_task,
+                                lead_source=lead_source,
+                                priority=priority,
+                                target_date=date_str,
+                                start_time=start_time,
+                                duration=duration,
+                                tech_name=h_tech,
+                                immediate_action=immediate_action,
+                                summary_note=None
+                            )
+                            if res:
+                                self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
+                                # Refresh board data after save
+                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                                if f_date == db_date_key:
+                                    board_date_str, existing_wos = f_date, f_wos
+
+                    # Truck Assign Headers (Internal Vehicle Work Orders)
+                    if skip_vehicle_on_weekends and current_date.weekday() >= 5:
+                        print(f"⏭️ Skipping internal vehicle work orders (truck_assign_headers) for weekend date {date_str} ({current_date.strftime('%A')}).")
+                    else:
+                        for header in truck_assign_headers:
+                            name = header.get("name")
+                            start_time = header.get("start_time")
+                            duration = header.get("duration")
+                            priority = header.get("priority")
+                            h_tech = header.get("tech_name")
+                            h_task = header.get("task", task)
+
+                            # Check if the header already exists on the board for the target date
+                            if not dry_run:
+                                canon_target = self.canonical_str(name)
+                                try:
+                                    t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
+                                    time_key = t_dt.strftime("%I:%M %p")
+                                    if time_key.startswith("0"): time_key = time_key[1:]
+                                except Exception:
+                                    time_key = ""
+                                key = f"{canon_target}|{time_key}" if time_key else canon_target
+                            
+                                canon_h_tech = self.canonical_str(h_tech or '')
+                            
+                                processed_key = (canon_h_tech, key)
+                                template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+                                target_count_idx = template_processed_counts[processed_key]
+
+                                is_service_needed_asset = any(
+                                    self.canonical_str(s.get("asset_name", "")) == canon_target
+                                    for s in self.template_data.get("service_needed_assets", [])
+                                    if s.get("active", True)
+                                )
+                            
+                                # Check persistent creation history first
+                                if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
+                                    print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
+                                    continue
+
+                                # Duplicate prevention: Check if this truck already exists on ANY REAL tech on the board
+                                # CRITICAL: Exclude staging/parking rows ("s4", "s3", "f2", "p2") because all fleet trucks
+                                # reside on s4 as static headers! We only check if the truck is already assigned to a real technician!
+                                truck_on_board = False
+                                found_tech_name = None
+                                found_cust_name = None
+                                for c_t, w_list in existing_wos.items():
+                                    if c_t in ("s4", "s3", "f2", "p2", "") or c_t.startswith("s4") or c_t.startswith("s3"):
+                                        continue
+                                    for wo in w_list:
+                                        if not wo.get("is_appointment"):
+                                            c_cust = wo.get("canon_customer", "")
+                                            # Match genuine truck work order customer name on real technician row
+                                            if c_cust and (c_cust == canon_target or c_cust in (f"truck{canon_target}", f"tr{canon_target}")):
+                                                truck_on_board = True
+                                                found_tech_name = c_t
+                                                found_cust_name = c_cust
+                                                break
+                                    if truck_on_board:
+                                        break
+
+                                if truck_on_board:
+                                    print(f"⏭️ Truck '{name}' already exists on tech '{found_tech_name}' (matched customer: '{found_cust_name}') for {date_str}. Recording in history and skipping creation to prevent duplicate assignment.")
+                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                    continue
+
+                                # Duplicate prevention: Check if assigned tech already has a truck on the board
+                                if canon_h_tech and canon_h_tech not in ("s4", "s3", "f2", "p2", "") and not canon_h_tech.startswith("s4") and canon_h_tech in existing_wos:
+                                    tech_already_has_truck = False
+                                    for wo in existing_wos[canon_h_tech]:
+                                        c_cust = wo.get("canon_customer", "")
+                                        if any(self.canonical_str(t.get("name", "")) == c_cust for t in truck_assign_headers):
+                                            tech_already_has_truck = True
+                                            break
+                                    if tech_already_has_truck:
+                                        print(f"⚠️ Tech '{h_tech}' already has a truck assigned on {date_str}. Skipping creating '{name}' to prevent multiple trucks on one technician.")
+                                        self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                        continue
+
+                                board_count = 0
+                                for canon_tech_key, wo_list in existing_wos.items():
+                                    tech_match = (
+                                        not canon_h_tech or not canon_tech_key or
+                                        canon_tech_key == canon_h_tech or
+                                        canon_h_tech in canon_tech_key or
+                                        canon_tech_key in canon_h_tech
+                                    )
+                                    if tech_match:
+                                         for wo in wo_list:
+                                             # For non-appointment WOs: only skip if EXACT same name matches at same time
+                                             if not wo.get("is_appointment"):
+                                                 c_cust = wo.get("canon_customer", "")
+                                                 w_time = wo.get("time_key", "")
+                                                 name_match = c_cust == canon_target
+                                                 time_match = is_service_needed_asset or not time_key or not w_time or time_key == w_time
+                                                 if name_match and time_match:
+                                                     board_count += 1
+                                             else:
+                                                 # For appointments (PTO/OFF/SICK): check time range overlap
+                                                 match_found = False
+                                                 if wo.get("start_time_obj") and wo.get("end_time_obj"):
+                                                     try:
+                                                         target_t = datetime.strptime(time_key, "%I:%M %p").time()
+                                                         if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
+                                                             match_found = True
+                                                     except Exception:
+                                                         pass
+                                                 if not match_found and wo.get("time_key") == time_key:
+                                                     match_found = True
+                                                 if match_found:
+                                                     board_count += 1
+                             
+                                if board_count >= target_count_idx:
+                                    print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Recording in persistent history & skipping creation.")
+                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                    continue
+
+                            if dry_run:
+                                print(f"  [Dry-Run] Truck Assign Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
+                            else:
+                                res = await self.fill_and_save_work_order(
+                                    customer_name=name,
+                                    task=h_task,
+                                    lead_source=lead_source,
+                                    priority=priority,
+                                    target_date=date_str,
+                                    start_time=start_time,
+                                    duration=duration,
+                                    tech_name=h_tech,
+                                    immediate_action=immediate_action,
+                                    summary_note=None
+                                )
+                                if res:
+                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
+                                    # Refresh board data after save
+                                    f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                                    if f_date == db_date_key:
+                                        board_date_str, existing_wos = f_date, f_wos
+
+                    # Tech Jobs (e.g. SHOP, internal meetings)
+                    for job in tech_jobs:
+                        if not job.get("active", True):
+                            continue
+                        t_tech = job.get("tech_name")
+                        if t_tech and template_techs:
+                            canon_job_tech = self.canonical_str(t_tech)
+                            tech_is_active = False
+                            for entry in template_techs:
+                                if not entry.get("active", True):
+                                    continue
+                                c_name = self.canonical_str(entry.get("name", ""))
+                                c_tname = self.canonical_str(entry.get("tech_name", ""))
+                                if (canon_job_tech == c_name or canon_job_tech in c_name or c_name in canon_job_tech or
+                                    canon_job_tech == c_tname or canon_job_tech in c_tname or c_tname in canon_job_tech):
+                                    tech_is_active = True
+                                    break
+                            if not tech_is_active:
+                                print(f"⏭️ Skipping tech job '{job.get('name')}' because assigned technician '{t_tech}' is inactive in template config.")
+                                continue
+
+                        name = job.get("name")
+                        start_time = job.get("start_time")
+                        duration = job.get("duration")
+                        priority = job.get("priority")
+                        j_task = job.get("task", task)
+
+                        if not dry_run:
+                            canon_target = self.canonical_str(name)
                             try:
                                 t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
                                 time_key = t_dt.strftime("%I:%M %p")
@@ -1735,31 +2271,24 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             except Exception:
                                 time_key = ""
                             key = f"{canon_target}|{time_key}" if time_key else canon_target
-                            
-                            canon_h_tech = self.canonical_str(h_tech or '')
-                            
-                            processed_key = (canon_h_tech, key)
+
+                            canon_t_tech = self.canonical_str(t_tech or '')
+                        
+                            processed_key = (canon_t_tech, key)
                             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                             target_count_idx = template_processed_counts[processed_key]
 
-                            is_service_needed_asset = any(
-                                self.canonical_str(s.get("asset_name", "")) == canon_target
-                                for s in self.template_data.get("service_needed_assets", [])
-                                if s.get("active", True)
-                            )
-                            
-                            # Check persistent creation history first
-                            if self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
-                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
+                            if not force and self.is_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx):
+                                print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                                 continue
 
                             board_count = 0
                             for canon_tech_key, wo_list in existing_wos.items():
                                 tech_match = (
-                                    not canon_h_tech or not canon_tech_key or
-                                    canon_tech_key == canon_h_tech or
-                                    canon_h_tech in canon_tech_key or
-                                    canon_tech_key in canon_h_tech
+                                    not canon_t_tech or not canon_tech_key or
+                                    canon_tech_key == canon_t_tech or
+                                    canon_t_tech in canon_tech_key or
+                                    canon_tech_key in canon_t_tech
                                 )
                                 if tech_match:
                                      for wo in wo_list:
@@ -1768,7 +2297,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                              c_cust = wo.get("canon_customer", "")
                                              w_time = wo.get("time_key", "")
                                              name_match = c_cust == canon_target
-                                             time_match = is_service_needed_asset or not time_key or not w_time or time_key == w_time
+                                             time_match = not time_key or not w_time or time_key == w_time
                                              if name_match and time_match:
                                                  board_count += 1
                                          else:
@@ -1785,213 +2314,106 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                  match_found = True
                                              if match_found:
                                                  board_count += 1
-                             
+
                             if board_count >= target_count_idx:
-                                print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Recording in persistent history & skipping creation.")
-                                self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Recording in persistent history & skipping creation.")
+                                self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": t_tech, "time": time_key})
                                 continue
 
                         if dry_run:
-                            print(f"  [Dry-Run] Truck Assign Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
+                            print(f"  [Dry-Run] Tech Job: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {t_tech} | Task: {j_task}")
                         else:
                             res = await self.fill_and_save_work_order(
                                 customer_name=name,
-                                task=h_task,
+                                task=j_task,
                                 lead_source=lead_source,
                                 priority=priority,
                                 target_date=date_str,
                                 start_time=start_time,
                                 duration=duration,
-                                tech_name=h_tech,
+                                tech_name=t_tech,
+                                mark_completed=True,
                                 immediate_action=immediate_action,
                                 summary_note=None
                             )
                             if res:
-                                self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
+                                self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": t_tech, "time": time_key})
                                 # Refresh board data after save
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                                 if f_date == db_date_key:
                                     board_date_str, existing_wos = f_date, f_wos
 
-                # Tech Jobs (e.g. SHOP, internal meetings)
-                for job in tech_jobs:
-                    if not job.get("active", True):
-                        continue
-                    t_tech = job.get("tech_name")
-                    if t_tech and template_techs:
-                        canon_job_tech = self.canonical_str(t_tech)
-                        tech_is_active = False
-                        for entry in template_techs:
-                            if not entry.get("active", True):
-                                continue
-                            c_name = self.canonical_str(entry.get("name", ""))
-                            c_tname = self.canonical_str(entry.get("tech_name", ""))
-                            if (canon_job_tech == c_name or canon_job_tech in c_name or c_name in canon_job_tech or
-                                canon_job_tech == c_tname or canon_job_tech in c_tname or c_tname in canon_job_tech):
-                                tech_is_active = True
-                                break
-                        if not tech_is_active:
-                            print(f"⏭️ Skipping tech job '{job.get('name')}' because assigned technician '{t_tech}' is inactive in template config.")
-                            continue
-
-                    name = job.get("name")
-                    start_time = job.get("start_time")
-                    duration = job.get("duration")
-                    priority = job.get("priority")
-                    j_task = job.get("task", task)
-
-                    if not dry_run:
-                        canon_target = self.canonical_str(name)
-                        try:
-                            t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                            time_key = t_dt.strftime("%I:%M %p")
-                            if time_key.startswith("0"): time_key = time_key[1:]
-                        except Exception:
-                            time_key = ""
-                        key = f"{canon_target}|{time_key}" if time_key else canon_target
-
-                        canon_t_tech = self.canonical_str(t_tech or '')
-                        
-                        processed_key = (canon_t_tech, key)
-                        template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                        target_count_idx = template_processed_counts[processed_key]
-
-                        if self.is_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx):
-                            print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                            continue
-
-                        board_count = 0
-                        for canon_tech_key, wo_list in existing_wos.items():
-                            tech_match = (
-                                not canon_t_tech or not canon_tech_key or
-                                canon_tech_key == canon_t_tech or
-                                canon_t_tech in canon_tech_key or
-                                canon_tech_key in canon_t_tech
-                            )
-                            if tech_match:
-                                 for wo in wo_list:
-                                     # For non-appointment WOs: only skip if EXACT same name matches at same time
-                                     if not wo.get("is_appointment"):
-                                         c_cust = wo.get("canon_customer", "")
-                                         w_time = wo.get("time_key", "")
-                                         name_match = c_cust == canon_target
-                                         time_match = not time_key or not w_time or time_key == w_time
-                                         if name_match and time_match:
-                                             board_count += 1
-                                     else:
-                                         # For appointments (PTO/OFF/SICK): check time range overlap
-                                         match_found = False
-                                         if wo.get("start_time_obj") and wo.get("end_time_obj"):
-                                             try:
-                                                 target_t = datetime.strptime(time_key, "%I:%M %p").time()
-                                                 if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                     match_found = True
-                                             except Exception:
-                                                 pass
-                                         if not match_found and wo.get("time_key") == time_key:
-                                             match_found = True
-                                         if match_found:
-                                             board_count += 1
-
-                        if board_count >= target_count_idx:
-                            print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Recording in persistent history & skipping creation.")
-                            self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": t_tech, "time": time_key})
-                            continue
-
-                    if dry_run:
-                        print(f"  [Dry-Run] Tech Job: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {t_tech} | Task: {j_task}")
-                    else:
-                        res = await self.fill_and_save_work_order(
-                            customer_name=name,
-                            task=j_task,
-                            lead_source=lead_source,
-                            priority=priority,
-                            target_date=date_str,
-                            start_time=start_time,
-                            duration=duration,
-                            tech_name=t_tech,
-                            mark_completed=True,
-                            immediate_action=immediate_action,
-                            summary_note=None
-                        )
-                        if res:
-                            self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": t_tech, "time": time_key})
-                            # Refresh board data after save
-                            f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                            if f_date == db_date_key:
-                                board_date_str, existing_wos = f_date, f_wos
-
-                # Technician Complete WOs
-                for tech in active_techs:
-                    t_name = tech
+                    # Technician Complete WOs
+                    for tech in active_techs:
+                        t_name = tech
                     
-                    # Fetch specific metadata for this tech, or fallback to defaults
-                    meta = tech_metadata.get(t_name) or tech_metadata.get(self.canonical_str(t_name)) or {}
-                    start_time = meta.get("start_time") or tech_defaults.get("start_time")
-                    duration = meta.get("duration") or tech_defaults.get("duration")
-                    t_assignment_name = meta.get("tech_name", tech)
-                    priority = tech_priorities.get(t_name) or tech_priorities.get(self.canonical_str(t_name)) or tech_defaults.get("priority")
+                        # Fetch specific metadata for this tech, or fallback to defaults
+                        meta = tech_metadata.get(t_name) or tech_metadata.get(self.canonical_str(t_name)) or {}
+                        start_time = meta.get("start_time") or tech_defaults.get("start_time")
+                        duration = meta.get("duration") or tech_defaults.get("duration")
+                        t_assignment_name = meta.get("tech_name", tech)
+                        priority = tech_priorities.get(t_name) or tech_priorities.get(self.canonical_str(t_name)) or tech_defaults.get("priority")
 
-                    # Check if the technician completed WO already exists on the board for the target date
-                    if not dry_run:
-                        canon_target = self.canonical_str(t_name)
-                        canon_t_assignment = self.canonical_str(t_assignment_name or '')
+                        # Check if the technician completed WO already exists on the board for the target date
+                        if not dry_run:
+                            canon_target = self.canonical_str(t_name)
+                            canon_t_assignment = self.canonical_str(t_assignment_name or '')
                         
-                        processed_key = (canon_t_assignment, canon_target)
-                        template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                        target_count_idx = template_processed_counts[processed_key]
+                            processed_key = (canon_t_assignment, canon_target)
+                            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+                            target_count_idx = template_processed_counts[processed_key]
 
-                        if self.is_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx):
-                            print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) was previously created and recorded in history. Skipping 2nd creation.")
-                            continue
+                            if not force and self.is_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx):
+                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) was previously created and recorded in history. Skipping 2nd creation.")
+                                continue
 
-                        board_count = 0
-                        tech_off_for_day = False
-                        for canon_tech_key, wo_list in existing_wos.items():
-                            tech_match = (
-                                not canon_t_assignment or not canon_tech_key or
-                                canon_tech_key == canon_t_assignment or
-                                canon_t_assignment in canon_tech_key or
-                                canon_tech_key in canon_t_assignment
-                            )
-                            if tech_match:
-                                for wo in wo_list:
-                                    if wo.get("is_appointment"):
-                                        tech_off_for_day = True
+                            board_count = 0
+                            tech_off_for_day = False
+                            for canon_tech_key, wo_list in existing_wos.items():
+                                tech_match = (
+                                    not canon_t_assignment or not canon_tech_key or
+                                    canon_tech_key == canon_t_assignment or
+                                    canon_t_assignment in canon_tech_key or
+                                    canon_tech_key in canon_t_assignment
+                                )
+                                if tech_match:
+                                    for wo in wo_list:
+                                        if wo.get("is_appointment"):
+                                            tech_off_for_day = True
+                                            break
+                                        if self.check_item_match(wo, canon_target, None, require_customer_match=True):
+                                            board_count += 1
+                                    if tech_off_for_day:
                                         break
-                                    if self.check_item_match(wo, canon_target, None, require_customer_match=True):
-                                        board_count += 1
-                                if tech_off_for_day:
-                                    break
                                         
-                        if tech_off_for_day or board_count >= target_count_idx:
-                            print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) skipped (tech has OFF/Appointment on board). Recording in persistent history.")
-                            self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="existing_on_board", details={"name": t_name, "tech": t_assignment_name})
-                            continue
+                            if tech_off_for_day or board_count >= target_count_idx:
+                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) skipped (tech has OFF/Appointment on board). Recording in persistent history.")
+                                self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="existing_on_board", details={"name": t_name, "tech": t_assignment_name})
+                                continue
 
-                    if dry_run:
-                        print(f"  [Dry-Run] Tech WO: {t_name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech Name: {t_assignment_name}")
-                    else:
-                        res = await self.fill_and_save_work_order(
-                            customer_name=t_name,
-                            task=task,
-                            lead_source=lead_source,
-                            priority=priority,
-                            target_date=date_str,
-                            start_time=start_time,
-                            duration=duration,
-                            tech_name=t_assignment_name,
-                            mark_completed=True,
-                            immediate_action=immediate_action,
-                            task_type=task,
-                            summary_note=None
-                        )
-                        if res:
-                            self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name})
-                            # Refresh board data after save
-                            f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                            if f_date == db_date_key:
-                                board_date_str, existing_wos = f_date, f_wos
+                        if dry_run:
+                            print(f"  [Dry-Run] Tech WO: {t_name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech Name: {t_assignment_name}")
+                        else:
+                            res = await self.fill_and_save_work_order(
+                                customer_name=t_name,
+                                task=task,
+                                lead_source=lead_source,
+                                priority=priority,
+                                target_date=date_str,
+                                start_time=start_time,
+                                duration=duration,
+                                tech_name=t_assignment_name,
+                                mark_completed=True,
+                                immediate_action=immediate_action,
+                                task_type=task,
+                                summary_note=None
+                            )
+                            if res:
+                                self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name})
+                                # Refresh board data after save
+                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                                if f_date == db_date_key:
+                                    board_date_str, existing_wos = f_date, f_wos
 
                 if not dry_run:
                     _records_processed += 1
@@ -2031,6 +2453,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             print(f"✅ [Step 2: Asset Assignment] Completed for {formatted_current_date}: Checked {recon_cnt} truck work orders, Reassigned {recon_fixed}.")
                         except Exception as asset_err:
                             print(f"⚠️ [Step 2: Asset Assignment] Note/Error on {formatted_current_date}: {asset_err}")
+
+                    # Mark entire date as completed in persistent history so it will never be recreated/re-assigned even if deleted in FieldEdge
+                    self.record_wo_created(
+                        created_history,
+                        db_date_key,
+                        canon_tech="",
+                        canon_target="date_processing_complete",
+                        target_count_idx=1,
+                        status="completed",
+                        details={"name": "Date Processing Complete", "date": db_date_key}
+                    )
+                    print(f"🔒 [Date Completed] Marked date {db_date_key} as completed in persistent history.")
                 elif not skip_asset:
                     formatted_current_date = current_date.strftime("%m/%d/%Y")
                     print(f"  [Dry-Run] Step 2: Would reconcile Asset Assignments for {formatted_current_date}")

@@ -486,7 +486,8 @@ async def run_automation(args):
                     dry_run=not args.live,
                     start_date_str=current_start_date,
                     on_progress=on_progress_update,
-                    skip_asset=getattr(args, "skip_asset", False)
+                    skip_asset=getattr(args, "skip_asset", False),
+                    force=getattr(args, "force", False)
                 )
 
                 # After initial successful run with an explicit start_date_str, reset it to None
@@ -538,7 +539,8 @@ async def run_automation(args):
                 dry_run=not args.live,
                 start_date_str=args.start_date,
                 on_progress=on_progress_update,
-                skip_asset=getattr(args, "skip_asset", False)
+                skip_asset=getattr(args, "skip_asset", False),
+                force=getattr(args, "force", False)
             )
             STATUS_DATA["last_status"] = "success"
         except Exception as e:
@@ -554,6 +556,7 @@ def main():
     parser.add_argument("--interval-hours", type=float, default=24.0, help="Interval between runs in hours when --loop is set (default: 24)")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "3000")), help="HTTP status server port (default: 3000)")
     parser.add_argument("--skip-asset", action="store_true", help="Skip running the asset assignment tool for each date")
+    parser.add_argument("--force", action="store_true", help="Force fresh start: bypass smart skip and verify/re-create all board items")
     args = parser.parse_args()
 
     start_status_server(args.port)
@@ -563,6 +566,7 @@ def main():
     print(f"   Days: {args.days}")
     print(f"   HTTP Status Port: {args.port}")
     print(f"   Asset Tool: {'SKIPPED (--skip-asset)' if getattr(args, 'skip_asset', False) else 'ENABLED (Runs on same date)'}")
+    print(f"   Fresh Start (Force): {'ENABLED (--force)' if args.force else 'Disabled'}")
     if args.start_date:
         print(f"   Start Date: {args.start_date}")
     if args.loop:

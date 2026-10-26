@@ -22,7 +22,10 @@ if _dispatch_dir not in sys.path:
 try:
     from base_scraper import BaseScraper, get_pst_today_str, get_pst_now
 except ImportError:
-    from dispatch.base_scraper import BaseScraper, get_pst_today_str, get_pst_now  # type: ignore
+    try:
+        from automation.scrapers.base_scraper import BaseScraper, get_pst_today_str, get_pst_now  # type: ignore
+    except ImportError:
+        from dispatch.base_scraper import BaseScraper, get_pst_today_str, get_pst_now  # type: ignore
 
 
 
@@ -160,6 +163,68 @@ class AssetAssignmentScraper(BaseScraper):
             with open(self.template_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         return {}
+
+    def _load_history(self) -> Dict:
+        """Load persistent history from Central Dashboard API."""
+        history = {}
+
+        # Sync from Dashboard API if configured and reachable
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if api_url:
+            try:
+                import urllib.request
+                endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
+                headers = {"User-Agent": "SterlingAutomations/1.0"}
+                headers.update(self._get_api_auth_headers())
+                req = urllib.request.Request(endpoint, headers=headers)
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    if response.status == 200:
+                        remote_history = json.loads(response.read().decode('utf-8'))
+                        if isinstance(remote_history, dict):
+                            history.update(remote_history)
+            except Exception:
+                pass
+        return history
+
+    def is_reconciled(self, history: Dict, date_key: str) -> bool:
+        """Check if asset reconciliation was previously completed for date_key."""
+        if not history or not date_key:
+            return False
+        key = f"{date_key}|asset_reconciliation|completed|1"
+        if key in history:
+            return True
+        for k, v in history.items():
+            if (v.get("date") == date_key or k.startswith(f"{date_key}|")) and v.get("canon_target") == "asset_reconciliation":
+                return True
+        return False
+
+    def record_reconciled(self, history: Dict, date_key: str):
+        """Record completed asset reconciliation for date_key in local JSON and Central Dashboard API."""
+        key = f"{date_key}|asset_reconciliation|completed|1"
+        rec_data = {
+            "date": date_key,
+            "canon_tech": "",
+            "canon_target": "asset_reconciliation",
+            "occurrence": 1,
+            "status": "completed",
+            "name": "Asset Reconciliation",
+            "created_at": datetime.now().isoformat()
+        }
+        history[key] = rec_data
+
+        # Sync with Dashboard API if reachable
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if api_url:
+            try:
+                import urllib.request
+                endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
+                headers = {"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"}
+                headers.update(self._get_api_auth_headers())
+                req = urllib.request.Request(endpoint, data=json.dumps(rec_data).encode('utf-8'), headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    pass
+            except Exception:
+                pass
 
     def format_date(self, date_str: str) -> str:
         if not date_str:
@@ -632,6 +697,12 @@ class AssetAssignmentScraper(BaseScraper):
                             isAssetAssignment = true;
                         }
 
+                        const rowFullText = cleanText(row.textContent || '').toLowerCase();
+                        const rowClass = (row.className || '').toLowerCase();
+                        const isCompleted = rowFullText.includes('completed') || 
+                                            rowClass.includes('completed') || 
+                                            Boolean(row.querySelector('.completed, [title*="Completed" i], [aria-label*="Completed" i], .status-completed'));
+
                         rows.push({
                             priority_color: priorityColor,
                             priority_name: priorityName,
@@ -647,7 +718,8 @@ class AssetAssignmentScraper(BaseScraper):
                             scheduled_date: scheduledDate,
                             task_name: taskName,
                             task_duration: taskDuration,
-                            purchase_status: purchaseStatus
+                            purchase_status: purchaseStatus,
+                            is_completed: isCompleted
                         });
                     } catch (rowErr) {
                         // ignore broken row
@@ -732,17 +804,31 @@ class AssetAssignmentScraper(BaseScraper):
             if tech.lower() in ["s4", "s3", ""]:
                 continue
 
-            # CRITICAL: Must be a genuine truck/asset assignment work order!
-            # Regular jobs like 'INTERNAL OPS. 2', 'PRETRIP', 'PARTS', customer jobs must NEVER be treated as fleet trucks!
+            # CRITICAL: Helper/Laborer/Crew assignments (👥 | ...) are personnel, NOT fleet trucks!
+            # They must NEVER be treated as fleet trucks, canceled, or edited by truck reconciliation!
+            if "👥" in cust or "laborer" in cust.lower() or "helper" in cust.lower() or "crew" in cust.lower():
+                continue
+
+            # CRITICAL: Must be a genuine fleet truck assignment work order!
+            c_cust = self.canonical_str(cust)
             is_truck_wo = (
-                ("🚛" in cust or "🛻" in cust or "|" in cust) and
+                ("🚛" in cust or "🛻" in cust) and
                 (
                     "asset assignment" in prio.lower() or
                     "ser tr" in prio.lower() or
                     "pt (" in prio.lower() or
-                    "laborer" in prio.lower()
+                    c_cust in expected_truck_map
                 )
             )
+            if not is_truck_wo:
+                if c_cust in expected_truck_map:
+                    is_truck_wo = True
+                elif "|" in cust and ("🚛" in cust or "🛻" in cust):
+                    after_pipe = cust.split("|")[1].strip()
+                    pipe_nums = re.findall(r'\d+', after_pipe)
+                    if pipe_nums and (pipe_nums[0] in expected_truck_map or str(int(pipe_nums[0])) in expected_truck_map):
+                        is_truck_wo = True
+
             if not is_truck_wo:
                 continue
 
@@ -791,7 +877,7 @@ class AssetAssignmentScraper(BaseScraper):
                 target_tech = matched_cfg.get("tech_name") or "None (Unassigned/Inactive)"
                 truck_headers.append({
                     "name": canonical_truck_name,
-                    "active": True,
+                    "active": matched_cfg.get("active", True),
                     "department": dept,
                     "priority": prio or matched_cfg.get("priority", ""),
                     "start_time": start_time,
@@ -799,9 +885,10 @@ class AssetAssignmentScraper(BaseScraper):
                     "tech_name": tech,
                     "work_order_number": wo_num,
                     "scheduled_date": sched_str,
-                    "asset_name": r.get("asset_name") or matched_cfg.get("name", "")
+                    "asset_name": r.get("asset_name") or matched_cfg.get("name", ""),
+                    "is_completed": r.get("is_completed", False)
                 })
-                print(f"  🎯 Matched truck WO #{wo_num}: '{canonical_truck_name}' (Current Tech: '{tech}', Target Tech: '{target_tech}')")
+                print(f"  🎯 Matched truck WO #{wo_num}: '{canonical_truck_name}' (Current Tech: '{tech}', Target Tech: '{target_tech}', Active: {matched_cfg.get('active', True)})")
 
         return truck_headers
 
@@ -814,6 +901,33 @@ class AssetAssignmentScraper(BaseScraper):
         if not norm:
             norm = str(t).strip().lower()
         return norm
+
+    @staticmethod
+    def is_tech_match(tech1: str, tech2: str) -> bool:
+        if not tech1 or not tech2:
+            return False
+        import unicodedata, re
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech1))).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech2))).lower()
+        if not c1 or not c2:
+            return False
+        # Exact match
+        if c1 == c2:
+            return True
+        # Extract letters/words of length >= 3 (to avoid 1-letter sort prefixes like 'f', 'k', 'd' causing false substring matches)
+        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
+        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
+
+        for w1 in words1:
+            for w2 in words2:
+                if w1 == w2 or (len(w1) >= 4 and w1 in w2) or (len(w2) >= 4 and w2 in w1):
+                    return True
+
+        if len(c1) >= 4 and len(c2) >= 4:
+            if c1 in c2 or c2 in c1:
+                return True
+
+        return False
 
     def get_expected_tech_for_truck(self, truck_name: str) -> Optional[str]:
         c_target = self.canonical_str(truck_name)
@@ -831,15 +945,59 @@ class AssetAssignmentScraper(BaseScraper):
         return None
 
     def get_expected_truck_for_tech(self, tech_name: str) -> Optional[Dict[str, Any]]:
-        c_tech = self.canonical_str(tech_name)
         for h in self.template_data.get("truck_assign_headers", []):
             if not h.get("active", True):
                 continue
             h_tech = h.get("tech_name", "")
-            c_htech = self.canonical_str(h_tech)
-            if c_htech == c_tech or (c_tech and c_tech in c_htech) or (c_htech and c_tech in c_htech):
+            if self.is_tech_match(h_tech, tech_name):
                 return h
         return None
+
+    def is_item_turned_off_in_dashboard(self, item_name: str, tech_name: str = "") -> bool:
+        """
+        Check if an asset/truck/header/tech is marked active: False in Dashboard template data.
+        Returns True if:
+        1. In truck_assign_headers, matching truck has active: False
+        2. In static_headers, matching header has active: False
+        3. The assigned technician in active_techs has active: False
+        """
+        c_item = self.canonical_str(item_name)
+        nums_item = re.findall(r'\d+', item_name) if item_name else []
+
+        # 1. Check truck_assign_headers
+        for h in self.template_data.get("truck_assign_headers", []):
+            h_name = h.get("name", "")
+            c_hname = self.canonical_str(h_name)
+            nums_h = re.findall(r'\d+', h_name) if h_name else []
+            matches = (c_hname == c_item) or (nums_item and nums_h and int(nums_item[0]) == int(nums_h[0]))
+            if matches:
+                if h.get("active") is False:
+                    return True
+                # Also check if its designated tech is inactive in active_techs
+                h_tech = h.get("tech_name")
+                if h_tech:
+                    for t in self.template_data.get("active_techs", []):
+                        if self.is_tech_match(t.get("tech_name") or t.get("name"), h_tech):
+                            if t.get("active") is False:
+                                return True
+                return False
+
+        # 2. Check static_headers
+        for sh in self.template_data.get("static_headers", []):
+            sh_name = sh.get("name", "")
+            if self.canonical_str(sh_name) == c_item:
+                if sh.get("active") is False:
+                    return True
+                return False
+
+        # 3. Check if tech_name itself is inactive in active_techs
+        if tech_name:
+            for t in self.template_data.get("active_techs", []):
+                if self.is_tech_match(t.get("tech_name") or t.get("name"), tech_name):
+                    if t.get("active") is False:
+                        return True
+
+        return False
 
     async def close_sidepanel(self):
         try:
@@ -867,7 +1025,13 @@ class AssetAssignmentScraper(BaseScraper):
         if not option_text:
             return False
 
-        print(f"  🔍 Selecting tech '{option_text}' in Assignment card dropdown...")
+        import unicodedata, re
+        clean_text = unicodedata.normalize('NFKD', option_text).strip()
+        target_canon = self.canonical_str(option_text)
+        m_core = re.sub(r'^[a-z0-9]\s*', '', clean_text.lower())
+        core_tech = m_core if len(m_core) >= 3 else clean_text.lower()
+
+        print(f"  🔍 Selecting tech '{option_text}' (normalized: '{clean_text}') in Assignment card dropdown...")
 
         try:
             await self.page.evaluate("""() => {
@@ -896,34 +1060,37 @@ class AssetAssignmentScraper(BaseScraper):
             }""")
             await self.page.wait_for_timeout(600)
 
-            await self.page.evaluate("""(text) => {
+            await self.page.evaluate("""(args) => {
+                const { text, clean } = args;
                 const input = document.querySelector('.assigned-tech_omVmC input.vs__search') || 
                               document.querySelector('.tech-dropdown_qufHC input') ||
                               document.querySelector('.assigned-tech_omVmC input') ||
                               document.querySelector('[data-edb-sidepanel-card*="Assignment"] input.vs__search');
                 if (input) {
                     input.focus();
-                    input.value = text;
+                    input.value = clean || text;
                     input.dispatchEvent(new Event('input', { bubbles: true }));
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 }
-            }""", option_text)
+            }""", {"text": option_text, "clean": clean_text})
             await self.page.wait_for_timeout(600)
 
-            target_canon = self.canonical_str(option_text)
             clicked = await self.page.evaluate("""(args) => {
-                const { targetText, targetCanon } = args;
-                const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                const { targetText, targetCanon, coreTech } = args;
+                const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
 
                 // Dropdown menu options can be inside .assigned-tech_omVmC, in body, or in .vs__dropdown-menu
                 const items = Array.from(document.querySelectorAll('.assigned-tech_omVmC ul[role="listbox"] li, .tech-dropdown_qufHC ul li, .vs__dropdown-menu li, ul[role="listbox"] li, li.vs__dropdown-option'));
                 if (!items.length) return false;
 
+                const cTarget = norm(targetCanon);
+                const cCore = norm(coreTech);
+
                 // Priority 1: Exact or canonical match
                 for (const item of items) {
                     const txt = (item.textContent || item.innerText || '').trim();
                     const cTxt = norm(txt);
-                    if (cTxt === targetCanon || (targetCanon && cTxt.includes(targetCanon)) || (cTxt && targetCanon.includes(cTxt))) {
+                    if (cTxt === cTarget || (cTarget && cTxt === cTarget)) {
                         item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                         item.click();
                         item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
@@ -933,11 +1100,27 @@ class AssetAssignmentScraper(BaseScraper):
                     }
                 }
 
-                // Priority 2: Text inclusion
-                const lowerTarget = targetText.toLowerCase().trim();
+                // Priority 2: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
+                if (cCore && cCore.length >= 3) {
+                    for (const item of items) {
+                        const txt = (item.textContent || item.innerText || '').trim();
+                        const cTxt = norm(txt);
+                        if (cTxt.includes(cCore)) {
+                            item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+                            item.click();
+                            item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                            item.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                            item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                            return true;
+                        }
+                    }
+                }
+
+                // Priority 3: Substring / text inclusion
                 for (const item of items) {
                     const txt = (item.textContent || item.innerText || '').toLowerCase().trim();
-                    if (txt.includes(lowerTarget) || lowerTarget.includes(txt)) {
+                    const normTxt = norm(txt);
+                    if (cTarget && (normTxt.includes(cTarget) || cTarget.includes(normTxt))) {
                         item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                         item.click();
                         item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
@@ -947,15 +1130,9 @@ class AssetAssignmentScraper(BaseScraper):
                     }
                 }
 
-                // Fallback: Click first option if list has items
-                if (items.length > 0) {
-                    items[0].scrollIntoView({ behavior: 'instant', block: 'nearest' });
-                    items[0].click();
-                    return true;
-                }
-
+                // SAFE: Never blindly select items[0]!
                 return false;
-            }""", {"targetText": option_text, "targetCanon": target_canon})
+            }""", {"targetText": option_text, "targetCanon": target_canon, "coreTech": core_tech})
 
             print(f"  -> Tech dropdown selection for '{option_text}': {'Success' if clicked else 'Failed'}")
             await self.page.wait_for_timeout(600)
@@ -964,50 +1141,136 @@ class AssetAssignmentScraper(BaseScraper):
             print(f"⚠️ Error selecting '{option_text}' in dropdown: {e}")
             return False
 
-    async def click_and_open_sidepanel(self, work_order_number: str) -> bool:
+    async def click_and_open_sidepanel(self, work_order_number: str, tech_name: str = "") -> bool:
+        clean_target_wo = re.sub(r'[^0-9]', '', str(work_order_number))
+        clean_target_tech = re.sub(r'[^a-z0-9]', '', tech_name.lower()) if tech_name else ""
         try:
+            # 1. Force close any currently open sidepanel so we start clean
             is_panel_open = await self.page.evaluate("""() => {
                 const p = document.querySelector('.container__Gkig, .panel-header-container_EYC6s');
                 return !!p && p.offsetParent !== null;
             }""")
             if is_panel_open:
                 await self.close_sidepanel()
-                await self.page.wait_for_timeout(800)
+                await self.page.wait_for_timeout(600)
 
-            target_xpaths = [
-                f"//span[contains(@class, 'dispatch-name') and normalize-space()='{work_order_number}']",
-                f"//span[contains(@class, 'dispatch-name') and @title='{work_order_number}']",
-                f"//td[contains(@class, 'cell-clickable')]//span[normalize-space()='{work_order_number}']",
-                f"//span[normalize-space()='{work_order_number}']",
-                f"//td[contains(., '{work_order_number}')]"
-            ]
+            # Scroll table container to top first
+            await self.page.evaluate("""() => {
+                const c = document.querySelector('.p-datatable-wrapper') ||
+                          document.querySelector('.p-datatable-scrollable-body') ||
+                          document.querySelector('.custom-scrollbar');
+                if (c) c.scrollTop = 0;
+            }""")
+            await self.page.wait_for_timeout(300)
 
+            # 2. Find and click the exact table row matching work_order_number (and tech_name if given)
             clicked = False
-            for xpath in target_xpaths:
-                loc = self.page.locator(xpath)
-                if await loc.count() > 0:
-                    try:
-                        await loc.first.scroll_into_view_if_needed()
-                        await loc.first.click()
-                        clicked = True
-                        break
-                    except Exception:
+            for scroll_step in range(12):
+                click_result = await self.page.evaluate(r"""(args) => {
+                    const targetWo = args.targetWo;
+                    const targetTech = args.targetTech;
+
+                    const domRows = Array.from(document.querySelectorAll(
+                        'tbody.p-datatable-tbody > tr.p-selectable-row, tbody.p-datatable-tbody > tr, tr.p-selectable-row'
+                    ));
+
+                    for (const row of domRows) {
+                        const cells = row.querySelectorAll('td');
+                        if (!cells || cells.length < 3) continue;
+
+                        const woEl = cells[2].querySelector('.dispatch-name') || cells[2];
+                        const rowWoRaw = (woEl.getAttribute('title') || woEl.textContent || '');
+                        const rowWoClean = rowWoRaw.replace(/[^0-9]/g, '');
+
+                        if (targetWo && rowWoClean !== targetWo) continue;
+
+                        // Check tech if specified (cell 6 in FieldEdge table)
+                        if (targetTech && cells.length > 6) {
+                            const rawTech = (cells[6].textContent || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                            if (rawTech && !rawTech.includes(targetTech) && !targetTech.includes(rawTech)) {
+                                continue;
+                            }
+                        }
+
+                        row.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        const clickTarget = cells[2].querySelector('.dispatch-name') || cells[2];
+                        clickTarget.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        clickTarget.click();
+                        ['mousedown', 'mouseup', 'click'].forEach(evt => {
+                            clickTarget.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                        });
+                        return { success: true, wo: rowWoClean, tech: cells.length > 6 ? cells[6].textContent.trim() : '' };
+                    }
+                    return { success: false };
+                }""", {"targetWo": clean_target_wo, "targetTech": clean_target_tech})
+
+                if click_result.get("success"):
+                    clicked = True
+                    break
+
+                # Scroll table container down to find row
+                await self.page.evaluate("""() => {
+                    const scrollContainer = document.querySelector('.p-datatable-wrapper') ||
+                                             document.querySelector('.p-datatable-scrollable-body') ||
+                                             document.querySelector('.custom-scrollbar');
+                    if (scrollContainer) scrollContainer.scrollTop += 350;
+                }""")
+                await self.page.wait_for_timeout(350)
+
+            # Fallback direct locator search if JS evaluation didn't find row
+            if not clicked:
+                target_xpaths = []
+                if tech_name:
+                    target_xpaths.extend([
+                        f"//tbody//tr[contains(., '{clean_target_wo}') and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{tech_name.lower()}')]//span[contains(@class, 'dispatch-name')]",
+                        f"//tbody//tr[contains(., '{clean_target_wo}') and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{tech_name.lower()}')]//td[3]",
+                    ])
+                target_xpaths.extend([
+                    f"//span[contains(@class, 'dispatch-name') and (normalize-space()='{work_order_number}' or normalize-space()='#{work_order_number}')]",
+                    f"//span[contains(@class, 'dispatch-name') and (@title='{work_order_number}' or @title='#{work_order_number}')]",
+                    f"//td[contains(@class, 'cell-clickable')]//span[contains(normalize-space(), '{clean_target_wo}')]",
+                ])
+                for xpath in target_xpaths:
+                    loc = self.page.locator(xpath)
+                    if await loc.count() > 0:
                         try:
-                            await loc.first.evaluate("el => el.click()")
+                            await loc.first.scroll_into_view_if_needed()
+                            await loc.first.click()
                             clicked = True
                             break
                         except Exception:
-                            continue
+                            try:
+                                await loc.first.evaluate("el => el.click()")
+                                clicked = True
+                                break
+                            except Exception:
+                                continue
 
             if not clicked:
-                print(f"⚠️ Could not click work order '{work_order_number}'")
+                print(f"⚠️ Could not click work order '{work_order_number}' on tech '{tech_name}'")
                 return False
 
-            print(f"👉 Clicked WO #{work_order_number}, waiting for Assignment sidepanel...")
+            tech_str = f" on tech '{tech_name}'" if tech_name else ""
+            print(f"👉 Clicked WO #{work_order_number}{tech_str}, waiting for Assignment sidepanel...")
             try:
                 await self.page.wait_for_selector('.container__Gkig, .custom-scrollbar', state='attached', timeout=8000)
             except Exception:
                 await self.page.wait_for_timeout(2000)
+
+            # CRITICAL VERIFICATION: Make sure opened sidepanel is actually for target work_order_number
+            verified = False
+            for _ in range(10):
+                panel_text = await self.page.evaluate("""() => {
+                    const p = document.querySelector('.container__Gkig, .panel-header-container_EYC6s');
+                    return p ? (p.textContent || '') : '';
+                }""")
+                if clean_target_wo in re.sub(r'[^0-9]', '', panel_text):
+                    verified = True
+                    break
+                await self.page.wait_for_timeout(300)
+
+            if not verified:
+                print(f"  ⚠️ Warning: Sidepanel text did not confirm WO #{clean_target_wo}! Verifying before action...")
 
             return True
         except Exception as e:
@@ -1019,7 +1282,9 @@ class AssetAssignmentScraper(BaseScraper):
         work_order_number: str,
         truck_name: str = "",
         tech_name: str = "",
-        reason: Optional[str] = None
+        reason: Optional[str] = None,
+        allow_tech_cancel: bool = False,
+        primary_wo_number: Optional[str] = None
     ) -> bool:
         """
         Open WO in sidepanel, click 'Go to Work Order' to open DispatchSummary in new tab,
@@ -1029,156 +1294,308 @@ class AssetAssignmentScraper(BaseScraper):
         log_label = f"Out of Service: '{truck_name}'" if reason and "out of service" in reason.lower() else f"Cancel Truck: '{truck_name}'"
         print(f"\n🗑️ [{log_label}] Processing WO #{work_order_number} on tech '{tech_name}'...")
         try:
-            if not await self.click_and_open_sidepanel(work_order_number):
+            # 1. Open the sidepanel specifically for this WO on this tech
+            if not await self.click_and_open_sidepanel(work_order_number, tech_name):
                 return False
 
-            # Wait up to 10 seconds for sidepanel cards & footer to render, scrolling down container
-            goto_btn = None
-            found_href = None
+            # Allow sidepanel cards to render
+            await self.page.wait_for_timeout(1500)
 
-            for _ in range(20):
-                await self.page.evaluate("""() => {
-                    const c = document.querySelector('.custom-scrollbar.container__Gkig') ||
-                              document.querySelector('.container__Gkig') ||
-                              document.querySelector('.custom-scrollbar');
-                    if (c) c.scrollTop = c.scrollHeight;
-                }""")
+            # 🛡️ LIVE CHECK: If FieldEdge shows this WO is already COMPLETED, preserve it!
+            sp_is_completed = await self.page.evaluate("""() => {
+                const sidepanel = document.querySelector('.container__Gkig, .panel-header-container_EYC6s, .custom-scrollbar.container__Gkig');
+                if (!sidepanel) return false;
+                const txt = (sidepanel.innerText || '').toLowerCase();
+                return txt.includes('completed') && (txt.includes('status') || txt.includes('work order') || txt.includes('closed'));
+            }""")
+            if sp_is_completed:
+                print(f"  ⏸️ Sidepanel shows WO #{work_order_number} is already COMPLETED in FieldEdge! Preserving.")
+                await self.close_sidepanel()
+                return False
 
-                # Try candidate locators (matches 'GO TO WORK ORDER' as seen in FieldEdge sidepanel)
-                candidate_locators = [
-                    'text=/go to work order/i',
-                    '//*[contains(translate(., "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"), "GO TO WORK ORDER")]',
-                    '//a[contains(translate(., "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"), "GO TO WORK ORDER")]',
-                    '//div[contains(@class, "arrow-link")]//a',
-                    '.arrow-link-container_U04bJ a',
-                    '.arrow-link-container_U04bJ a.panel-link_qAFWh',
-                    '//div[contains(@class, "footer")]//a',
-                    '//a[contains(@href, "DispatchSummary") or contains(@href, "dispatch-summary")]',
-                    '.footer_CRgJf a',
-                    'a:has-text("GO TO WORK ORDER")',
-                    'a:has-text("Go to Work Order")'
-                ]
-                for g_loc in candidate_locators:
-                    loc = self.page.locator(g_loc).first
-                    if await loc.count() > 0:
-                        try:
-                            await loc.scroll_into_view_if_needed()
-                            goto_btn = loc
-                            break
-                        except Exception:
-                            pass
-
-                if goto_btn:
-                    break
-
-                # Also inspect DOM directly for any href containing DispatchSummary or work order
-                found_href = await self.page.evaluate("""() => {
-                    const links = Array.from(document.querySelectorAll('.container__Gkig a, .panel-header-container_EYC6s a, div[class*="footer"] a, a.panel-link_qAFWh, a[href*="DispatchSummary"]'));
-                    for (const a of links) {
-                        const h = a.getAttribute('href') || a.href || '';
-                        const t = (a.textContent || '').trim().toLowerCase();
-                        if (h.includes('DispatchSummary') || h.includes('dispatch') || t.includes('work order')) {
-                            return h;
+            # 🛡️ SAFETY SHIELD: Protect the expected / right technician from being canceled
+            # UNLESS allow_tech_cancel=True (which means we are canceling a duplicate on the same tech)
+            if allow_tech_cancel:
+                clean_target = re.sub(r'[^0-9]', '', str(work_order_number))
+                clean_primary = re.sub(r'[^0-9]', '', str(primary_wo_number or ''))
+                if clean_primary and clean_target == clean_primary:
+                    print(f"  🛡️ CRITICAL GUARD: Aborting cancellation because target WO #{work_order_number} is the PRIMARY work order!")
+                    await self.close_sidepanel()
+                    return False
+            else:
+                expected_tech = self.get_expected_tech_for_truck(truck_name)
+                if expected_tech:
+                    sidepanel_tech = await self.page.evaluate("""() => {
+                        const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                                     document.querySelector('[data-edb-sidepanel-card*="Assignment"]');
+                        if (card) {
+                            const t = card.querySelector('.assigned-tech_omVmC') || card.querySelector('.header_IVnfD');
+                            return t ? t.textContent.trim() : '';
                         }
-                    }
-                    return null;
-                }""")
-                if found_href:
-                    break
+                        return '';
+                    }""")
+                    if sidepanel_tech and self.is_tech_match(sidepanel_tech, expected_tech):
+                        print(f"  🛡️ SAFETY SHIELD TRIGGERED: Sidepanel shows technician '{sidepanel_tech}' (matches expected '{expected_tech}')!")
+                        print(f"  🛡️ This is the RIGHT technician's work order! ABORTING CANCELLATION to protect right tech!")
+                        await self.close_sidepanel()
+                        return False
 
-                await self.page.wait_for_timeout(500)
+            found_href = None
+            goto_link = None
+            clean_target_wo = re.sub(r'[^0-9]', '', str(work_order_number))
+
+            # Step 1A: Get DispatchSummary link directly from the table row of this specific work order
+            found_href = await self.page.evaluate(r"""(targetWo) => {
+                const rows = Array.from(document.querySelectorAll('tbody.p-datatable-tbody > tr.p-selectable-row, tbody.p-datatable-tbody > tr, tr.p-selectable-row'));
+                for (const r of rows) {
+                    const cells = r.querySelectorAll('td');
+                    if (!cells || cells.length < 3) continue;
+                    const woEl = cells[2].querySelector('.dispatch-name') || cells[2];
+                    const rawWo = (woEl.getAttribute('title') || woEl.textContent || '').replace(/[^0-9]/g, '');
+                    if (rawWo === targetWo) {
+                        const a = cells[2].querySelector('a[href*="DispatchSummary"]') || r.querySelector('a[href*="DispatchSummary"]');
+                        if (a) return a.getAttribute('href') || a.href;
+                    }
+                }
+                return null;
+            }""", clean_target_wo)
+
+            # Step 1B: If not found from table row, get from the OPEN SIDEPANEL ONLY (Specifically from Work Order card)
+            if not found_href:
+                for attempt in range(15):
+                    found_href = await self.page.evaluate("""() => {
+                        const sidepanel = document.querySelector('.container__Gkig, .panel-header-container_EYC6s, .custom-scrollbar.container__Gkig') || document.body;
+                        if (!sidepanel) return null;
+
+                        // Priority 1: Direct search for anchor with DispatchSummary in href
+                        const dsLink = sidepanel.querySelector('a[href*="DispatchSummary"]');
+                        if (dsLink) {
+                            const h = dsLink.getAttribute('href') || dsLink.href;
+                            if (h) return h;
+                        }
+
+                        // Priority 2: Match specifically inside the Work Order summary card (.card_ngkhz containing "Work Order" title)
+                        const cards = Array.from(sidepanel.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]'));
+                        for (const card of cards) {
+                            const title = (card.querySelector('.panel-title, .header-content_GyDl_, .header_Ce6MY')?.textContent || '').toLowerCase();
+                            if (title.includes('work order')) {
+                                const a = card.querySelector('.arrow-link-container_U04bJ a, a.panel-link_qAFWh, a[href*="DispatchSummary"], a');
+                                if (a) {
+                                    const h = a.getAttribute('href') || a.href;
+                                    if (h && !h.includes('Customer')) return h;
+                                }
+                            }
+                        }
+
+                        // Priority 3: Search for link whose text is "Go to Work Order"
+                        const allLinks = Array.from(sidepanel.querySelectorAll('a'));
+                        for (const l of allLinks) {
+                            const txt = (l.textContent || '').trim().toLowerCase();
+                            if (txt.includes('go to work order')) {
+                                const h = l.getAttribute('href') || l.href;
+                                if (h && !h.includes('Customer')) return h;
+                            }
+                        }
+
+                        return null;
+                    }""")
+                    if found_href and "DispatchSummary" in found_href:
+                        break
+                    await self.page.wait_for_timeout(500)
+
+            # Extra check: Disallow Customer link, invalid links, or Skyler's work order GUID
+            if found_href and ("Customer" in str(found_href) or "DispatchSummary" not in str(found_href)):
+                print(f"  ⚠️ Discarding non-DispatchSummary link: {found_href}")
+                found_href = None
+
+            if found_href and "ba054226" in str(found_href):
+                print(f"  🚨 Detected Skyler's work order GUID in link! Discarding to protect right tech!")
+                found_href = None
+
+            # Compute full DispatchSummary URL
+            full_url = None
+            if found_href:
+                base_url = self.page.url.split("#")[0].rstrip("/")
+                clean_href = found_href.lstrip("/")
+                if not clean_href.startswith("#"):
+                    clean_href = f"#{clean_href}" if clean_href.startswith("/") else f"#/{clean_href}"
+                full_url = f"{base_url}/{clean_href}" if not found_href.startswith("http") else found_href
 
             new_page = None
-            if not goto_btn and not found_href:
-                # Direct URL fallback: If work order number is known, DispatchSummary URL can be reached directly
-                base_url = self.page.url.split("#")[0].rstrip("/")
-                found_href = f"{base_url}/DispatchSummary/{work_order_number}"
-                print(f"  ℹ️ Attempting direct URL navigation for WO #{work_order_number}: {found_href}")
+            print(f"  ↗️ Opening DispatchSummary tab for WO #{work_order_number}...")
 
-            if goto_btn:
-                print(f"  ↗️ Clicking 'Go to Work Order' for WO #{work_order_number} to open in new tab...")
-                try:
-                    href = await goto_btn.get_attribute("href")
-                except Exception:
-                    href = None
-
-                try:
-                    async with self.page.context.expect_page(timeout=10000) as new_page_info:
-                        await goto_btn.click()
-                    new_page = await new_page_info.value
-                except Exception as nav_e:
-                    if href:
-                        base_url = self.page.url.split("#")[0].rstrip("/")
-                        full_url = f"{base_url}/{href.lstrip('/')}" if not href.startswith("http") else href
-                        new_page = await self.page.context.new_page()
-                        await new_page.goto(full_url, wait_until="domcontentloaded")
-                    else:
-                        raise nav_e
-            elif found_href:
-                base_url = self.page.url.split("#")[0].rstrip("/")
-                full_url = f"{base_url}/{found_href.lstrip('/')}" if not found_href.startswith("http") else found_href
-                print(f"  ↗️ Opening DispatchSummary tab via URL: {full_url}")
+            # If we extracted the URL directly from WO row or sidepanel:
+            if full_url and "ba054226" not in full_url and "Customer" not in full_url:
+                print(f"  ↗️ Direct tab navigation: {full_url}")
                 new_page = await self.page.context.new_page()
                 await new_page.goto(full_url, wait_until="domcontentloaded")
+            else:
+                # Try clicking arrow link in sidepanel Work Order card ONLY
+                try:
+                    async with self.page.context.expect_page(timeout=6000) as new_page_info:
+                        await self.page.evaluate("""() => {
+                            const sidepanel = document.querySelector('.container__Gkig, .panel-header-container_EYC6s, .custom-scrollbar.container__Gkig') || document.body;
+                            if (!sidepanel) return;
+                            
+                            // 1. Direct search for anchor with DispatchSummary in href
+                            let targetA = sidepanel.querySelector('a[href*="DispatchSummary"]');
+
+                            // 2. Search inside Work Order card
+                            if (!targetA) {
+                                const cards = Array.from(sidepanel.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]'));
+                                for (const card of cards) {
+                                    const title = (card.querySelector('.panel-title, .header-content_GyDl_, .header_Ce6MY')?.textContent || '').toLowerCase();
+                                    if (title.includes('work order')) {
+                                        targetA = card.querySelector('.arrow-link-container_U04bJ a, a');
+                                        if (targetA) break;
+                                    }
+                                }
+                            }
+
+                            // 3. Search for link text "Go to Work Order"
+                            if (!targetA) {
+                                const allLinks = Array.from(sidepanel.querySelectorAll('a'));
+                                for (const l of allLinks) {
+                                    const txt = (l.textContent || '').trim().toLowerCase();
+                                    if (txt.includes('go to work order')) {
+                                        targetA = l;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (targetA) {
+                                targetA.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                targetA.click();
+                            }
+                        }""")
+                    new_page = await new_page_info.value
+                except Exception:
+                    new_page = None
+
+            if not new_page:
+                print(f"  ⚠️ Could not open DispatchSummary for WO #{work_order_number}.")
+                await self.close_sidepanel()
+                return False
 
             await new_page.wait_for_load_state("domcontentloaded")
             await new_page.wait_for_timeout(3000)
 
-            # In the new tab, wait for Save button and click
-            save_btn_sel = self.rules.get(
-                "unassigned_save_btn_selector",
-                "button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button'], button:has-text('Save')"
-            )
-            print("  💾 Clicking Save button on DispatchSummary page...")
-            await new_page.wait_for_selector(save_btn_sel, state="visible", timeout=15000)
-            await new_page.locator(save_btn_sel).first.click()
+            if "dispatchsummary" not in new_page.url.lower():
+                print(f"  🚨 CRITICAL STOP: Opened page is not DispatchSummary ({new_page.url})! Aborting cancellation.")
+                await new_page.close()
+                await self.close_sidepanel()
+                return False
 
-            # Wait for Save modal to appear
+            # ── Proven cancellation flow from unassigned_job_clear_scraper.py ──
+            print("Waiting for page to fully load...")
+            await new_page.wait_for_timeout(3000)
+
+            # 🛡️ STRICT SAFETY CHECK: Ensure we NEVER cancel expected tech 'Skyler' unless it's an explicit duplicate
+            if not allow_tech_cancel:
+                page_text = await new_page.evaluate("""() => {
+                    const h = document.querySelector('.header, h1, .dispatch-summary-header, .title') || document.body;
+                    return (h ? (h.textContent || '') : '') + ' ' + (document.body ? (document.body.innerText || '') : '');
+                }""")
+                clean_page_lower = page_text.lower()
+                if "skyler" in clean_page_lower:
+                    print(f"  🚨 CRITICAL SAFETY STOP: Opened DispatchSummary belongs to expected tech 'Skyler'!")
+                    print(f"  🚨 ABORTING CANCELLATION immediately to protect right technician!")
+                    await new_page.close()
+                    await self.close_sidepanel()
+                    return False
+
+            print("Clicking Save button...")
+            save_btn = "button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button']"
+            try:
+                await new_page.wait_for_selector(save_btn, state="visible", timeout=15000)
+                await new_page.click(save_btn)
+            except Exception as e_save:
+                print(f"Primary save button click failed: {e_save}. Trying fallback...")
+                try:
+                    s_loc = new_page.locator("button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button'], button:has-text('Save')").first
+                    await s_loc.click(force=True, timeout=5000)
+                except Exception:
+                    await new_page.evaluate("""() => {
+                        const btn = document.querySelector('#dispatch-summary-save-workorder') ||
+                                    document.querySelector('button[data-automation-id="save-workorder-button"]') ||
+                                    document.querySelector('button.confirm_hsagT') ||
+                                    document.querySelector('button.button_JdBxs');
+                        if (btn) btn.click();
+                    }""")
+            
+            print("Waiting for Save modal to appear...")
             await new_page.wait_for_timeout(2000)
+            
+            radio_btn = ".field-radio-container:has-text('Canceled') .field-radio"
+            notes = "textarea[name='CancellationNotes']"
+            confirm_btn = "button#confirm-save-dispatch-summary, button:has-text('Confirm'), button:has-text('Yes'), button:has-text('Submit')"
+            cancel_notes = reason or "Duplicate truck assignment on technician (not assigned in template)."
 
-            # Select 'Canceled' radio button
-            radio_btn_sel = self.rules.get(
-                "unassigned_canceled_radio_selector",
-                ".field-radio-container:has-text('Canceled') .field-radio"
-            )
-            print("  🔘 Selecting 'Canceled' radio in Save modal...")
+            print("Selecting 'Canceled' radio in Save modal...")
             try:
-                await new_page.wait_for_selector(radio_btn_sel, state="visible", timeout=6000)
-                await new_page.locator(radio_btn_sel).first.click()
-            except Exception:
-                alt_radio = ".field-radio-container:has-text('Canceled') .field-radio, input[value='Canceled']"
-                await new_page.locator(alt_radio).first.click()
+                await new_page.wait_for_selector(radio_btn, state="visible", timeout=5000)
+                await new_page.click(radio_btn)
+            except Exception as inner_e:
+                print(f"Primary radio selector failed: {inner_e}. Trying fallback selector...")
+                alt_radio = ".field-radio-container:has-text('Canceled') .field-radio"
+                try:
+                    await new_page.wait_for_selector(alt_radio, state="visible", timeout=5000)
+                    await new_page.click(alt_radio)
+                except Exception:
+                    try:
+                        await new_page.locator(".field-radio-container:has-text('Canceled'), label:has-text('Canceled')").first.click(timeout=3000)
+                    except Exception:
+                        await new_page.evaluate("""() => {
+                            const containers = document.querySelectorAll('.field-radio-container, label, .field-radio');
+                            for (const c of containers) {
+                                if ((c.textContent || '').trim().toLowerCase().includes('cancel')) {
+                                    c.click();
+                                    const r = c.querySelector('input[type="radio"], .field-radio') || c;
+                                    if (r.click) r.click();
+                                    break;
+                                }
+                            }
+                        }""")
 
-            # Enter cancellation reason into textarea
-            notes_sel = self.rules.get(
-                "unassigned_notes_textarea_selector",
-                "textarea[name='CancellationNotes']"
-            )
-            cancel_notes = reason or self.rules.get(
-                "unassigned_cancellation_reason",
-                "Duplicate truck assignment on technician (not assigned in template)."
-            )
-            print(f"  ✏️ Entering cancellation reason: '{cancel_notes}'...")
+            print(f"Entering cancellation reason in text area: '{cancel_notes}'...")
             try:
-                await new_page.fill(notes_sel, cancel_notes)
+                await new_page.fill(notes, cancel_notes)
             except Exception as note_e:
-                print(f"  Note on textarea fill: {note_e}")
+                print(f"Could not fill notes via selector: {note_e}. Trying fallback textarea...")
+                try:
+                    ta = new_page.locator("textarea[name='CancellationNotes'], textarea.field-textarea, textarea").first
+                    if await ta.count() > 0:
+                        await ta.fill(cancel_notes)
+                except Exception:
+                    pass
 
-            # Confirm cancellation
-            confirm_btn_sel = self.rules.get(
-                "unassigned_confirm_btn_selector",
-                "button#confirm-save-dispatch-summary, button:has-text('Confirm'), button:has-text('Yes')"
-            )
-            print("  ✅ Confirming Save and Cancellation...")
+            print("Confirming Save/Cancellation...")
             try:
+                # FieldEdge might keep hidden modals in the DOM. Target only the visible confirm button.
                 await new_page.locator("button#confirm-save-dispatch-summary:visible").first.click(timeout=10000)
             except Exception:
-                await new_page.locator(f"{confirm_btn_sel} >> visible=true").first.click(timeout=10000)
-
+                print("Fallback confirm button click...")
+                try:
+                    await new_page.locator(f"{confirm_btn} >> visible=true").first.click(timeout=10000)
+                except Exception:
+                    await new_page.evaluate("""() => {
+                        const btn = document.querySelector('#confirm-save-dispatch-summary') || 
+                                    document.querySelector('.dialog-footer button.confirm_hsagT') ||
+                                    document.querySelector('button.button_JdBxs.confirm_hsagT') ||
+                                    document.querySelector('button.confirm_hsagT');
+                        if (btn) btn.click();
+                    }""")
+            
+            # Wait for save/network
             await new_page.wait_for_timeout(4000)
-            await new_page.close()
-            print(f"🎉 Successfully canceled duplicate truck WO #{work_order_number} on '{tech_name}' and closed tab.")
+            print("Successfully processed Save and Cancel.")
+            try:
+                await new_page.close()
+            except Exception:
+                pass
 
+            print(f"🎉 Successfully canceled duplicate truck WO #{work_order_number} on '{tech_name}' and closed tab.")
             await self.close_sidepanel()
             return True
 
@@ -1272,10 +1689,7 @@ class AssetAssignmentScraper(BaseScraper):
 
             print(f"  📋 Dashboard Tech: '{current_tech}' | 🎯 JSON Expected Tech: '{target_expected_tech}'")
 
-            c_curr = self.canonical_str(current_tech)
-            c_exp = self.canonical_str(target_expected_tech)
-
-            if c_curr and c_exp and (c_curr == c_exp or c_exp in c_curr or c_curr in c_exp):
+            if current_tech and target_expected_tech and self.is_tech_match(current_tech, target_expected_tech):
                 print(f"  ✅ Tech MATCH! Dashboard and JSON template have the same technician ('{current_tech}').")
                 print("  Closing panel...")
                 await self.close_sidepanel()
@@ -1429,15 +1843,34 @@ class AssetAssignmentScraper(BaseScraper):
     def is_time_matching(self, target_time: str, sched_str: str) -> bool:
         if not target_time or not sched_str:
             return False
-        m_target = re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)', target_time, re.IGNORECASE)
+        import re
+        m_target = re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', target_time, re.IGNORECASE)
         if m_target:
             th = int(m_target.group(1))
             tm = m_target.group(2)
-            tp = m_target.group(3).lower()
+            tp = (m_target.group(3) or '').lower()
+            if tp == 'pm' and th < 12:
+                th_24 = th + 12
+            elif tp == 'am' and th == 12:
+                th_24 = 0
+            else:
+                th_24 = th
 
-            times_in_sched = re.findall(r'(\d{1,2}):(\d{2})\s*(am|pm)', sched_str, re.IGNORECASE)
-            for sh, sm, sp in times_in_sched:
-                if int(sh) == th and sm == tm and sp.lower() == tp:
+            times_in_sched = re.findall(r'(\d{1,2}):(\d{2})\s*(am|pm)?', sched_str, re.IGNORECASE)
+            for sh_s, sm, sp in times_in_sched:
+                sh = int(sh_s)
+                sp = (sp or '').lower()
+                if sp == 'pm' and sh < 12:
+                    sh_24 = sh + 12
+                elif sp == 'am' and sh == 12:
+                    sh_24 = 0
+                else:
+                    sh_24 = sh
+
+                if tp and sp:
+                    if sh == th and sm == tm and sp == tp:
+                        return True
+                if sh_24 == th_24 and sm == tm:
                     return True
 
         norm_target = re.sub(r'[^0-9a-z]', '', target_time.lower())
@@ -1460,6 +1893,8 @@ class AssetAssignmentScraper(BaseScraper):
         Updates an existing asset work order to be in 'Service Needed':
         1. Open sidepanel by clicking WO #.
         2. In Assignment card:
+           - Check current scheduled time & tech.
+           - If already matching target_time and target_tech, skip update.
            - If tech is not target_tech (e.g. s4), edit tech.
            - If time is not target_time (e.g. 3:30 PM), edit time.
            - Save Assignment card if changed.
@@ -1478,147 +1913,184 @@ class AssetAssignmentScraper(BaseScraper):
 
             await self.page.wait_for_timeout(1500)
 
-            # ── Step 1: Update Assignment card (Time & Tech) ──
-            need_tech_change = bool(target_tech and self.canonical_str(current_tech) != self.canonical_str(target_tech))
-            need_time_change = not self.is_time_matching(target_time, current_sched)
+            # ── Step 1: Check live Assignment card (Time & Tech) in sidepanel ──
+            sidepanel_info = await self.page.evaluate("""() => {
+                const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                             document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
+                             document.querySelector('.card_ngkhz');
+                if (!card) return { time: '', tech: '' };
+                let time = '';
+                let tech = '';
+                const techEl = card.querySelector('.assigned-tech_omVmC .display-name_jfslj') || 
+                               card.querySelector('.assigned-tech_omVmC') ||
+                               card.querySelector('.display-name_jfslj');
+                if (techEl && techEl.textContent.trim()) {
+                    tech = techEl.textContent.trim();
+                }
+                const cells = Array.from(card.querySelectorAll('.cell'));
+                for (const cell of cells) {
+                    const title = cell.querySelector('.field-title');
+                    if (title) {
+                        const t = title.textContent.toLowerCase();
+                        if (t.includes('scheduled time') || t.includes('time')) {
+                            const val = cell.querySelector('.panel-content, div[name="Scheduled Time"], input, div');
+                            if (val) time = (val.value || val.textContent || '').trim();
+                        }
+                        if (!tech && t.includes('assigned tech')) {
+                            const val = cell.querySelector('.panel-content, .display-name_jfslj');
+                            if (val) tech = (val.value || val.textContent || '').trim();
+                        }
+                    }
+                }
+                const inp = card.querySelector('div[name="Scheduled Time"] input, .timepicker-container input');
+                if (inp && inp.value) time = inp.value.trim();
+                return { time, tech };
+            }""")
+            sched_to_check = sidepanel_info.get("time") or current_sched
+            tech_to_check = sidepanel_info.get("tech") or current_tech
+
+            need_tech_change = bool(target_tech and not self.is_tech_match(tech_to_check, target_tech) and self.canonical_str(tech_to_check) != self.canonical_str(target_tech))
+            need_time_change = not self.is_time_matching(target_time, sched_to_check)
+
+            if not need_tech_change and not need_time_change:
+                print(f"  ⏭️ WO #{work_order_number} ('{asset_name}') is ALREADY set (Time: '{target_time}', Tech: '{tech_to_check}'). Skipping update.")
+                await self.close_sidepanel()
+                return True
 
             assignment_edited = False
-            if not need_tech_change and not need_time_change:
-                print(f"  ⏭️ Assignment card already set (Time: '{target_time}', Tech: '{target_tech}'). Skipping Assignment edit.")
-            else:
-                print(f"  🕒 Updating Assignment card (Need tech: {need_tech_change}, Need time: {need_time_change})...")
-                # Scroll Assignment card into view
-                await self.page.evaluate("""() => {
-                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                                 document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                                 document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
-                                 document.querySelector('.card_ngkhz');
-                    if (card) card.scrollIntoView({ behavior: 'instant', block: 'center' });
-                }""")
-                await self.page.wait_for_timeout(400)
+            print(f"  🕒 Updating Assignment card (Need tech: {need_tech_change}, Need time: {need_time_change})...")
+            # Scroll Assignment card into view
+            await self.page.evaluate("""() => {
+                const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                             document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                             document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
+                             document.querySelector('.card_ngkhz');
+                if (card) card.scrollIntoView({ behavior: 'instant', block: 'center' });
+            }""")
+            await self.page.wait_for_timeout(400)
 
-                # Check if Assignment card is already in edit mode
-                is_edit_mode = await self.page.evaluate("""() => {
-                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                                 document.querySelector('.timepicker-container[name="Scheduled Time"]');
-                    return !!card;
-                }""")
+            # Check if Assignment card is already in edit mode
+            is_edit_mode = await self.page.evaluate("""() => {
+                const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                             document.querySelector('.timepicker-container[name="Scheduled Time"]');
+                return !!card;
+            }""")
 
-                if not is_edit_mode:
-                    for _ in range(3):
-                        assignment_edit_clicked = await self.page.evaluate("""() => {
-                            const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                                         document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
-                                         document.querySelector('.card_ngkhz');
-                            if (!card) return false;
-                            const btn = card.querySelector('.header_IVnfD .base-icon.edit') ||
-                                        card.querySelector('.base-icon.edit.default') ||
-                                        card.querySelector('.base-icon.edit') ||
-                                        card.querySelector('.edit');
-                            if (btn && btn.offsetParent !== null) {
-                                btn.click();
-                                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                return true;
-                            }
-                            return false;
-                        }""")
-                        if assignment_edit_clicked:
-                            break
-                        try:
-                            pw_btn = self.page.locator('[data-edb-sidepanel-card*="Assignment"] .base-icon.edit, .card_ngkhz .base-icon.edit').first
-                            if await pw_btn.count() > 0 and await pw_btn.is_visible():
-                                await pw_btn.click(force=True)
-                                break
-                        except Exception:
-                            pass
-                        await self.page.wait_for_timeout(800)
-
-                await self.page.wait_for_timeout(1000)
-
-                # Update Tech if needed
-                if target_tech and need_tech_change:
-                    print(f"  👤 Updating technician to '{target_tech}'...")
-                    await self.select_dropdown_option(None, target_tech)
-                    await self.page.wait_for_timeout(600)
-
-                # Update Scheduled Time only if needed
-                if need_time_change:
-                    print(f"  ⏰ Setting scheduled time to '{target_time}'...")
-                    time_input_loc = self.page.locator(
-                        'div[name="Scheduled Time"] input, .timepicker-container input, .cell:has(.field-title:has-text("scheduled time")) input, .cell-pos-3x1 input'
-                    ).first
-
-                    if await time_input_loc.count() > 0 and await time_input_loc.is_visible():
-                        try:
-                            await time_input_loc.click(force=True)
-                            await self.page.wait_for_timeout(200)
-                            await time_input_loc.press("Control+A")
-                            await time_input_loc.press("Backspace")
-                            await time_input_loc.type(target_time, delay=50)
-                            await self.page.keyboard.press("Enter")
-                            await self.page.keyboard.press("Tab")
-                        except Exception as t_err:
-                            print(f"  ⚠️ Direct typing time note: {t_err}")
-
-                    # Also ensure via JavaScript evaluation that value and events are dispatched
-                    await self.page.evaluate("""(tVal) => {
-                        const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                                     document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+            if not is_edit_mode:
+                for _ in range(3):
+                    assignment_edit_clicked = await self.page.evaluate("""() => {
+                        const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                                     document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
                                      document.querySelector('.card_ngkhz');
                         if (!card) return false;
-                        const inp = card.querySelector('div[name="Scheduled Time"] input') ||
-                                    card.querySelector('.timepicker-container input') ||
-                                    card.querySelector('.cell-pos-3x1 input');
-                        if (inp) {
-                            inp.focus();
-                            inp.value = tVal;
-                            inp.dispatchEvent(new Event('input', { bubbles: true }));
-                            inp.dispatchEvent(new Event('change', { bubbles: true }));
-                            inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                        const btn = card.querySelector('.header_IVnfD .base-icon.edit') ||
+                                    card.querySelector('.base-icon.edit.default') ||
+                                    card.querySelector('.base-icon.edit') ||
+                                    card.querySelector('.edit');
+                        if (btn && btn.offsetParent !== null) {
+                            btn.click();
+                            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                             return true;
                         }
                         return false;
-                    }""", target_time)
-                    await self.page.wait_for_timeout(600)
-                else:
-                    print(f"  ⏰ Scheduled time already matches '{target_time}'. Skipping time edit.")
+                    }""")
+                    if assignment_edit_clicked:
+                        break
+                    try:
+                        pw_btn = self.page.locator('[data-edb-sidepanel-card*="Assignment"] .base-icon.edit, .card_ngkhz .base-icon.edit').first
+                        if await pw_btn.count() > 0 and await pw_btn.is_visible():
+                            await pw_btn.click(force=True)
+                            break
+                    except Exception:
+                        pass
+                    await self.page.wait_for_timeout(800)
 
-                # Click Save on Assignment card
-                print("  💾 Saving Assignment card...")
-                saved_assignment = await self.page.evaluate("""() => {
+            await self.page.wait_for_timeout(1000)
+
+            # Update Tech if needed
+            if target_tech and need_tech_change:
+                print(f"  👤 Updating technician to '{target_tech}'...")
+                await self.select_dropdown_option(None, target_tech)
+                await self.page.wait_for_timeout(600)
+
+            # Update Scheduled Time only if needed
+            if need_time_change:
+                print(f"  ⏰ Setting scheduled time to '{target_time}'...")
+                time_input_loc = self.page.locator(
+                    'div[name="Scheduled Time"] input, .timepicker-container input, .cell:has(.field-title:has-text("scheduled time")) input, .cell-pos-3x1 input'
+                ).first
+
+                if await time_input_loc.count() > 0 and await time_input_loc.is_visible():
+                    try:
+                        await time_input_loc.click(force=True)
+                        await self.page.wait_for_timeout(200)
+                        await time_input_loc.press("Control+A")
+                        await time_input_loc.press("Backspace")
+                        await time_input_loc.type(target_time, delay=50)
+                        await self.page.keyboard.press("Enter")
+                        await self.page.keyboard.press("Tab")
+                    except Exception as t_err:
+                        print(f"  ⚠️ Direct typing time note: {t_err}")
+
+                # Also ensure via JavaScript evaluation that value and events are dispatched
+                await self.page.evaluate("""(tVal) => {
                     const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
                                  document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
                                  document.querySelector('.card_ngkhz');
                     if (!card) return false;
-                    const btns = Array.from(card.querySelectorAll('button.confirm_I8LeR, button.button_a3g51.confirm_I8LeR, button'));
-                    const saveBtn = btns.find(b => {
-                        const txt = (b.textContent || '').trim().toLowerCase();
-                        return txt === 'save' || b.classList.contains('confirm_I8LeR');
-                    });
-                    if (saveBtn) {
-                        saveBtn.removeAttribute('disabled');
-                        saveBtn.click();
-                        saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    const inp = card.querySelector('div[name="Scheduled Time"] input') ||
+                                card.querySelector('.timepicker-container input') ||
+                                card.querySelector('.cell-pos-3x1 input');
+                    if (inp) {
+                        inp.focus();
+                        inp.value = tVal;
+                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        inp.dispatchEvent(new Event('blur', { bubbles: true }));
                         return true;
                     }
                     return false;
-                }""")
+                }""", target_time)
+                await self.page.wait_for_timeout(600)
+            else:
+                print(f"  ⏰ Scheduled time already matches '{target_time}'. Skipping time edit.")
 
-                if not saved_assignment:
-                    try:
-                        pw_save = self.page.locator('.edit-mode-style_ABe0v button.confirm_I8LeR, [data-edb-sidepanel-card*="Assignment"] button.confirm_I8LeR, button.confirm_I8LeR').first
-                        if await pw_save.count() > 0:
-                            await pw_save.click(force=True)
-                            saved_assignment = True
-                    except Exception:
-                        pass
+            # Click Save on Assignment card
+            print("  💾 Saving Assignment card...")
+            saved_assignment = await self.page.evaluate("""() => {
+                const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                             document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                             document.querySelector('.card_ngkhz');
+                if (!card) return false;
+                const btns = Array.from(card.querySelectorAll('button.confirm_I8LeR, button.button_a3g51.confirm_I8LeR, button'));
+                const saveBtn = btns.find(b => {
+                    const txt = (b.textContent || '').trim().toLowerCase();
+                    return txt === 'save' || b.classList.contains('confirm_I8LeR');
+                });
+                if (saveBtn) {
+                    saveBtn.removeAttribute('disabled');
+                    saveBtn.click();
+                    saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    return true;
+                }
+                return false;
+            }""")
 
-                if saved_assignment:
-                    print(f"  ✅ Saved Assignment card.")
-                    await self.page.wait_for_timeout(2500)
-                    assignment_edited = True
-                else:
-                    print("  ⚠️ Assignment Save button not triggered.")
+            if not saved_assignment:
+                try:
+                    pw_save = self.page.locator('.edit-mode-style_ABe0v button.confirm_I8LeR, [data-edb-sidepanel-card*="Assignment"] button.confirm_I8LeR, button.confirm_I8LeR').first
+                    if await pw_save.count() > 0:
+                        await pw_save.click(force=True)
+                        saved_assignment = True
+                except Exception:
+                    pass
+
+            if saved_assignment:
+                print(f"  ✅ Saved Assignment card.")
+                await self.page.wait_for_timeout(2500)
+                assignment_edited = True
+            else:
+                print("  ⚠️ Assignment Save button not triggered.")
 
             # ── Step 2: Update Work Order card (Priority & Description) ──
             print(f"  📝 Updating Work Order details: Priority='{target_priority}', Note='{service_note}'...")
@@ -1699,7 +2171,7 @@ class AssetAssignmentScraper(BaseScraper):
                 await self.page.wait_for_timeout(500)
 
                 prio_clicked = await self.page.evaluate("""(target) => {
-                    const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                    const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
                     const cTarget = norm(target);
                     const items = Array.from(document.querySelectorAll('.priority-select ul[role="listbox"] li, .vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li'));
                     for (const item of items) {
@@ -1711,10 +2183,6 @@ class AssetAssignmentScraper(BaseScraper):
                             item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                             return true;
                         }
-                    }
-                    if (items.length > 0) {
-                        items[0].click();
-                        return true;
                     }
                     return false;
                 }""", target_priority)
@@ -1810,13 +2278,39 @@ class AssetAssignmentScraper(BaseScraper):
         self,
         date_str: str,
         click_wos: bool = True,
-        status_name: Optional[str] = None
+        status_name: Optional[str] = None,
+        force_reconcile: bool = False
     ) -> Dict[str, Any]:
         """
         Reconcile asset assignment work orders for a single date.
         Can run standalone or be invoked from Dispatch Board Display Automation using an existing page.
         """
         try:
+            # Parse date and check persistent history first
+            dt = None
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d", "%m/%d/%y", "%m-%d-%y"):
+                try:
+                    dt = datetime.strptime(date_str.strip(), fmt)
+                    break
+                except ValueError:
+                    pass
+
+            normalized_date = self.format_date(date_str)
+            db_date_key = dt.strftime("%Y-%m-%d") if dt else normalized_date
+
+            # Fetch fresh history from Central Dashboard API
+            history = self._load_history()
+            # User requirement: "assets skip kora jabe na, oita run korbei"
+            # Always run asset reconciliation on live board to inspect trucks and reconcile wrong tech assignments.
+
+            # Fetch fresh template configuration from Dashboard API so latest changes are always live
+            self.template_data = self._load_template()
+
+            skip_weekends = self.template_data.get("skip_vehicle_work_orders_on_weekends", False)
+            if dt and skip_weekends and dt.weekday() in (5, 6):
+                print(f"⏭️ Skipping weekend date {date_str} (Saturday/Sunday) for asset reconciliation.")
+                return {"truck_assign_headers": [], "count": 0, "reassignments": 0, "checked": 0}
+
             if not self.page:
                 await self.initialize()
 
@@ -1838,23 +2332,6 @@ class AssetAssignmentScraper(BaseScraper):
                 if target_url and "Login" not in self.page.url:
                     await self.page.goto(target_url, wait_until='domcontentloaded')
                     await self.page.wait_for_timeout(3000)
-
-            # Weekend skip check
-            dt = None
-            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%Y/%m/%d", "%m/%d/%y", "%m-%d-%y"):
-                try:
-                    dt = datetime.strptime(date_str.strip(), fmt)
-                    break
-                except ValueError:
-                    pass
-
-            # Fetch fresh template configuration from Dashboard API so latest changes are always live
-            self.template_data = self._load_template()
-
-            skip_weekends = self.template_data.get("skip_vehicle_work_orders_on_weekends", False)
-            if dt and skip_weekends and dt.weekday() in (5, 6):
-                print(f"⏭️ Skipping weekend date {date_str} (Saturday/Sunday) for asset reconciliation.")
-                return {"truck_assign_headers": [], "count": 0, "reassignments": 0, "checked": 0}
 
             target_status = status_name or self.rules.get('status_name', 'Assigned')
             await self.select_status(target_status)
@@ -1956,13 +2433,12 @@ class AssetAssignmentScraper(BaseScraper):
 
                         print(f"  👉 Found existing WO #{wo_num} for '{asset_name}' on tech '{curr_tech}' (Sched: {curr_sched}, Priority: {curr_prio})")
 
-                        # If time is already set to target_time in the table (along with target_tech & priority), skip table update
+                        # Check scheduled time & tech: if time is already target_time (e.g. 3:30 PM) and tech matches, skip!
                         is_time_set = self.is_time_matching(target_time, curr_sched)
-                        is_tech_set = not target_tech or (self.canonical_str(curr_tech) == self.canonical_str(target_tech))
-                        is_prio_set = not target_priority or ("SERVICE NEEDED" in (curr_prio or "").upper())
+                        is_tech_set = not target_tech or self.is_tech_match(curr_tech, target_tech) or (self.canonical_str(curr_tech) == self.canonical_str(target_tech))
 
-                        if is_time_set and is_tech_set and is_prio_set:
-                            print(f"  ⏭️ WO #{wo_num} for '{asset_name}' is already set (Time: '{target_time}', Tech: '{curr_tech}', Priority: '{curr_prio}'). Skipping table update.")
+                        if is_time_set and is_tech_set:
+                            print(f"  ⏭️ WO #{wo_num} for '{asset_name}' is ALREADY set to '{target_time}' on tech '{curr_tech}'. Already configured from before, skipping update.")
                             continue
 
                         total_checked += 1
@@ -2001,9 +2477,14 @@ class AssetAssignmentScraper(BaseScraper):
                         print(f"  - {safe_name} -> Current Tech: {safe_tech} | WO #{r.get('work_order_number')}")
 
                 # ── Multiple Truck Assignments Detection & Cancellation ──
-                # If a tech has multiple truck assignments, keep the one configured in JSON template and cancel the other(s).
+                # ONLY evaluate genuine fleet trucks (🚛 / 🛻). NEVER touch helpers/crew (👥).
                 tech_to_trucks = {}
                 for r in truck_headers:
+                    t_name = r.get("name", "")
+                    if "👥" in t_name or "helper" in t_name.lower() or "laborer" in t_name.lower():
+                        continue
+                    if not ("🚛" in t_name or "🛻" in t_name):
+                        continue
                     c_tech = self.canonical_str(r.get("tech_name", ""))
                     if c_tech:
                         if c_tech not in tech_to_trucks:
@@ -2040,15 +2521,18 @@ class AssetAssignmentScraper(BaseScraper):
                                 if is_match and kept_matched_truck:
                                     print(f"  🚨 Duplicate expected truck '{t_name}' (WO #{wo_num}) on '{tech_display}'! Canceling duplicate...")
                                     cancel_msg = f"Duplicate truck '{t_name}' assigned to technician '{tech_display}'."
+                                    allow_cancel = True
                                 else:
                                     print(f"  🚨 Truck '{t_name}' (WO #{wo_num}) is NOT assigned to '{tech_display}' in JSON template! Initiating cancellation...")
                                     cancel_msg = f"Wrong truck '{t_name}' assigned to technician '{tech_display}'. Template expects '{expected_truck_name}'."
+                                    allow_cancel = False
                                 if click_wos and wo_num:
                                     canceled = await self.cancel_work_order_via_dispatch_summary(
                                         work_order_number=wo_num,
                                         truck_name=t_name,
                                         tech_name=tech_display,
-                                        reason=cancel_msg
+                                        reason=cancel_msg,
+                                        allow_tech_cancel=allow_cancel
                                     )
                                     if canceled:
                                         canceled_wos.add(wo_num)
@@ -2064,7 +2548,12 @@ class AssetAssignmentScraper(BaseScraper):
                     wo = r.get("work_order_number")
                     if wo in canceled_wos:
                         continue
-                    c_truck = self.canonical_str(r.get("name", ""))
+                    t_name = r.get("name", "")
+                    if "👥" in t_name or "helper" in t_name.lower() or "laborer" in t_name.lower():
+                        continue
+                    if not ("🚛" in t_name or "🛻" in t_name):
+                        continue
+                    c_truck = self.canonical_str(t_name)
                     if c_truck:
                         if c_truck not in truck_to_wos:
                             truck_to_wos[c_truck] = []
@@ -2081,7 +2570,7 @@ class AssetAssignmentScraper(BaseScraper):
                         # Find if one is already on the expected tech
                         best_wo = None
                         for w in w_list:
-                            if c_exp_tech and self.canonical_str(w.get("tech_name", "")) == c_exp_tech:
+                            if expected_tech and self.is_tech_match(w.get("tech_name", ""), expected_tech):
                                 best_wo = w
                                 break
                         if not best_wo:
@@ -2099,7 +2588,9 @@ class AssetAssignmentScraper(BaseScraper):
                                         work_order_number=wo_num,
                                         truck_name=truck_display,
                                         tech_name=t_tech,
-                                        reason=f"Duplicate work order for truck '{truck_display}'. Primary assignment kept on WO #{best_wo.get('work_order_number')}."
+                                        reason=f"Duplicate work order for truck '{truck_display}'. Primary assignment kept on WO #{best_wo.get('work_order_number')}.",
+                                        allow_tech_cancel=True,
+                                        primary_wo_number=best_wo.get("work_order_number")
                                     )
                                     if canceled:
                                         canceled_wos.add(wo_num)
@@ -2114,6 +2605,27 @@ class AssetAssignmentScraper(BaseScraper):
                     for idx, r in enumerate(truck_headers, 1):
                         wo_num = r.get("work_order_number")
                         truck_name = r.get("name")
+                        curr_tech_table = r.get("tech_name", "")
+                        is_completed = r.get("is_completed", False)
+
+                        # Check if this truck or header is turned OFF in Dashboard template
+                        if self.is_item_turned_off_in_dashboard(truck_name, curr_tech_table):
+                            if is_completed:
+                                print(f"[{idx}/{len(truck_headers)}] ⏸️ Truck '{truck_name}' (WO #{wo_num}) is turned OFF in Dashboard, but already COMPLETED in FieldEdge. Preserving.")
+                                continue
+                            print(f"[{idx}/{len(truck_headers)}] 🚨 Truck '{truck_name}' (WO #{wo_num} on tech '{curr_tech_table}') is turned OFF in Dashboard template and NOT completed! Canceling...")
+                            canceled = await self.cancel_work_order_via_dispatch_summary(
+                                work_order_number=wo_num,
+                                truck_name=truck_name,
+                                tech_name=curr_tech_table,
+                                reason=f"Vehicle '{truck_name}' is turned OFF in Dashboard template.",
+                                allow_tech_cancel=True
+                            )
+                            if canceled:
+                                canceled_wos.add(wo_num)
+                                total_reconciled += 1
+                            continue
+
                         expected_tech = self.get_expected_tech_for_truck(truck_name)
 
                         if not expected_tech:
@@ -2121,8 +2633,38 @@ class AssetAssignmentScraper(BaseScraper):
                             continue
 
                         if wo_num:
+                            # SMART PRE-CHECK: If the truck is ALREADY assigned to the expected technician in the table, skip sidepanel
+                            curr_tech_table = r.get("tech_name", "")
+                            if curr_tech_table and expected_tech and self.is_tech_match(curr_tech_table, expected_tech):
+                                print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' (matches '{expected_tech}'). Skipping sidepanel.")
+                                continue
+
+                            # Check if the expected technician ALREADY has this truck on another WO on the board
+                            expected_tech_already_has_it = False
+                            for other_r in truck_headers:
+                                if other_r.get("work_order_number") != wo_num:
+                                    other_truck = self.canonical_str(other_r.get("name", ""))
+                                    other_tech = other_r.get("tech_name", "")
+                                    if other_truck == self.canonical_str(truck_name) and self.is_tech_match(other_tech, expected_tech):
+                                        expected_tech_already_has_it = True
+                                        break
+
+                            if expected_tech_already_has_it:
+                                # The expected tech already has this truck! This assignment on curr_tech_table is an unwanted duplicate/wrong assignment!
+                                print(f"[{idx}/{len(truck_headers)}] 🚨 Truck '{truck_name}' (WO #{wo_num}) is on '{curr_tech_table}', but expected tech '{expected_tech}' ALREADY has '{truck_name}'. Canceling wrong assignment...")
+                                canceled = await self.cancel_work_order_via_dispatch_summary(
+                                    work_order_number=wo_num,
+                                    truck_name=truck_name,
+                                    tech_name=curr_tech_table,
+                                    reason=f"Wrong tech assignment: Truck '{truck_name}' already exists on '{expected_tech}'. Canceling extra on '{curr_tech_table}'."
+                                )
+                                if canceled:
+                                    canceled_wos.add(wo_num)
+                                    total_reconciled += 1
+                                continue
+
                             total_checked += 1
-                            print(f"\n[{idx}/{len(truck_headers)}] Checking WO #{wo_num} ({truck_name}) on {normalized_date}...")
+                            print(f"\n[{idx}/{len(truck_headers)}] Checking WO #{wo_num} ({truck_name}) on {normalized_date} (Reassigning from '{curr_tech_table}' to expected '{expected_tech}')...")
                             updated = await self.click_and_reconcile_work_order(
                                 work_order_number=wo_num,
                                 truck_name=truck_name,
@@ -2132,6 +2674,10 @@ class AssetAssignmentScraper(BaseScraper):
                                 total_reconciled += 1
             else:
                 print(f"⚠️ No truck_assign_headers found on {normalized_date}.")
+
+            # Record successful completion of asset reconciliation for this date in history
+            self.record_reconciled(history, db_date_key)
+            print(f"✅ Recorded asset reconciliation completion for {normalized_date} ({db_date_key}) in history.")
 
             return {
                 "truck_assign_headers": truck_headers,

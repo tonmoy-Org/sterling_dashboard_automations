@@ -1,6 +1,18 @@
 {
   "skip_vehicle_work_orders_on_weekends": true,
-  "service_needed_assets": [],
+  "service_needed_assets": [
+    {
+      "id": "sn_1792774006345",
+      "asset_name": "🛻 | 71",
+      "service_note": "Tire pressure guage alert on dash",
+      "created_at": "2026-10-23T16:51:23.898338+00:00",
+      "created_by": "Eric Lay",
+      "priority": "[7] 7.12 SERVICE NEEDED",
+      "start_time": "3:30 PM",
+      "tech_name": "s4",
+      "active": true
+    }
+  ],
   "out_of_service_assets": [],
   "general_settings": {
     "task": "8 - Internal",
@@ -156,12 +168,12 @@
     },
     {
       "name": "🛻 | 04",
-      "active": true,
+      "active": false,
       "department": "service",
       "priority": "[5] SER TR (Asset Assignment)",
       "start_time": "06:00 AM",
       "duration": "1:00",
-      "tech_name": "l 𝐂𝐫𝐢𝐬"
+      "tech_name": ""
     },
     {
       "name": "🚛 | 122",
@@ -183,12 +195,12 @@
     },
     {
       "name": "🛻 | 01",
-      "active": false,
+      "active": true,
       "department": "service",
       "priority": "[5] SER TR (Asset Assignment)",
       "start_time": "06:00 AM",
       "duration": "1:00",
-      "tech_name": ""
+      "tech_name": "l 𝐂𝐫𝐢𝐬"
     },
     {
       "name": "🛻 | 71",
@@ -287,7 +299,7 @@
       "duration": "1:00",
       "priority": "[5] SER TR (Asset Assignment)",
       "tech_name": "s4",
-      "active": true
+      "active": false
     },
     {
       "name": "🛻 | 04",
@@ -1122,7 +1134,7 @@
       "name": "🛻 | 04",
       "category": "Truck",
       "department": "service",
-      "assigned_tech": "l 𝐂𝐫𝐢𝐬"
+      "assigned_tech": ""
     },
     {
       "name": "🚛 | 122",
@@ -1140,7 +1152,7 @@
       "name": "🛻 | 01",
       "category": "Truck",
       "department": "service",
-      "assigned_tech": ""
+      "assigned_tech": "l 𝐂𝐫𝐢𝐬"
     },
     {
       "name": "🛻 | 71",
