@@ -975,114 +975,92 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             m_core = re.sub(r'^[a-z0-9]\s*', '', target_norm)
             core_name = m_core if len(m_core) >= 3 else target_norm
 
-            # Pass 0: Exact raw string match (matches exact JSON name like 'l 𝐂𝐫𝐢𝐬')
+            # Helper to check if an option element matches target strictly
+            async def _check_and_click_option(opt_el) -> bool:
+                if not await opt_el.is_visible():
+                    return False
+                raw_text = await opt_el.text_content()
+                if not raw_text:
+                    return False
+                s_raw = raw_text.strip()
+                norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
+                c_raw = self.canonical_str(s_raw)
+
+                # Pass 0: Exact raw string match
+                if s_raw == raw_target:
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
+
+                # Pass 1: Exact normalized match
+                if norm_raw == target_norm or norm_raw == clean_core.lower():
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
+
+                # Pass 2: Canonical match (ignore special chars/whitespace/unicode fonts)
+                if target_canon and (target_canon == c_raw or self.canonical_str(clean_core) == c_raw):
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
+
+                # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
+                if core_name and len(core_name) >= 3:
+                    if core_name in norm_raw or core_name in c_raw:
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
+
+                # Pass 4: Technician name matching using is_tech_match
+                if self.is_tech_match(s_raw, option_text) or self.is_tech_match(s_raw, clean_search) or self.is_tech_match(s_raw, clean_core):
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
+
+                # Pass 5: Substring match (ONLY allowed if BOTH target and option have length >= 4)
+                # CRITICAL: NEVER do substring matching for short tokens (like 's7', 's6', 'c', 'e')!
+                if len(target_norm) >= 4 and len(norm_raw) >= 4:
+                    if target_norm in norm_raw or norm_raw in target_norm:
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
+
+                # Pass 6: Truck number / digits match (e.g. '124' in '🚛 | 124')
+                m_digits = re.search(r'\b\d{2,4}\b', target_canon)
+                if m_digits and len(target_canon) >= 4:
+                    d_target = m_digits.group(0)
+                    if d_target in c_raw:
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
+
+                return False
+
+            # Check visible options
             for i in range(count):
                 opt = options.nth(i)
-                if await opt.is_visible():
-                    raw_text = await opt.text_content()
-                    if raw_text and raw_text.strip() == raw_target:
-                        await opt.scroll_into_view_if_needed()
-                        await opt.click(force=True)
-                        clicked = True
-                        break
+                if await _check_and_click_option(opt):
+                    clicked = True
+                    break
 
-            # Pass 0.5: Exact raw substring match
-            if not clicked:
-                for i in range(count):
-                    opt = options.nth(i)
-                    if await opt.is_visible():
-                        raw_text = await opt.text_content()
-                        if raw_text:
-                            s_raw = raw_text.strip()
-                            if raw_target in s_raw or s_raw in raw_target:
-                                await opt.scroll_into_view_if_needed()
-                                await opt.click(force=True)
-                                clicked = True
-                                break
-
-            # Pass 1: Look for exact normalized match
-            if not clicked:
-                for i in range(count):
-                    opt = options.nth(i)
-                    if await opt.is_visible():
-                        raw_text = await opt.text_content()
-                        if raw_text:
-                            norm_raw = unicodedata.normalize('NFKD', raw_text).strip().lower()
-                            if norm_raw == target_norm or norm_raw == clean_core.lower():
-                                await opt.scroll_into_view_if_needed()
-                                await opt.click(force=True)
-                                clicked = True
-                                break
-
-            # Pass 2: Canonical match (ignore special chars/whitespace/unicode fonts)
-            if not clicked and target_canon:
-                for i in range(count):
-                    opt = options.nth(i)
-                    if await opt.is_visible():
-                        raw_text = await opt.text_content()
-                        if raw_text and (target_canon == self.canonical_str(raw_text) or self.canonical_str(clean_core) == self.canonical_str(raw_text)):
-                            await opt.scroll_into_view_if_needed()
-                            await opt.click(force=True)
-                            clicked = True
-                            break
-
-            # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
-            if not clicked and core_name and len(core_name) >= 3:
-                for i in range(count):
-                    opt = options.nth(i)
-                    if await opt.is_visible():
-                        raw_text = await opt.text_content()
-                        if raw_text:
-                            norm_raw = unicodedata.normalize('NFKD', raw_text).strip().lower()
-                            canon_raw = self.canonical_str(raw_text)
-                            if core_name in norm_raw or core_name in canon_raw:
-                                await opt.scroll_into_view_if_needed()
-                                await opt.click(force=True)
-                                clicked = True
-                                break
-
-            # Pass 4: Technician name matching using is_tech_match
-            if not clicked:
-                for i in range(count):
-                    opt = options.nth(i)
-                    if await opt.is_visible():
-                        raw_text = await opt.text_content()
-                        if raw_text and (self.is_tech_match(raw_text, option_text) or self.is_tech_match(raw_text, clean_search) or self.is_tech_match(raw_text, clean_core)):
-                            await opt.scroll_into_view_if_needed()
-                            await opt.click(force=True)
-                            clicked = True
-                            break
-
-            # Pass 4: Substring match (minimum 4 characters)
-            if not clicked and len(target_norm) >= 4:
-                for i in range(count):
-                    opt = options.nth(i)
-                    if await opt.is_visible():
-                        raw_text = await opt.text_content()
-                        if raw_text:
-                            norm_raw = unicodedata.normalize('NFKD', raw_text).strip().lower()
-                            if target_norm in norm_raw or norm_raw in target_norm:
-                                await opt.scroll_into_view_if_needed()
-                                await opt.click(force=True)
-                                clicked = True
-                                break
-
-            # Pass 5: Truck number / digits match (e.g. '124' in '🚛 | 124')
-            if not clicked:
-                m_digits = re.search(r'\b\d{2,4}\b', target_canon)
-                if m_digits:
-                    d_target = m_digits.group(0)
-                    for i in range(count):
-                        opt = options.nth(i)
-                        if await opt.is_visible():
-                            raw_text = await opt.text_content()
-                            if raw_text:
-                                c_raw = self.canonical_str(raw_text)
-                                if d_target in c_raw:
-                                    await opt.scroll_into_view_if_needed()
-                                    await opt.click(force=True)
+            # If not found and dropdown has scrollable menu, scroll down to reveal more items
+            if not clicked and count > 0:
+                try:
+                    menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
+                    if await menu_container.count() > 0:
+                        for scroll_step in range(3):
+                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
+                            await self.page.wait_for_timeout(300)
+                            count_now = await options.count()
+                            for i in range(count_now):
+                                opt = options.nth(i)
+                                if await _check_and_click_option(opt):
                                     clicked = True
                                     break
+                            if clicked:
+                                break
+                except Exception:
+                    pass
 
             # Handle completion or safe failure (NO BLIND FALLBACK to first_opt!)
             if not clicked:
@@ -1094,6 +1072,36 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 else:
                     print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
                     return False
+
+            # Post-selection verification: verify what was actually selected into the dropdown
+            # For customer search (press_enter=True) on VPS, remote API response can take several seconds to populate
+            verify_budget = 8.0 if press_enter else 2.5
+            verify_start = time.time()
+            is_verified = False
+            selected_val = ""
+
+            while (time.time() - verify_start) < verify_budget:
+                selected_el = dropdown.locator(".vs__selected, .selected-tag, .vs__selected-options").first
+                if await selected_el.count() > 0:
+                    selected_val = (await selected_el.text_content() or "").strip()
+                    clean_sel = self.canonical_str(selected_val)
+                    clean_opt = self.canonical_str(option_text)
+                    if (
+                        selected_val == option_text or
+                        clean_sel == clean_opt or
+                        (len(clean_sel) >= 4 and len(clean_opt) >= 4 and (clean_sel in clean_opt or clean_opt in clean_sel)) or
+                        self.is_tech_match(selected_val, option_text)
+                    ):
+                        is_verified = True
+                        break
+                await self.page.wait_for_timeout(400)
+
+            if not is_verified:
+                print(f"❌ Selection verification failed: expected '{option_text}', but dropdown selected '{selected_val}'. Aborting selection.")
+                clear_btn = dropdown.locator(".vs__clear, button.close").first
+                if await clear_btn.count() > 0 and await clear_btn.is_visible():
+                    await clear_btn.click(force=True)
+                return False
 
             await self.page.wait_for_timeout(500)
             return True
@@ -1135,36 +1143,60 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
                 return False
 
-            # Smart wait: poll for the form to be ready (Task dropdown visible) with 45s total budget.
-            # On slow VPS networks, customer data can take 15-30s to load from FieldEdge API.
-            print(f"  -> Waiting for customer data to load...")
+            # Smart wait: wait for all FieldEdge customer loading spinners to vanish and form to settle
+            print(f"  -> Waiting for customer data and background spinners to finish...")
             import time
             _load_start = time.time()
             _max_load_wait = 45  # seconds total budget
             _form_ready = False
 
+            # Initial pause to let Vue launch its customer background requests
+            await self.page.wait_for_timeout(1000)
+
             while (time.time() - _load_start) < _max_load_wait:
                 try:
-                    # Check if Task dropdown is visible (= form has loaded customer data)
+                    # 1. Check for any active spinners or loaders
+                    spinner_loc = self.page.locator(".spinner:visible, .vs__spinner:visible, .loading:visible, .p-progress-spinner:visible, .loading-mask:visible, .vs--loading:visible")
+                    active_spinners = await spinner_loc.count()
+
+                    # 2. Check if Task dropdown is visible and not disabled
                     task_ready = self.page.locator(
                         self.rules.get('dispatch_board_task_xpath',
                             "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task') and not(contains(normalize-space(),'Duration'))]/following::div[contains(@class,'v-select')][1]")
                     ).first
-                    if await task_ready.is_visible():
+                    task_vis = await task_ready.is_visible()
+                    task_class = (await task_ready.get_attribute("class") or "") if task_vis else ""
+                    task_disabled = "vs--disabled" in task_class or "disabled" in task_class
+
+                    # 3. Check for any customer popups or confirmation dialogs
+                    dialog_confirm = self.page.locator(
+                        "//div[contains(@class,'v-dialog') or contains(@class,'modal') or contains(@class,'p-dialog')]//button[contains(@class,'confirm') or contains(.,'Confirm') or contains(.,'OK') or contains(.,'Yes') or contains(.,'Select')]"
+                    ).first
+                    if await dialog_confirm.count() > 0 and await dialog_confirm.is_visible():
+                        print("  -> Dismissing customer dialog/alert with Confirm button...")
+                        await dialog_confirm.click(force=True)
+                        await self.page.wait_for_timeout(1000)
+                        continue
+
+                    if active_spinners == 0 and task_vis and not task_disabled:
                         _form_ready = True
                         elapsed = round(time.time() - _load_start, 1)
-                        print(f"  -> Form ready in {elapsed}s. Proceeding to fill fields.")
+                        print(f"  -> Form and customer data fully ready in {elapsed}s (0 spinners active). Proceeding.")
                         break
+                    elif active_spinners > 0:
+                        print(f"  -> Waiting for {active_spinners} background spinners to finish...")
                 except Exception:
                     pass
 
-                # Wait 2s between polls to avoid hammering the DOM
-                await self.page.wait_for_timeout(2000)
+                await self.page.wait_for_timeout(1000)
 
             if not _form_ready:
-                print(f"  ❌ Form not ready after {_max_load_wait}s (Customer '{customer_name}' data did not load). Aborting safely.")
+                print(f"  ❌ Form not ready after {_max_load_wait}s (Customer '{customer_name}' data did not load or spinners hung). Aborting safely.")
                 await self.close_create_wo_modal()
                 return False
+
+            # Buffer for Vue DOM reactivity and field bindings to completely settle
+            await self.page.wait_for_timeout(1200)
 
             print(f"  [2/7] Immediate Action: '{immediate_action}'")
             ia_xpath = self.rules.get(
@@ -1228,6 +1260,23 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     print(f"❌ Failed to match and select expected technician '{tech_name}'. Aborting work order to prevent wrong/duplicate assignment.")
                     await self.close_create_wo_modal()
                     return False
+
+                # Strict Verification: Confirm Primary Tech field in modal matches expected tech_name
+                tech_container = self.page.locator(tech_xpath).first
+                selected_tech_text = (await tech_container.locator(".vs__selected").text_content() or "").strip()
+                clean_actual_tech = self.canonical_str(selected_tech_text)
+                clean_target_tech = self.canonical_str(tech_name)
+                tech_verified = (
+                    selected_tech_text == tech_name or
+                    clean_actual_tech == clean_target_tech or
+                    (len(clean_actual_tech) >= 4 and len(clean_target_tech) >= 4 and (clean_actual_tech in clean_target_tech or clean_target_tech in clean_actual_tech)) or
+                    self.is_tech_match(selected_tech_text, tech_name)
+                )
+                if not tech_verified:
+                    print(f"🛑 STRICT SAFETY STOP: Primary Tech modal value is '{selected_tech_text}', but expected '{tech_name}'! Aborting work order to prevent misassignment.")
+                    await self.close_create_wo_modal()
+                    return False
+
                 # Smart wait: wait for Date field to become enabled (it's disabled until Tech is assigned)
                 print(f"  -> Waiting for Date/Time fields to become active...")
                 try:
@@ -1285,6 +1334,24 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await self.page.keyboard.press("Tab")
                     await self.page.wait_for_timeout(300)
 
+                    # Verify Start Time value in DOM and re-apply if FieldEdge auto-adjusted it
+                    try:
+                        actual_start_time = await time_input.input_value()
+                        t_exp = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
+                        t_act = datetime.strptime(actual_start_time.strip().upper(), "%I:%M %p") if actual_start_time else None
+                        if t_act and t_exp != t_act:
+                            print(f"  ⚠️ FieldEdge auto-adjusted Start Time to '{actual_start_time}'. Re-forcing '{start_time}'...")
+                            await time_input.click(force=True)
+                            await self.page.keyboard.press("Control+A")
+                            await self.page.keyboard.press("Backspace")
+                            await time_input.type(start_time, delay=80)
+                            await self.page.keyboard.press("Enter")
+                            await time_input.evaluate(f"el => {{ el.value = '{start_time}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
+                            await self.page.keyboard.press("Tab")
+                            await self.page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+
                 # Task Duration
                 duration_input = self.page.locator(
                     self.rules.get('dispatch_board_duration_input_xpath',
@@ -1310,6 +1377,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 await self.page.evaluate("() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }")
             except Exception:
                 pass
+
+            # Pre-save final verification: Primary Tech must STILL match tech_name
+            if tech_name:
+                final_tech = (await self.page.locator(tech_xpath).locator(".vs__selected").text_content() or "").strip()
+                clean_f = self.canonical_str(final_tech)
+                clean_t = self.canonical_str(tech_name)
+                final_verified = (
+                    final_tech == tech_name or
+                    clean_f == clean_t or
+                    (len(clean_f) >= 4 and len(clean_t) >= 4 and (clean_f in clean_t or clean_t in clean_f)) or
+                    self.is_tech_match(final_tech, tech_name)
+                )
+                if not final_verified:
+                    print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Primary Tech '{final_tech}' != expected '{tech_name}'. Aborting save.")
+                    await self.close_create_wo_modal()
+                    return False
 
             save_btn = None
             for save_sel in [
@@ -2089,6 +2172,23 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 immediate_action=immediate_action,
                                 summary_note=None
                             )
+                            if not res:
+                                print(f"  🔁 Attempt 1 aborted/failed for '{name}'. Retrying with fresh attempt in 3s...")
+                                await self.close_create_wo_modal()
+                                await self.page.wait_for_timeout(3000)
+                                res = await self.fill_and_save_work_order(
+                                    customer_name=name,
+                                    task=h_task,
+                                    lead_source=lead_source,
+                                    priority=priority,
+                                    target_date=date_str,
+                                    start_time=start_time,
+                                    duration=duration,
+                                    tech_name=h_tech,
+                                    immediate_action=immediate_action,
+                                    summary_note=None
+                                )
+
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
                                 # Refresh board data after save

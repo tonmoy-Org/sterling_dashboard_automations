@@ -238,8 +238,10 @@ class AssetAssignmentScraper(BaseScraper):
 
     async def select_status(self, status_name: str = "Assigned") -> bool:
         try:
-            status_locators = [
-                self.rules.get('status_assigned_xpath'),
+            status_locators = []
+            if status_name.lower() == "assigned" and self.rules.get('status_assigned_xpath'):
+                status_locators.append(self.rules.get('status_assigned_xpath'))
+            status_locators.extend([
                 f'.cell-pos-1x3 div.circle-btn[title="{status_name}"]',
                 f'.cell-pos-1x3 .circle-btn[title="{status_name}"]',
                 f'//div[contains(@class, "cell-pos-1x3")]//div[contains(@class, "circle-btn") and (@title="{status_name}" or contains(@title, "{status_name}"))]',
@@ -257,7 +259,7 @@ class AssetAssignmentScraper(BaseScraper):
                 f'//div[contains(@class, "filter") or contains(@class, "status") or contains(@class, "button-grid")]//*[contains(@title, "{status_name}")]',
                 f'//span[normalize-space()="{status_name}"]/ancestor::*[contains(@class, "circle-btn") or self::button]',
                 f'//*[contains(@class, "filter") or contains(@class, "button") or contains(@class, "circle-btn")][normalize-space()="{status_name}"]',
-            ]
+            ])
             status_locators = [c.strip() for c in status_locators if c and isinstance(c, str) and c.strip()]
 
             for selector in status_locators:
@@ -1116,11 +1118,11 @@ class AssetAssignmentScraper(BaseScraper):
                     }
                 }
 
-                // Priority 3: Substring / text inclusion
+                // Priority 3: Substring / text inclusion (strictly minimum 4 characters)
                 for (const item of items) {
                     const txt = (item.textContent || item.innerText || '').toLowerCase().trim();
                     const normTxt = norm(txt);
-                    if (cTarget && (normTxt.includes(cTarget) || cTarget.includes(normTxt))) {
+                    if (cTarget && cTarget.length >= 4 && normTxt.length >= 4 && (normTxt.includes(cTarget) || cTarget.includes(normTxt))) {
                         item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                         item.click();
                         item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
@@ -1178,11 +1180,19 @@ class AssetAssignmentScraper(BaseScraper):
                         const cells = row.querySelectorAll('td');
                         if (!cells || cells.length < 3) continue;
 
-                        const woEl = cells[2].querySelector('.dispatch-name') || cells[2];
-                        const rowWoRaw = (woEl.getAttribute('title') || woEl.textContent || '');
-                        const rowWoClean = rowWoRaw.replace(/[^0-9]/g, '');
+                        let matchedCell = null;
+                        let rowWoClean = '';
+                        for (let c = 1; c <= 2 && c < cells.length; c++) {
+                            const woEl = cells[c].querySelector('.dispatch-name') || cells[c];
+                            const raw = (woEl.getAttribute('title') || woEl.textContent || '').replace(/[^0-9]/g, '');
+                            if (targetWo && raw === targetWo) {
+                                rowWoClean = raw;
+                                matchedCell = woEl;
+                                break;
+                            }
+                        }
 
-                        if (targetWo && rowWoClean !== targetWo) continue;
+                        if (targetWo && !rowWoClean) continue;
 
                         // Check tech if specified (cell 6 in FieldEdge table)
                         if (targetTech && cells.length > 6) {
@@ -1193,7 +1203,7 @@ class AssetAssignmentScraper(BaseScraper):
                         }
 
                         row.scrollIntoView({ behavior: 'instant', block: 'center' });
-                        const clickTarget = cells[2].querySelector('.dispatch-name') || cells[2];
+                        const clickTarget = matchedCell || cells[1] || cells[2];
                         clickTarget.scrollIntoView({ behavior: 'instant', block: 'center' });
                         clickTarget.click();
                         ['mousedown', 'mouseup', 'click'].forEach(evt => {
