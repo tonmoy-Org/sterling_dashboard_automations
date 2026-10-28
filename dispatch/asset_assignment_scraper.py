@@ -1287,325 +1287,12 @@ class AssetAssignmentScraper(BaseScraper):
         primary_wo_number: Optional[str] = None
     ) -> bool:
         """
-        Open WO in sidepanel, click 'Go to Work Order' to open DispatchSummary in new tab,
-        click Save, select 'Canceled' radio in modal, enter reason, and confirm cancellation.
-        Used for duplicate truck assignments or when a vehicle is marked Out of Service.
+        [CANCELLATION PERMANENTLY DISABLED]
+        Work order cancellation has been completely removed across scrapers to prevent
+        accidentally canceling real jobs and work orders on FieldEdge.
         """
-        log_label = f"Out of Service: '{truck_name}'" if reason and "out of service" in reason.lower() else f"Cancel Truck: '{truck_name}'"
-        print(f"\n🗑️ [{log_label}] Processing WO #{work_order_number} on tech '{tech_name}'...")
-        try:
-            # 1. Open the sidepanel specifically for this WO on this tech
-            if not await self.click_and_open_sidepanel(work_order_number, tech_name):
-                return False
-
-            # Allow sidepanel cards to render
-            await self.page.wait_for_timeout(1500)
-
-            # 🛡️ LIVE CHECK: If FieldEdge shows this WO is already COMPLETED, preserve it!
-            sp_is_completed = await self.page.evaluate("""() => {
-                const sidepanel = document.querySelector('.container__Gkig, .panel-header-container_EYC6s, .custom-scrollbar.container__Gkig');
-                if (!sidepanel) return false;
-                const txt = (sidepanel.innerText || '').toLowerCase();
-                return txt.includes('completed') && (txt.includes('status') || txt.includes('work order') || txt.includes('closed'));
-            }""")
-            if sp_is_completed:
-                print(f"  ⏸️ Sidepanel shows WO #{work_order_number} is already COMPLETED in FieldEdge! Preserving.")
-                await self.close_sidepanel()
-                return False
-
-            # 🛡️ SAFETY SHIELD: Protect the expected / right technician from being canceled
-            # UNLESS allow_tech_cancel=True (which means we are canceling a duplicate on the same tech)
-            if allow_tech_cancel:
-                clean_target = re.sub(r'[^0-9]', '', str(work_order_number))
-                clean_primary = re.sub(r'[^0-9]', '', str(primary_wo_number or ''))
-                if clean_primary and clean_target == clean_primary:
-                    print(f"  🛡️ CRITICAL GUARD: Aborting cancellation because target WO #{work_order_number} is the PRIMARY work order!")
-                    await self.close_sidepanel()
-                    return False
-            else:
-                expected_tech = self.get_expected_tech_for_truck(truck_name)
-                if expected_tech:
-                    sidepanel_tech = await self.page.evaluate("""() => {
-                        const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                                     document.querySelector('[data-edb-sidepanel-card*="Assignment"]');
-                        if (card) {
-                            const t = card.querySelector('.assigned-tech_omVmC') || card.querySelector('.header_IVnfD');
-                            return t ? t.textContent.trim() : '';
-                        }
-                        return '';
-                    }""")
-                    if sidepanel_tech and self.is_tech_match(sidepanel_tech, expected_tech):
-                        print(f"  🛡️ SAFETY SHIELD TRIGGERED: Sidepanel shows technician '{sidepanel_tech}' (matches expected '{expected_tech}')!")
-                        print(f"  🛡️ This is the RIGHT technician's work order! ABORTING CANCELLATION to protect right tech!")
-                        await self.close_sidepanel()
-                        return False
-
-            found_href = None
-            goto_link = None
-            clean_target_wo = re.sub(r'[^0-9]', '', str(work_order_number))
-
-            # Step 1A: Get DispatchSummary link directly from the table row of this specific work order
-            found_href = await self.page.evaluate(r"""(targetWo) => {
-                const rows = Array.from(document.querySelectorAll('tbody.p-datatable-tbody > tr.p-selectable-row, tbody.p-datatable-tbody > tr, tr.p-selectable-row'));
-                for (const r of rows) {
-                    const cells = r.querySelectorAll('td');
-                    if (!cells || cells.length < 3) continue;
-                    const woEl = cells[2].querySelector('.dispatch-name') || cells[2];
-                    const rawWo = (woEl.getAttribute('title') || woEl.textContent || '').replace(/[^0-9]/g, '');
-                    if (rawWo === targetWo) {
-                        const a = cells[2].querySelector('a[href*="DispatchSummary"]') || r.querySelector('a[href*="DispatchSummary"]');
-                        if (a) return a.getAttribute('href') || a.href;
-                    }
-                }
-                return null;
-            }""", clean_target_wo)
-
-            # Step 1B: If not found from table row, get from the OPEN SIDEPANEL ONLY (Specifically from Work Order card)
-            if not found_href:
-                for attempt in range(15):
-                    found_href = await self.page.evaluate("""() => {
-                        const sidepanel = document.querySelector('.container__Gkig, .panel-header-container_EYC6s, .custom-scrollbar.container__Gkig') || document.body;
-                        if (!sidepanel) return null;
-
-                        // Priority 1: Direct search for anchor with DispatchSummary in href
-                        const dsLink = sidepanel.querySelector('a[href*="DispatchSummary"]');
-                        if (dsLink) {
-                            const h = dsLink.getAttribute('href') || dsLink.href;
-                            if (h) return h;
-                        }
-
-                        // Priority 2: Match specifically inside the Work Order summary card (.card_ngkhz containing "Work Order" title)
-                        const cards = Array.from(sidepanel.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]'));
-                        for (const card of cards) {
-                            const title = (card.querySelector('.panel-title, .header-content_GyDl_, .header_Ce6MY')?.textContent || '').toLowerCase();
-                            if (title.includes('work order')) {
-                                const a = card.querySelector('.arrow-link-container_U04bJ a, a.panel-link_qAFWh, a[href*="DispatchSummary"], a');
-                                if (a) {
-                                    const h = a.getAttribute('href') || a.href;
-                                    if (h && !h.includes('Customer')) return h;
-                                }
-                            }
-                        }
-
-                        // Priority 3: Search for link whose text is "Go to Work Order"
-                        const allLinks = Array.from(sidepanel.querySelectorAll('a'));
-                        for (const l of allLinks) {
-                            const txt = (l.textContent || '').trim().toLowerCase();
-                            if (txt.includes('go to work order')) {
-                                const h = l.getAttribute('href') || l.href;
-                                if (h && !h.includes('Customer')) return h;
-                            }
-                        }
-
-                        return null;
-                    }""")
-                    if found_href and "DispatchSummary" in found_href:
-                        break
-                    await self.page.wait_for_timeout(500)
-
-            # Extra check: Disallow Customer link, invalid links, or Skyler's work order GUID
-            if found_href and ("Customer" in str(found_href) or "DispatchSummary" not in str(found_href)):
-                print(f"  ⚠️ Discarding non-DispatchSummary link: {found_href}")
-                found_href = None
-
-            if found_href and "ba054226" in str(found_href):
-                print(f"  🚨 Detected Skyler's work order GUID in link! Discarding to protect right tech!")
-                found_href = None
-
-            # Compute full DispatchSummary URL
-            full_url = None
-            if found_href:
-                base_url = self.page.url.split("#")[0].rstrip("/")
-                clean_href = found_href.lstrip("/")
-                if not clean_href.startswith("#"):
-                    clean_href = f"#{clean_href}" if clean_href.startswith("/") else f"#/{clean_href}"
-                full_url = f"{base_url}/{clean_href}" if not found_href.startswith("http") else found_href
-
-            new_page = None
-            print(f"  ↗️ Opening DispatchSummary tab for WO #{work_order_number}...")
-
-            # If we extracted the URL directly from WO row or sidepanel:
-            if full_url and "ba054226" not in full_url and "Customer" not in full_url:
-                print(f"  ↗️ Direct tab navigation: {full_url}")
-                new_page = await self.page.context.new_page()
-                await new_page.goto(full_url, wait_until="domcontentloaded")
-            else:
-                # Try clicking arrow link in sidepanel Work Order card ONLY
-                try:
-                    async with self.page.context.expect_page(timeout=6000) as new_page_info:
-                        await self.page.evaluate("""() => {
-                            const sidepanel = document.querySelector('.container__Gkig, .panel-header-container_EYC6s, .custom-scrollbar.container__Gkig') || document.body;
-                            if (!sidepanel) return;
-                            
-                            // 1. Direct search for anchor with DispatchSummary in href
-                            let targetA = sidepanel.querySelector('a[href*="DispatchSummary"]');
-
-                            // 2. Search inside Work Order card
-                            if (!targetA) {
-                                const cards = Array.from(sidepanel.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]'));
-                                for (const card of cards) {
-                                    const title = (card.querySelector('.panel-title, .header-content_GyDl_, .header_Ce6MY')?.textContent || '').toLowerCase();
-                                    if (title.includes('work order')) {
-                                        targetA = card.querySelector('.arrow-link-container_U04bJ a, a');
-                                        if (targetA) break;
-                                    }
-                                }
-                            }
-
-                            // 3. Search for link text "Go to Work Order"
-                            if (!targetA) {
-                                const allLinks = Array.from(sidepanel.querySelectorAll('a'));
-                                for (const l of allLinks) {
-                                    const txt = (l.textContent || '').trim().toLowerCase();
-                                    if (txt.includes('go to work order')) {
-                                        targetA = l;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (targetA) {
-                                targetA.scrollIntoView({ behavior: 'instant', block: 'center' });
-                                targetA.click();
-                            }
-                        }""")
-                    new_page = await new_page_info.value
-                except Exception:
-                    new_page = None
-
-            if not new_page:
-                print(f"  ⚠️ Could not open DispatchSummary for WO #{work_order_number}.")
-                await self.close_sidepanel()
-                return False
-
-            await new_page.wait_for_load_state("domcontentloaded")
-            await new_page.wait_for_timeout(3000)
-
-            if "dispatchsummary" not in new_page.url.lower():
-                print(f"  🚨 CRITICAL STOP: Opened page is not DispatchSummary ({new_page.url})! Aborting cancellation.")
-                await new_page.close()
-                await self.close_sidepanel()
-                return False
-
-            # ── Proven cancellation flow from unassigned_job_clear_scraper.py ──
-            print("Waiting for page to fully load...")
-            await new_page.wait_for_timeout(3000)
-
-            # 🛡️ STRICT SAFETY CHECK: Ensure we NEVER cancel expected tech 'Skyler' unless it's an explicit duplicate
-            if not allow_tech_cancel:
-                page_text = await new_page.evaluate("""() => {
-                    const h = document.querySelector('.header, h1, .dispatch-summary-header, .title') || document.body;
-                    return (h ? (h.textContent || '') : '') + ' ' + (document.body ? (document.body.innerText || '') : '');
-                }""")
-                clean_page_lower = page_text.lower()
-                if "skyler" in clean_page_lower:
-                    print(f"  🚨 CRITICAL SAFETY STOP: Opened DispatchSummary belongs to expected tech 'Skyler'!")
-                    print(f"  🚨 ABORTING CANCELLATION immediately to protect right technician!")
-                    await new_page.close()
-                    await self.close_sidepanel()
-                    return False
-
-            print("Clicking Save button...")
-            save_btn = "button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button']"
-            try:
-                await new_page.wait_for_selector(save_btn, state="visible", timeout=15000)
-                await new_page.click(save_btn)
-            except Exception as e_save:
-                print(f"Primary save button click failed: {e_save}. Trying fallback...")
-                try:
-                    s_loc = new_page.locator("button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button'], button:has-text('Save')").first
-                    await s_loc.click(force=True, timeout=5000)
-                except Exception:
-                    await new_page.evaluate("""() => {
-                        const btn = document.querySelector('#dispatch-summary-save-workorder') ||
-                                    document.querySelector('button[data-automation-id="save-workorder-button"]') ||
-                                    document.querySelector('button.confirm_hsagT') ||
-                                    document.querySelector('button.button_JdBxs');
-                        if (btn) btn.click();
-                    }""")
-            
-            print("Waiting for Save modal to appear...")
-            await new_page.wait_for_timeout(2000)
-            
-            radio_btn = ".field-radio-container:has-text('Canceled') .field-radio"
-            notes = "textarea[name='CancellationNotes']"
-            confirm_btn = "button#confirm-save-dispatch-summary, button:has-text('Confirm'), button:has-text('Yes'), button:has-text('Submit')"
-            cancel_notes = reason or "Duplicate truck assignment on technician (not assigned in template)."
-
-            print("Selecting 'Canceled' radio in Save modal...")
-            try:
-                await new_page.wait_for_selector(radio_btn, state="visible", timeout=5000)
-                await new_page.click(radio_btn)
-            except Exception as inner_e:
-                print(f"Primary radio selector failed: {inner_e}. Trying fallback selector...")
-                alt_radio = ".field-radio-container:has-text('Canceled') .field-radio"
-                try:
-                    await new_page.wait_for_selector(alt_radio, state="visible", timeout=5000)
-                    await new_page.click(alt_radio)
-                except Exception:
-                    try:
-                        await new_page.locator(".field-radio-container:has-text('Canceled'), label:has-text('Canceled')").first.click(timeout=3000)
-                    except Exception:
-                        await new_page.evaluate("""() => {
-                            const containers = document.querySelectorAll('.field-radio-container, label, .field-radio');
-                            for (const c of containers) {
-                                if ((c.textContent || '').trim().toLowerCase().includes('cancel')) {
-                                    c.click();
-                                    const r = c.querySelector('input[type="radio"], .field-radio') || c;
-                                    if (r.click) r.click();
-                                    break;
-                                }
-                            }
-                        }""")
-
-            print(f"Entering cancellation reason in text area: '{cancel_notes}'...")
-            try:
-                await new_page.fill(notes, cancel_notes)
-            except Exception as note_e:
-                print(f"Could not fill notes via selector: {note_e}. Trying fallback textarea...")
-                try:
-                    ta = new_page.locator("textarea[name='CancellationNotes'], textarea.field-textarea, textarea").first
-                    if await ta.count() > 0:
-                        await ta.fill(cancel_notes)
-                except Exception:
-                    pass
-
-            print("Confirming Save/Cancellation...")
-            try:
-                # FieldEdge might keep hidden modals in the DOM. Target only the visible confirm button.
-                await new_page.locator("button#confirm-save-dispatch-summary:visible").first.click(timeout=10000)
-            except Exception:
-                print("Fallback confirm button click...")
-                try:
-                    await new_page.locator(f"{confirm_btn} >> visible=true").first.click(timeout=10000)
-                except Exception:
-                    await new_page.evaluate("""() => {
-                        const btn = document.querySelector('#confirm-save-dispatch-summary') || 
-                                    document.querySelector('.dialog-footer button.confirm_hsagT') ||
-                                    document.querySelector('button.button_JdBxs.confirm_hsagT') ||
-                                    document.querySelector('button.confirm_hsagT');
-                        if (btn) btn.click();
-                    }""")
-            
-            # Wait for save/network
-            await new_page.wait_for_timeout(4000)
-            print("Successfully processed Save and Cancel.")
-            try:
-                await new_page.close()
-            except Exception:
-                pass
-
-            print(f"🎉 Successfully canceled duplicate truck WO #{work_order_number} on '{tech_name}' and closed tab.")
-            await self.close_sidepanel()
-            return True
-
-        except Exception as e:
-            print(f"❌ Error canceling duplicate truck WO #{work_order_number}: {e}")
-            try:
-                await self.close_sidepanel()
-            except Exception:
-                pass
-            return False
+        print(f"  🛡️ SAFETY GUARD: Cancellation requested for WO #{work_order_number} ('{truck_name}' on tech '{tech_name}'), but CANCELLATION IS PERMANENTLY DISABLED. Work order preserved.")
+        return False
 
     async def click_and_reconcile_work_order(
         self,
@@ -1816,28 +1503,50 @@ class AssetAssignmentScraper(BaseScraper):
             return False
 
     def find_asset_row(self, asset_name: str, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """
+        Finds the matching asset work order row on the board.
+        STRICT REQUIREMENT: Must be a genuine fleet vehicle work order (🚛 or 🛻).
+        Must NEVER match customer jobs, crew assignments, or regular work orders.
+        """
         if not asset_name or not rows:
             return None
         import re
         c_target = self.canonical_str(asset_name)
-        m = re.search(r'\d+', asset_name)
-        target_num = m.group(0) if m else ""
+        target_nums = re.findall(r'\d+', asset_name)
+        target_num = target_nums[0] if target_nums else ""
 
         for r in rows:
-            cust = r.get("customer_name", "")
-            c_cust = self.canonical_str(cust)
-            r_asset = self.canonical_str(r.get("asset_name", ""))
+            cust = (r.get("customer_name") or "").strip()
+            prio = (r.get("priority_name") or "").strip()
 
-            # 1. Exact or substring match on canonical name
-            if c_target and (c_target == c_cust or c_target == r_asset or c_target in c_cust or c_cust in c_target):
+            # 1. Never match crew/laborer/helper cards
+            if "👥" in cust or "laborer" in cust.lower() or "helper" in cust.lower():
+                continue
+
+            # 2. Must be a genuine fleet vehicle card (🚛 or 🛻) or explicit asset assignment
+            is_vehicle = ("🛻" in cust or "🚛" in cust)
+            if not is_vehicle and not r.get("is_asset_assignment"):
+                if not ("asset assignment" in prio.lower() or "ser tr" in prio.lower() or "pt (" in prio.lower() or "service needed" in prio.lower()):
+                    continue
+
+            c_cust = self.canonical_str(cust)
+
+            # 3. Exact canonical match (e.g. '🛻 | 71' matches '🛻 | 71')
+            if c_target and c_target == c_cust:
                 return r
 
-            # 2. Number match with vehicle icon/pipe match
-            if target_num:
-                m_cust = re.search(r'\d+', cust)
-                if m_cust and m_cust.group(0) == target_num:
-                    if ("🛻" in asset_name and "🛻" in cust) or ("🚛" in asset_name and "🚛" in cust) or ("|" in cust):
+            # 4. Strict number match on the truck number after pipe '|' for vehicle work orders
+            if target_num and is_vehicle:
+                if "|" in cust:
+                    after_pipe = cust.split("|")[1].strip()
+                    pipe_nums = re.findall(r'\d+', after_pipe)
+                    if pipe_nums and int(pipe_nums[0]) == int(target_num):
                         return r
+                else:
+                    cust_nums = re.findall(r'\d+', cust)
+                    if cust_nums and int(cust_nums[0]) == int(target_num):
+                        return r
+
         return None
 
     def is_time_matching(self, target_time: str, sched_str: str) -> bool:
@@ -1877,6 +1586,30 @@ class AssetAssignmentScraper(BaseScraper):
         norm_sched = re.sub(r'[^0-9a-z]', '', sched_str.lower())
         return bool(norm_target and norm_target in norm_sched)
 
+    @staticmethod
+    def is_priority_match(current_priority: str, target_priority: str) -> bool:
+        if not target_priority:
+            return True
+        if not current_priority:
+            return False
+        import unicodedata, re
+        norm_curr = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(current_priority))).lower()
+        norm_target = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(target_priority))).lower()
+        if norm_curr == norm_target or (norm_target and norm_target in norm_curr) or (norm_curr and norm_curr in norm_target):
+            return True
+
+        curr_upper = str(current_priority).upper()
+        target_upper = str(target_priority).upper()
+        if "SERVICE NEEDED" in target_upper and "SERVICE NEEDED" in curr_upper:
+            return True
+
+        m_curr = re.search(r'\b\d+\.\d+\b', str(current_priority))
+        m_target = re.search(r'\b\d+\.\d+\b', str(target_priority))
+        if m_curr and m_target and m_curr.group(0) == m_target.group(0):
+            return True
+
+        return False
+
     async def update_service_needed_work_order(
         self,
         work_order_number: str,
@@ -1893,18 +1626,14 @@ class AssetAssignmentScraper(BaseScraper):
         Updates an existing asset work order to be in 'Service Needed':
         1. Open sidepanel by clicking WO #.
         2. In Assignment card:
-           - Check current scheduled time & tech.
-           - If already matching target_time and target_tech, skip update.
-           - If tech is not target_tech (e.g. s4), edit tech.
-           - If time is not target_time (e.g. 3:30 PM), edit time.
-           - Save Assignment card if changed.
+           - If tech already matches target_tech, skip tech edit.
+           - If time already matches target_time, skip time edit.
+           - Only edit and save Assignment card if either needs updating.
         3. In Work Order card:
-           - Click arrow (.details-icon_lgpCm) to view Work Order details.
-           - Click edit icon (.base-icon.edit.edit-icon_vG0FU).
-           - Set Priority to target_priority ([7] 7.12 SERVICE NEEDED).
-           - Set Work Order Description to service_note.
-           - Click Save (button.button_a3g51.confirm_I8LeR).
-        4. Close sidepanel.
+           - If priority already matches target_priority, skip priority edit.
+           - If note already set, skip note edit.
+           - Only edit and save Work Order details if either needs updating.
+        4. If everything is already set, skip entirely and close sidepanel.
         """
         print(f"\n🛠️ [Service Needed Update] Processing WO #{work_order_number} ('{asset_name}')...")
         try:
@@ -1950,43 +1679,196 @@ class AssetAssignmentScraper(BaseScraper):
             tech_to_check = sidepanel_info.get("tech") or current_tech
 
             need_tech_change = bool(target_tech and not self.is_tech_match(tech_to_check, target_tech) and self.canonical_str(tech_to_check) != self.canonical_str(target_tech))
-            need_time_change = not self.is_time_matching(target_time, sched_to_check)
+            # CRITICAL: Scheduled time must NEVER be edited on FieldEdge work orders. Keep existing scheduled time!
+            need_assignment_update = need_tech_change
 
-            if not need_tech_change and not need_time_change:
-                print(f"  ⏭️ WO #{work_order_number} ('{asset_name}') is ALREADY set (Time: '{target_time}', Tech: '{tech_to_check}'). Skipping update.")
+            # ── Check Work Order details (Priority & Note) ──
+            sidepanel_wo_info = await self.page.evaluate(r"""() => {
+                let priority = '';
+                let note = '';
+                const selectedPrio = document.querySelector('.priority-select .vs__selected, #prioritySelect .vs__selected');
+                if (selectedPrio && selectedPrio.textContent) {
+                    priority = selectedPrio.textContent.trim();
+                }
+                if (!priority) {
+                    const cards = document.querySelectorAll('.workorder-summary-card_mv9VQ, .workorder-details-card_kiboz, [data-edb-sidepanel-card*="WorkOrder"], .card_ngkhz');
+                    for (const card of cards) {
+                        const cells = card.querySelectorAll('.cell, .field-container, tr, div');
+                        for (const cell of cells) {
+                            const title = cell.querySelector('.field-title, .title, .label');
+                            if (title && title.textContent.toLowerCase().includes('priority')) {
+                                const val = cell.querySelector('.panel-content, .value, span, div:not(.field-title)');
+                                if (val && val.textContent) {
+                                    priority = val.textContent.trim();
+                                    break;
+                                }
+                            }
+                        }
+                        if (priority) break;
+                        const text = card.textContent || '';
+                        const match = text.match(/\[\d+\]\s*[A-Za-z0-9\.\s\(\)\-_/]+/);
+                        if (match && (match[0].includes('SERVICE') || match[0].includes('ROUTINE') || match[0].includes('PT') || match[0].includes('SER TR') || match[0].includes('SHOP'))) {
+                            priority = match[0].trim();
+                            break;
+                        }
+                    }
+                }
+                const noteEl = document.querySelector('.summary-note-container_f6fBE textarea') ||
+                               document.querySelector('.summary-note-container_f6fBE .content') ||
+                               document.querySelector('.summary-note-container_f6fBE');
+                if (noteEl) {
+                    note = (noteEl.value || noteEl.textContent || '').trim();
+                }
+                return { priority, note };
+            }""")
+
+            prio_to_check = sidepanel_wo_info.get("priority") or current_priority
+            is_prio_already_set = bool(target_priority and self.is_priority_match(prio_to_check, target_priority))
+            need_priority_change = bool(target_priority and not is_prio_already_set)
+
+            existing_note = sidepanel_wo_info.get("note") or ""
+            is_note_already_set = bool(not service_note or (existing_note and service_note.strip().lower() in existing_note.strip().lower()))
+            need_note_change = bool(service_note and not is_note_already_set)
+
+            need_wo_update = need_priority_change or need_note_change
+
+            # If both Assignment card and Work Order details are ALREADY set, skip entirely!
+            if not need_assignment_update and not need_wo_update:
+                print(f"  ⏭️ WO #{work_order_number} ('{asset_name}') is ALREADY set (Tech: '{tech_to_check}', Priority: '{prio_to_check}'). Skipping update.")
                 await self.close_sidepanel()
                 return True
 
-            assignment_edited = False
-            print(f"  🕒 Updating Assignment card (Need tech: {need_tech_change}, Need time: {need_time_change})...")
-            # Scroll Assignment card into view
-            await self.page.evaluate("""() => {
-                const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                             document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                             document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
-                             document.querySelector('.card_ngkhz');
-                if (card) card.scrollIntoView({ behavior: 'instant', block: 'center' });
-            }""")
-            await self.page.wait_for_timeout(400)
+            # ── Step 1: Update Assignment card if tech needs change ──
+            if need_assignment_update:
+                print(f"  🕒 Updating Assignment card (Need tech: {need_tech_change})...")
+                # Scroll Assignment card into view
+                await self.page.evaluate("""() => {
+                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                                 document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                                 document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
+                                 document.querySelector('.card_ngkhz');
+                    if (card) card.scrollIntoView({ behavior: 'instant', block: 'center' });
+                }""")
+                await self.page.wait_for_timeout(400)
 
-            # Check if Assignment card is already in edit mode
-            is_edit_mode = await self.page.evaluate("""() => {
-                const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                             document.querySelector('.timepicker-container[name="Scheduled Time"]');
-                return !!card;
-            }""")
+                # Check if Assignment card is already in edit mode
+                is_edit_mode = await self.page.evaluate("""() => {
+                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                                 document.querySelector('.tech-dropdown_qufHC');
+                    return !!card;
+                }""")
 
-            if not is_edit_mode:
+                if not is_edit_mode:
+                    for _ in range(3):
+                        assignment_edit_clicked = await self.page.evaluate("""() => {
+                            const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                                         document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
+                                         document.querySelector('.card_ngkhz');
+                            if (!card) return false;
+                            const btn = card.querySelector('.header_IVnfD .base-icon.edit') ||
+                                        card.querySelector('.base-icon.edit.default') ||
+                                        card.querySelector('.base-icon.edit') ||
+                                        card.querySelector('.edit');
+                            if (btn && btn.offsetParent !== null) {
+                                btn.click();
+                                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                return true;
+                            }
+                            return false;
+                        }""")
+                        if assignment_edit_clicked:
+                            break
+                        try:
+                            pw_btn = self.page.locator('[data-edb-sidepanel-card*="Assignment"] .base-icon.edit, .card_ngkhz .base-icon.edit').first
+                            if await pw_btn.count() > 0 and await pw_btn.is_visible():
+                                await pw_btn.click(force=True)
+                                break
+                        except Exception:
+                            pass
+                        await self.page.wait_for_timeout(800)
+
+                await self.page.wait_for_timeout(1000)
+
+                # Update Tech if needed
+                if target_tech and need_tech_change:
+                    print(f"  👤 Updating technician to '{target_tech}'...")
+                    await self.select_dropdown_option(None, target_tech)
+                    await self.page.wait_for_timeout(600)
+                else:
+                    print(f"  👤 Technician already matches '{target_tech}'. Skipping tech edit.")
+
+                # Click Save on Assignment card
+                print("  💾 Saving Assignment card...")
+                saved_assignment = await self.page.evaluate("""() => {
+                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                                 document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                                 document.querySelector('.card_ngkhz');
+                    if (!card) return false;
+                    const btns = Array.from(card.querySelectorAll('button.confirm_I8LeR, button.button_a3g51.confirm_I8LeR, button'));
+                    const saveBtn = btns.find(b => {
+                        const txt = (b.textContent || '').trim().toLowerCase();
+                        return txt === 'save' || b.classList.contains('confirm_I8LeR');
+                    });
+                    if (saveBtn) {
+                        saveBtn.removeAttribute('disabled');
+                        saveBtn.click();
+                        saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                        return true;
+                    }
+                    return false;
+                }""")
+
+                if not saved_assignment:
+                    try:
+                        pw_save = self.page.locator('.edit-mode-style_ABe0v button.confirm_I8LeR, [data-edb-sidepanel-card*="Assignment"] button.confirm_I8LeR, button.confirm_I8LeR').first
+                        if await pw_save.count() > 0:
+                            await pw_save.click(force=True)
+                            saved_assignment = True
+                    except Exception:
+                        pass
+
+                if saved_assignment:
+                    print(f"  ✅ Saved Assignment card.")
+                    await self.page.wait_for_timeout(2500)
+                else:
+                    print("  ⚠️ Assignment Save button not triggered.")
+            else:
+                print(f"  ⏭️ Assignment card already matches (Tech: '{tech_to_check}'). Skipping Assignment edit.")
+
+            # ── Step 2: Update Work Order card (Priority & Description) if not already set ──
+            if need_wo_update:
+                print(f"  📝 Updating Work Order details (Need priority: {need_priority_change}, Need note: {need_note_change})...")
+
+                # Scroll Work Order card into view
+                await self.page.evaluate("""() => {
+                    const woCard = document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
+                                   document.querySelector('[data-edb-sidepanel-card*="WorkOrderCard"]') ||
+                                   document.querySelector('.workorder-summary-card_mv9VQ') ||
+                                   document.querySelector('.card_ngkhz');
+                    if (woCard) woCard.scrollIntoView({ behavior: 'instant', block: 'center' });
+                }""")
+                await self.page.wait_for_timeout(500)
+
+                # Click arrow (.details-icon_lgpCm) in Work Order summary card if present
+                await self.page.evaluate("""() => {
+                    const arrow = document.querySelector('.workorder-summary-card_mv9VQ ~ .details-icon_lgpCm') ||
+                                  document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ) .details-icon_lgpCm') ||
+                                  document.querySelector('.details-icon_lgpCm');
+                    if (arrow && arrow.offsetParent !== null) {
+                        arrow.click();
+                    }
+                }""")
+                await self.page.wait_for_timeout(1000)
+
+                # Click Edit icon (.base-icon.edit.edit-icon_vG0FU)
+                edit_wo_clicked = False
                 for _ in range(3):
-                    assignment_edit_clicked = await self.page.evaluate("""() => {
-                        const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                                     document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
-                                     document.querySelector('.card_ngkhz');
-                        if (!card) return false;
-                        const btn = card.querySelector('.header_IVnfD .base-icon.edit') ||
-                                    card.querySelector('.base-icon.edit.default') ||
-                                    card.querySelector('.base-icon.edit') ||
-                                    card.querySelector('.edit');
+                    edit_wo_clicked = await self.page.evaluate("""() => {
+                        const btn = document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
+                                    document.querySelector('.edit-icon_vG0FU') ||
+                                    document.querySelector('.workorder-details-card_kiboz .base-icon.edit') ||
+                                    document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .base-icon.edit') ||
+                                    document.querySelector('.base-icon.edit');
                         if (btn && btn.offsetParent !== null) {
                             btn.click();
                             btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -1994,271 +1876,150 @@ class AssetAssignmentScraper(BaseScraper):
                         }
                         return false;
                     }""")
-                    if assignment_edit_clicked:
+                    if edit_wo_clicked:
                         break
                     try:
-                        pw_btn = self.page.locator('[data-edb-sidepanel-card*="Assignment"] .base-icon.edit, .card_ngkhz .base-icon.edit').first
-                        if await pw_btn.count() > 0 and await pw_btn.is_visible():
-                            await pw_btn.click(force=True)
+                        pw_edit = self.page.locator('.base-icon.edit.edit-icon_vG0FU, .edit-icon_vG0FU').first
+                        if await pw_edit.count() > 0 and await pw_edit.is_visible():
+                            await pw_edit.click(force=True)
+                            edit_wo_clicked = True
                             break
                     except Exception:
                         pass
                     await self.page.wait_for_timeout(800)
 
-            await self.page.wait_for_timeout(1000)
+                await self.page.wait_for_timeout(1000)
 
-            # Update Tech if needed
-            if target_tech and need_tech_change:
-                print(f"  👤 Updating technician to '{target_tech}'...")
-                await self.select_dropdown_option(None, target_tech)
-                await self.page.wait_for_timeout(600)
+                # 1. Select Priority if needed
+                if need_priority_change and target_priority:
+                    print(f"  🏷️ Selecting Priority: '{target_priority}'...")
+                    await self.page.evaluate("""() => {
+                        const dd = document.querySelector('.priority-select, #prioritySelect');
+                        if (dd) {
+                            const toggle = dd.querySelector('.vs__dropdown-toggle') || dd.querySelector('input.vs__search') || dd;
+                            toggle.click();
+                            toggle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                            toggle.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                        }
+                    }""")
+                    await self.page.wait_for_timeout(500)
 
-            # Update Scheduled Time only if needed
-            if need_time_change:
-                print(f"  ⏰ Setting scheduled time to '{target_time}'...")
-                time_input_loc = self.page.locator(
-                    'div[name="Scheduled Time"] input, .timepicker-container input, .cell:has(.field-title:has-text("scheduled time")) input, .cell-pos-3x1 input'
-                ).first
+                    await self.page.evaluate("""(target) => {
+                        const inp = document.querySelector('.priority-select input.vs__search, #prioritySelect input.vs__search');
+                        if (inp) {
+                            inp.focus();
+                            inp.value = target;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                    }""", target_priority)
+                    await self.page.wait_for_timeout(500)
 
-                if await time_input_loc.count() > 0 and await time_input_loc.is_visible():
+                    prio_clicked = await self.page.evaluate("""(target) => {
+                        const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
+                        const cTarget = norm(target);
+                        const items = Array.from(document.querySelectorAll('.priority-select ul[role="listbox"] li, #prioritySelect ul[role="listbox"] li, .vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li'));
+                        for (const item of items) {
+                            const txt = (item.textContent || '').trim();
+                            const cTxt = norm(txt);
+                            if (cTxt === cTarget || (cTarget && cTxt.includes(cTarget)) || (cTxt && cTarget.includes(cTxt)) || (txt.toUpperCase().includes('SERVICE NEEDED') && target.toUpperCase().includes('SERVICE NEEDED'))) {
+                                item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+                                item.click();
+                                item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                return true;
+                            }
+                        }
+                        return false;
+                    }""", target_priority)
+
+                    if not prio_clicked:
+                        try:
+                            import re as _re
+                            opt_loc = self.page.locator('.vs__dropdown-menu li, ul[role="listbox"] li, li.vs__dropdown-option').filter(has_text=_re.compile(r'service\s*needed', _re.I)).first
+                            if await opt_loc.count() > 0 and await opt_loc.is_visible():
+                                await opt_loc.click(force=True)
+                                prio_clicked = True
+                        except Exception as p_err:
+                            print(f"  ⚠️ Priority locator click fallback note: {p_err}")
+
+                    print(f"  -> Priority option selected: {'Success' if prio_clicked else 'Option not found'}")
+                    await self.page.wait_for_timeout(500)
+                else:
+                    print(f"  🏷️ Priority already set to '{target_priority}'. Skipping priority selection.")
+
+                # 2. Enter Work Summary if needed
+                if need_note_change and service_note:
+                    print(f"  📝 Entering Work Summary: '{service_note}'...")
+                    await self.page.evaluate("""(note) => {
+                        const containers = document.querySelectorAll('.summary-note-container_f6fBE');
+                        let targetTa = null;
+                        for (const c of containers) {
+                            const title = c.querySelector('.field-title');
+                            if (title) {
+                                const t = title.textContent.toLowerCase();
+                                if (t.includes('work summary') || (t.includes('summary') && !t.includes('description'))) {
+                                    targetTa = c.querySelector('textarea');
+                                    break;
+                                }
+                            }
+                        }
+                        if (!targetTa && containers.length > 1) {
+                            targetTa = containers[1].querySelector('textarea');
+                        }
+                        if (targetTa) {
+                            targetTa.focus();
+                            targetTa.value = note;
+                            targetTa.dispatchEvent(new Event('input', { bubbles: true }));
+                            targetTa.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    }""", service_note)
+
                     try:
-                        await time_input_loc.click(force=True)
-                        await self.page.wait_for_timeout(200)
-                        await time_input_loc.press("Control+A")
-                        await time_input_loc.press("Backspace")
-                        await time_input_loc.type(target_time, delay=50)
-                        await self.page.keyboard.press("Enter")
-                        await self.page.keyboard.press("Tab")
-                    except Exception as t_err:
-                        print(f"  ⚠️ Direct typing time note: {t_err}")
+                        ta_loc = self.page.locator('.summary-note-container_f6fBE:has-text("Work Summary") textarea').first
+                        if await ta_loc.count() > 0 and await ta_loc.is_visible():
+                            await ta_loc.fill(service_note)
+                    except Exception:
+                        pass
+                    await self.page.wait_for_timeout(500)
+                else:
+                    print(f"  📝 Work Summary already set. Skipping note edit.")
 
-                # Also ensure via JavaScript evaluation that value and events are dispatched
-                await self.page.evaluate("""(tVal) => {
-                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                                 document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                # 3. Click Save button on Work Order form
+                print("  💾 Clicking Save on Work Order details...")
+                wo_saved = await self.page.evaluate("""() => {
+                    const form = document.querySelector('.workorder-details-card_kiboz') || 
+                                 document.querySelector('.card_ngkhz.no-bottom-padding_XvTa4') ||
                                  document.querySelector('.card_ngkhz');
-                    if (!card) return false;
-                    const inp = card.querySelector('div[name="Scheduled Time"] input') ||
-                                card.querySelector('.timepicker-container input') ||
-                                card.querySelector('.cell-pos-3x1 input');
-                    if (inp) {
-                        inp.focus();
-                        inp.value = tVal;
-                        inp.dispatchEvent(new Event('input', { bubbles: true }));
-                        inp.dispatchEvent(new Event('change', { bubbles: true }));
-                        inp.dispatchEvent(new Event('blur', { bubbles: true }));
-                        return true;
+                    let btn = null;
+                    if (form) {
+                        btn = form.querySelector('button.confirm_I8LeR') ||
+                              form.querySelector('.button_a3g51.confirm_I8LeR') ||
+                              Array.from(form.querySelectorAll('button')).find(b => (b.textContent || '').trim().toLowerCase() === 'save');
                     }
-                    return false;
-                }""", target_time)
-                await self.page.wait_for_timeout(600)
-            else:
-                print(f"  ⏰ Scheduled time already matches '{target_time}'. Skipping time edit.")
-
-            # Click Save on Assignment card
-            print("  💾 Saving Assignment card...")
-            saved_assignment = await self.page.evaluate("""() => {
-                const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                             document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                             document.querySelector('.card_ngkhz');
-                if (!card) return false;
-                const btns = Array.from(card.querySelectorAll('button.confirm_I8LeR, button.button_a3g51.confirm_I8LeR, button'));
-                const saveBtn = btns.find(b => {
-                    const txt = (b.textContent || '').trim().toLowerCase();
-                    return txt === 'save' || b.classList.contains('confirm_I8LeR');
-                });
-                if (saveBtn) {
-                    saveBtn.removeAttribute('disabled');
-                    saveBtn.click();
-                    saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                    return true;
-                }
-                return false;
-            }""")
-
-            if not saved_assignment:
-                try:
-                    pw_save = self.page.locator('.edit-mode-style_ABe0v button.confirm_I8LeR, [data-edb-sidepanel-card*="Assignment"] button.confirm_I8LeR, button.confirm_I8LeR').first
-                    if await pw_save.count() > 0:
-                        await pw_save.click(force=True)
-                        saved_assignment = True
-                except Exception:
-                    pass
-
-            if saved_assignment:
-                print(f"  ✅ Saved Assignment card.")
-                await self.page.wait_for_timeout(2500)
-                assignment_edited = True
-            else:
-                print("  ⚠️ Assignment Save button not triggered.")
-
-            # ── Step 2: Update Work Order card (Priority & Description) ──
-            print(f"  📝 Updating Work Order details: Priority='{target_priority}', Note='{service_note}'...")
-
-            # Scroll Work Order card into view
-            await self.page.evaluate("""() => {
-                const woCard = document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
-                               document.querySelector('[data-edb-sidepanel-card*="WorkOrderCard"]') ||
-                               document.querySelector('.workorder-summary-card_mv9VQ') ||
-                               document.querySelector('.card_ngkhz');
-                if (woCard) woCard.scrollIntoView({ behavior: 'instant', block: 'center' });
-            }""")
-            await self.page.wait_for_timeout(500)
-
-            # Click arrow (.details-icon_lgpCm) in Work Order summary card if present
-            await self.page.evaluate("""() => {
-                const arrow = document.querySelector('.workorder-summary-card_mv9VQ ~ .details-icon_lgpCm') ||
-                              document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ) .details-icon_lgpCm') ||
-                              document.querySelector('.details-icon_lgpCm');
-                if (arrow && arrow.offsetParent !== null) {
-                    arrow.click();
-                }
-            }""")
-            await self.page.wait_for_timeout(1000)
-
-            # Click Edit icon (.base-icon.edit.edit-icon_vG0FU)
-            edit_wo_clicked = False
-            for _ in range(3):
-                edit_wo_clicked = await self.page.evaluate("""() => {
-                    const btn = document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
-                                document.querySelector('.edit-icon_vG0FU') ||
-                                document.querySelector('.workorder-details-card_kiboz .base-icon.edit') ||
-                                document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .base-icon.edit') ||
-                                document.querySelector('.base-icon.edit');
-                    if (btn && btn.offsetParent !== null) {
+                    if (!btn) {
+                        btn = document.querySelector('button.confirm_I8LeR, .button_a3g51.confirm_I8LeR');
+                    }
+                    if (btn) {
+                        btn.removeAttribute('disabled');
                         btn.click();
                         btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                         return true;
                     }
                     return false;
                 }""")
-                if edit_wo_clicked:
-                    break
-                try:
-                    pw_edit = self.page.locator('.base-icon.edit.edit-icon_vG0FU, .edit-icon_vG0FU').first
-                    if await pw_edit.count() > 0 and await pw_edit.is_visible():
-                        await pw_edit.click(force=True)
-                        edit_wo_clicked = True
-                        break
-                except Exception:
-                    pass
-                await self.page.wait_for_timeout(800)
 
-            await self.page.wait_for_timeout(1000)
+                if not wo_saved:
+                    try:
+                        pw_btn = self.page.locator('button.confirm_I8LeR, button.button_a3g51.confirm_I8LeR, button:has-text("Save")').first
+                        if await pw_btn.count() > 0 and await pw_btn.is_visible():
+                            await pw_btn.click(force=True)
+                            wo_saved = True
+                    except Exception:
+                        pass
 
-            # 1. Select Priority
-            if target_priority:
-                print(f"  🏷️ Selecting Priority: '{target_priority}'...")
-                await self.page.evaluate("""() => {
-                    const dd = document.querySelector('.priority-select');
-                    if (dd) {
-                        const toggle = dd.querySelector('.vs__dropdown-toggle') || dd.querySelector('input.vs__search') || dd;
-                        toggle.click();
-                        toggle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                        toggle.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                    }
-                }""")
-                await self.page.wait_for_timeout(500)
-
-                await self.page.evaluate("""(target) => {
-                    const inp = document.querySelector('.priority-select input.vs__search');
-                    if (inp) {
-                        inp.focus();
-                        inp.value = target;
-                        inp.dispatchEvent(new Event('input', { bubbles: true }));
-                    }
-                }""", target_priority)
-                await self.page.wait_for_timeout(500)
-
-                prio_clicked = await self.page.evaluate("""(target) => {
-                    const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
-                    const cTarget = norm(target);
-                    const items = Array.from(document.querySelectorAll('.priority-select ul[role="listbox"] li, .vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li'));
-                    for (const item of items) {
-                        const txt = (item.textContent || '').trim();
-                        const cTxt = norm(txt);
-                        if (cTxt === cTarget || (cTarget && cTxt.includes(cTarget)) || (cTxt && cTarget.includes(cTxt)) || (txt.toUpperCase().includes('SERVICE NEEDED') && target.toUpperCase().includes('SERVICE NEEDED'))) {
-                            item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
-                            item.click();
-                            item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                            return true;
-                        }
-                    }
-                    return false;
-                }""", target_priority)
-                print(f"  -> Priority option selected: {'Success' if prio_clicked else 'Option not found'}")
-                await self.page.wait_for_timeout(500)
-
-            # 2. Enter Work Summary
-            if service_note:
-                print(f"  📝 Entering Work Summary: '{service_note}'...")
-                await self.page.evaluate("""(note) => {
-                    const containers = document.querySelectorAll('.summary-note-container_f6fBE');
-                    let targetTa = null;
-                    for (const c of containers) {
-                        const title = c.querySelector('.field-title');
-                        if (title) {
-                            const t = title.textContent.toLowerCase();
-                            if (t.includes('work summary') || (t.includes('summary') && !t.includes('description'))) {
-                                targetTa = c.querySelector('textarea');
-                                break;
-                            }
-                        }
-                    }
-                    if (!targetTa && containers.length > 1) {
-                        targetTa = containers[1].querySelector('textarea');
-                    }
-                    if (targetTa) {
-                        targetTa.focus();
-                        targetTa.value = note;
-                        targetTa.dispatchEvent(new Event('input', { bubbles: true }));
-                        targetTa.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                }""", service_note)
-
-                try:
-                    ta_loc = self.page.locator('.summary-note-container_f6fBE:has-text("Work Summary") textarea').first
-                    if await ta_loc.count() > 0 and await ta_loc.is_visible():
-                        await ta_loc.fill(service_note)
-                except Exception:
-                    pass
-                await self.page.wait_for_timeout(500)
-
-            # 3. Click Save button on Work Order form
-            print("  💾 Clicking Save on Work Order details...")
-            wo_saved = await self.page.evaluate("""() => {
-                const form = document.querySelector('.workorder-details-card_kiboz') || 
-                             document.querySelector('.card_ngkhz.no-bottom-padding_XvTa4') ||
-                             document.querySelector('.card_ngkhz');
-                let btn = null;
-                if (form) {
-                    btn = form.querySelector('button.confirm_I8LeR') ||
-                          form.querySelector('.button_a3g51.confirm_I8LeR') ||
-                          Array.from(form.querySelectorAll('button')).find(b => (b.textContent || '').trim().toLowerCase() === 'save');
-                }
-                if (!btn) {
-                    btn = document.querySelector('button.confirm_I8LeR, .button_a3g51.confirm_I8LeR');
-                }
-                if (btn) {
-                    btn.removeAttribute('disabled');
-                    btn.click();
-                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                    return true;
-                }
-                return false;
-            }""")
-
-            if not wo_saved:
-                try:
-                    pw_btn = self.page.locator('button.confirm_I8LeR, button.button_a3g51.confirm_I8LeR, button:has-text("Save")').first
-                    if await pw_btn.count() > 0 and await pw_btn.is_visible():
-                        await pw_btn.click(force=True)
-                        wo_saved = True
-                except Exception:
-                    pass
-
-            await self.page.wait_for_timeout(3000)
-            print(f"  🎉 Work Order save finished (Result: {'Saved' if wo_saved else 'Attempted'}).")
+                await self.page.wait_for_timeout(3000)
+                print(f"  🎉 Work Order save finished (Result: {'Saved' if wo_saved else 'Attempted'}).")
+            else:
+                print(f"  ⏭️ Work Order details already set (Priority: '{prio_to_check}'). Skipping Work Order details edit.")
 
             await self.close_sidepanel()
             return True
@@ -2350,7 +2111,7 @@ class AssetAssignmentScraper(BaseScraper):
             total_reconciled = 0
             total_checked = 0
 
-            # ── 0. Reconcile Out of Service Vehicles (Cancel WOs & Exempt from Board) ──
+            # ── 0. Reconcile Out of Service Vehicles (Exempt from Board - NO Cancellation) ──
             out_of_service_configs = [
                 s for s in self.template_data.get("out_of_service_assets", [])
                 if s.get("active", True)
@@ -2363,40 +2124,10 @@ class AssetAssignmentScraper(BaseScraper):
 
             if out_of_service_configs and click_wos:
                 print(f"\n🚫 [Stage 0/3] Checking {len(out_of_service_configs)} Out of Service vehicle(s) on {normalized_date}...")
-                oos_canceled_wos = set()
                 for oos_cfg in out_of_service_configs:
                     asset_name = oos_cfg.get("asset_name", "")
                     reason = oos_cfg.get("reason", "Vehicle is Out of Service for repairs.")
-                    c_target = self.canonical_str(asset_name)
-
-                    # Look for any rows matching this vehicle in all_rows
-                    matching_rows = []
-                    for r in all_rows:
-                        cust = self.canonical_str(r.get("customer_name", ""))
-                        r_asset = self.canonical_str(r.get("asset_name", ""))
-                        r_name = self.canonical_str(r.get("name", ""))
-                        if c_target and (c_target == cust or c_target == r_asset or c_target == r_name or c_target in cust or cust in c_target):
-                            matching_rows.append(r)
-
-                    for m_row in matching_rows:
-                        wo_num = m_row.get("work_order_number", "")
-                        curr_tech = m_row.get("tech_name", "")
-                        if wo_num and wo_num not in oos_canceled_wos:
-                            print(f"  🚨 Vehicle '{asset_name}' is OUT OF SERVICE but active on board! (WO #{wo_num} on tech '{curr_tech}'). Canceling...")
-                            cancel_reason = f"Vehicle '{asset_name}' is OUT OF SERVICE for repairs. {reason}".strip()
-                            canceled = await self.cancel_work_order_via_dispatch_summary(
-                                work_order_number=wo_num,
-                                truck_name=asset_name,
-                                tech_name=curr_tech,
-                                reason=cancel_reason
-                            )
-                            if canceled:
-                                oos_canceled_wos.add(wo_num)
-                                total_reconciled += 1
-
-                if oos_canceled_wos:
-                    all_rows = [r for r in all_rows if r.get("work_order_number") not in oos_canceled_wos]
-                    truck_headers = [r for r in truck_headers if r.get("work_order_number") not in oos_canceled_wos]
+                    print(f"  🚫 Vehicle '{asset_name}' is OUT OF SERVICE ({reason}). Exempting from reassignment (cancellation disabled).")
 
             if out_of_service_names and truck_headers:
                 truck_headers = [
@@ -2433,12 +2164,12 @@ class AssetAssignmentScraper(BaseScraper):
 
                         print(f"  👉 Found existing WO #{wo_num} for '{asset_name}' on tech '{curr_tech}' (Sched: {curr_sched}, Priority: {curr_prio})")
 
-                        # Check scheduled time & tech: if time is already target_time (e.g. 3:30 PM) and tech matches, skip!
-                        is_time_set = self.is_time_matching(target_time, curr_sched)
+                        # Check tech & priority: if both are already set, skip sidepanel completely!
                         is_tech_set = not target_tech or self.is_tech_match(curr_tech, target_tech) or (self.canonical_str(curr_tech) == self.canonical_str(target_tech))
+                        is_prio_set = not target_priority or self.is_priority_match(curr_prio, target_priority)
 
-                        if is_time_set and is_tech_set:
-                            print(f"  ⏭️ WO #{wo_num} for '{asset_name}' is ALREADY set to '{target_time}' on tech '{curr_tech}'. Already configured from before, skipping update.")
+                        if is_tech_set and is_prio_set:
+                            print(f"  ⏭️ WO #{wo_num} for '{asset_name}' is ALREADY fully set (Tech: '{curr_tech}', Priority: '{curr_prio}'). Skipping update.")
                             continue
 
                         total_checked += 1
@@ -2476,7 +2207,7 @@ class AssetAssignmentScraper(BaseScraper):
                         safe_tech = str(r.get('tech_name', '')).encode('ascii', errors='replace').decode()
                         print(f"  - {safe_name} -> Current Tech: {safe_tech} | WO #{r.get('work_order_number')}")
 
-                # ── Multiple Truck Assignments Detection & Cancellation ──
+                # ── Multiple Truck Assignments Detection (Informational Only - NO Cancellation) ──
                 # ONLY evaluate genuine fleet trucks (🚛 / 🛻). NEVER touch helpers/crew (👥).
                 tech_to_trucks = {}
                 for r in truck_headers:
@@ -2491,7 +2222,6 @@ class AssetAssignmentScraper(BaseScraper):
                             tech_to_trucks[c_tech] = []
                         tech_to_trucks[c_tech].append(r)
 
-                canceled_wos = set()
                 for c_tech, t_list in tech_to_trucks.items():
                     if len(t_list) > 1:
                         tech_display = t_list[0].get("tech_name", "")
@@ -2503,13 +2233,11 @@ class AssetAssignmentScraper(BaseScraper):
 
                         print(f"  🎯 Template expected truck for '{tech_display}' is: '{expected_truck_name}'")
 
-                        kept_matched_truck = False
                         for r_truck in t_list:
                             t_name = r_truck.get("name", "")
                             c_t_name = self.canonical_str(t_name)
                             wo_num = r_truck.get("work_order_number", "")
 
-                            # If this truck is NOT assigned to this tech in JSON template, cancel it!
                             is_match = (
                                 c_exp_truck and (
                                     c_t_name == c_exp_truck or
@@ -2517,37 +2245,14 @@ class AssetAssignmentScraper(BaseScraper):
                                     c_t_name in c_exp_truck
                                 )
                             )
-                            if not is_match or kept_matched_truck:
-                                if is_match and kept_matched_truck:
-                                    print(f"  🚨 Duplicate expected truck '{t_name}' (WO #{wo_num}) on '{tech_display}'! Canceling duplicate...")
-                                    cancel_msg = f"Duplicate truck '{t_name}' assigned to technician '{tech_display}'."
-                                    allow_cancel = True
-                                else:
-                                    print(f"  🚨 Truck '{t_name}' (WO #{wo_num}) is NOT assigned to '{tech_display}' in JSON template! Initiating cancellation...")
-                                    cancel_msg = f"Wrong truck '{t_name}' assigned to technician '{tech_display}'. Template expects '{expected_truck_name}'."
-                                    allow_cancel = False
-                                if click_wos and wo_num:
-                                    canceled = await self.cancel_work_order_via_dispatch_summary(
-                                        work_order_number=wo_num,
-                                        truck_name=t_name,
-                                        tech_name=tech_display,
-                                        reason=cancel_msg,
-                                        allow_tech_cancel=allow_cancel
-                                    )
-                                    if canceled:
-                                        canceled_wos.add(wo_num)
-                                        total_reconciled += 1
+                            if is_match:
+                                print(f"  ✅ Truck '{t_name}' (WO #{wo_num}) matches JSON template for '{tech_display}'.")
                             else:
-                                kept_matched_truck = True
-                                print(f"  ✅ Truck '{t_name}' (WO #{wo_num}) matches JSON template for '{tech_display}'. Keeping.")
+                                print(f"  ℹ️ Truck '{t_name}' (WO #{wo_num}) on '{tech_display}' does not match expected '{expected_truck_name}' (Cancellation disabled; preserving).")
 
-                # ── Duplicate Truck Detection Across Technicians ──
-                # If the same truck appears on multiple work orders, keep the one on the expected tech and cancel the other(s).
+                # ── Duplicate Truck Detection Across Technicians (Informational Only - NO Cancellation) ──
                 truck_to_wos = {}
                 for r in truck_headers:
-                    wo = r.get("work_order_number")
-                    if wo in canceled_wos:
-                        continue
                     t_name = r.get("name", "")
                     if "👥" in t_name or "helper" in t_name.lower() or "laborer" in t_name.lower():
                         continue
@@ -2563,42 +2268,17 @@ class AssetAssignmentScraper(BaseScraper):
                     if len(w_list) > 1:
                         truck_display = w_list[0].get("name", "")
                         expected_tech = self.get_expected_tech_for_truck(truck_display)
-                        c_exp_tech = self.canonical_str(expected_tech) if expected_tech else ""
-                        print(f"\n⚠️ Truck '{truck_display}' appears {len(w_list)} times on board across work orders: {[w.get('work_order_number') for w in w_list]}")
-                        print(f"  🎯 Expected technician for '{truck_display}' is: '{expected_tech or 'None'}'")
 
-                        # Find if one is already on the expected tech
-                        best_wo = None
-                        for w in w_list:
-                            if expected_tech and self.is_tech_match(w.get("tech_name", ""), expected_tech):
-                                best_wo = w
-                                break
-                        if not best_wo:
-                            best_wo = w_list[0]
+                        print(f"\n⚠️ Truck '{truck_display}' appears on {len(w_list)} work orders across technicians: {[w.get('work_order_number') for w in w_list]}")
+                        print(f"  🎯 Expected technician for '{truck_display}' is: '{expected_tech or 'None'}'")
 
                         for w in w_list:
                             wo_num = w.get("work_order_number")
                             t_tech = w.get("tech_name")
-                            if w == best_wo:
-                                print(f"  ✅ Keeping primary WO #{wo_num} for '{truck_display}' (Tech: '{t_tech}').")
+                            if expected_tech and self.is_tech_match(t_tech or "", expected_tech):
+                                print(f"  ✅ WO #{wo_num} for '{truck_display}' is on expected tech '{t_tech}'.")
                             else:
-                                print(f"  🚨 Duplicate instance of truck '{truck_display}' (WO #{wo_num} on tech '{t_tech}')! Initiating cancellation...")
-                                if click_wos and wo_num:
-                                    canceled = await self.cancel_work_order_via_dispatch_summary(
-                                        work_order_number=wo_num,
-                                        truck_name=truck_display,
-                                        tech_name=t_tech,
-                                        reason=f"Duplicate work order for truck '{truck_display}'. Primary assignment kept on WO #{best_wo.get('work_order_number')}.",
-                                        allow_tech_cancel=True,
-                                        primary_wo_number=best_wo.get("work_order_number")
-                                    )
-                                    if canceled:
-                                        canceled_wos.add(wo_num)
-                                        total_reconciled += 1
-
-                # Filter out canceled work orders
-                if canceled_wos:
-                    truck_headers = [r for r in truck_headers if r.get("work_order_number") not in canceled_wos]
+                                print(f"  ℹ️ WO #{wo_num} for '{truck_display}' is on '{t_tech}' (Cancellation disabled; preserving).")
 
                 if click_wos:
                     print(f"\n🖱️ Reconciling {len(truck_headers)} truck work orders with Dashboard config for {normalized_date}...")
@@ -2610,20 +2290,7 @@ class AssetAssignmentScraper(BaseScraper):
 
                         # Check if this truck or header is turned OFF in Dashboard template
                         if self.is_item_turned_off_in_dashboard(truck_name, curr_tech_table):
-                            if is_completed:
-                                print(f"[{idx}/{len(truck_headers)}] ⏸️ Truck '{truck_name}' (WO #{wo_num}) is turned OFF in Dashboard, but already COMPLETED in FieldEdge. Preserving.")
-                                continue
-                            print(f"[{idx}/{len(truck_headers)}] 🚨 Truck '{truck_name}' (WO #{wo_num} on tech '{curr_tech_table}') is turned OFF in Dashboard template and NOT completed! Canceling...")
-                            canceled = await self.cancel_work_order_via_dispatch_summary(
-                                work_order_number=wo_num,
-                                truck_name=truck_name,
-                                tech_name=curr_tech_table,
-                                reason=f"Vehicle '{truck_name}' is turned OFF in Dashboard template.",
-                                allow_tech_cancel=True
-                            )
-                            if canceled:
-                                canceled_wos.add(wo_num)
-                                total_reconciled += 1
+                            print(f"[{idx}/{len(truck_headers)}] ⏸️ Truck '{truck_name}' (WO #{wo_num} on tech '{curr_tech_table}') is turned OFF in Dashboard template. Skipping without canceling.")
                             continue
 
                         expected_tech = self.get_expected_tech_for_truck(truck_name)
@@ -2634,7 +2301,6 @@ class AssetAssignmentScraper(BaseScraper):
 
                         if wo_num:
                             # SMART PRE-CHECK: If the truck is ALREADY assigned to the expected technician in the table, skip sidepanel
-                            curr_tech_table = r.get("tech_name", "")
                             if curr_tech_table and expected_tech and self.is_tech_match(curr_tech_table, expected_tech):
                                 print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' (matches '{expected_tech}'). Skipping sidepanel.")
                                 continue
@@ -2650,17 +2316,7 @@ class AssetAssignmentScraper(BaseScraper):
                                         break
 
                             if expected_tech_already_has_it:
-                                # The expected tech already has this truck! This assignment on curr_tech_table is an unwanted duplicate/wrong assignment!
-                                print(f"[{idx}/{len(truck_headers)}] 🚨 Truck '{truck_name}' (WO #{wo_num}) is on '{curr_tech_table}', but expected tech '{expected_tech}' ALREADY has '{truck_name}'. Canceling wrong assignment...")
-                                canceled = await self.cancel_work_order_via_dispatch_summary(
-                                    work_order_number=wo_num,
-                                    truck_name=truck_name,
-                                    tech_name=curr_tech_table,
-                                    reason=f"Wrong tech assignment: Truck '{truck_name}' already exists on '{expected_tech}'. Canceling extra on '{curr_tech_table}'."
-                                )
-                                if canceled:
-                                    canceled_wos.add(wo_num)
-                                    total_reconciled += 1
+                                print(f"[{idx}/{len(truck_headers)}] ℹ️ Truck '{truck_name}' (WO #{wo_num}) is on '{curr_tech_table}', but expected tech '{expected_tech}' ALREADY has '{truck_name}'. Skipping without canceling.")
                                 continue
 
                             total_checked += 1
