@@ -333,7 +333,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
         async function fetchStatus() {
             try {
-                const res = await fetch('/api');
+                const apiPath = window.location.pathname.startsWith('/dispatch') ? '/dispatch/api' : '/api';
+                const res = await fetch(apiPath);
                 if (!res.ok) return;
                 const data = await res.json();
                 updateUI(data);
@@ -418,7 +419,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             btn.disabled = true;
             btn.textContent = 'Triggering...';
             try {
-                const res = await fetch('/api/trigger', { method: 'POST' });
+                const triggerPath = window.location.pathname.startsWith('/dispatch') ? '/dispatch/api/trigger' : '/api/trigger';
+                const res = await fetch(triggerPath, { method: 'POST' });
                 const json = await res.json();
                 alert(json.message || 'Run triggered successfully!');
                 closeModal();
@@ -588,6 +590,8 @@ app.add_middleware(
 
 
 @app.get("/", response_class=HTMLResponse)
+@app.get("/dispatch", response_class=HTMLResponse)
+@app.get("/dispatch/", response_class=HTMLResponse)
 async def get_dashboard():
     """Serves the Atlassian Statuspage-inspired monitoring dashboard."""
     return HTMLResponse(content=HTML_TEMPLATE, status_code=200)
@@ -595,18 +599,22 @@ async def get_dashboard():
 
 @app.get("/api")
 @app.get("/api/status")
+@app.get("/dispatch/api")
+@app.get("/dispatch/api/status")
 async def get_status_json():
     """Returns the current real-time automation status in JSON format."""
     return JSONResponse(content=STATUS_DATA)
 
 
 @app.get("/health")
+@app.get("/dispatch/health")
 async def get_health():
     """Simple healthcheck endpoint."""
     return {"status": "ok", "service": STATUS_DATA["service"], "mode": STATUS_DATA["mode"]}
 
 
 @app.post("/api/trigger")
+@app.post("/dispatch/api/trigger")
 async def trigger_run(background_tasks: BackgroundTasks):
     """Trigger an immediate manual automation run."""
     args = getattr(app.state, "args", None) or DefaultArgs()
@@ -632,6 +640,7 @@ async def trigger_run(background_tasks: BackgroundTasks):
 
 
 @app.get("/assets/{filename}")
+@app.get("/dispatch/assets/{filename}")
 async def get_asset(filename: str):
     """Serve logo, favicon, and other assets cleanly."""
     clean_name = os.path.basename(filename)
