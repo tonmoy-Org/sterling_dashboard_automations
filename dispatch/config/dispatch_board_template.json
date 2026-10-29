@@ -782,6 +782,30 @@
       "active": true
     },
     {
+      "name": "🏢 INTERNAL OPS. 3",
+      "start_time": "05:00 PM",
+      "duration": "1:45",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "tech_name": "s6",
+      "active": true
+    },
+    {
+      "name": "📝 REPORTS NEEDED",
+      "start_time": "05:00 PM",
+      "duration": "1:30",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "tech_name": "s7",
+      "active": true
+    },
+    {
+      "name": "📚TRAINING",
+      "start_time": "05:15 PM",
+      "duration": "1:30",
+      "priority": "[4] SHOP / OPS (Tracking)",
+      "tech_name": "s7",
+      "active": true
+    },
+    {
       "name": "EXCUSED",
       "start_time": "05:00 AM",
       "duration": "2:30",

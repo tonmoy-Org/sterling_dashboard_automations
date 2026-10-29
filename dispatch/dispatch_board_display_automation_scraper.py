@@ -938,6 +938,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 pass
                         except Exception:
                             pass
+
+                # If STILL 0 options and the search term contains emoji/non-ASCII (e.g. '📝REPORTS NEEDED'),
+                # strip emoji and retry with plain-ASCII text only
+                if (await options.count()) == 0:
+                    stripped_ascii = re.sub(r'[^\x00-\x7F]+', '', clean_search).strip()
+                    if stripped_ascii and stripped_ascii != clean_search:
+                        print(f"  -> No options found for '{clean_search}'. Retrying customer search with ASCII-only term: '{stripped_ascii}'...")
+                        try:
+                            await search_input.focus()
+                            await search_input.fill("")
+                            await search_input.fill(stripped_ascii)
+                            await self.page.wait_for_timeout(400)
+                            await search_input.press("Enter")
+                            await self.page.wait_for_timeout(3000)
+                            try:
+                                await options.first.wait_for(state="visible", timeout=5000)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
             else:
                 # If not press_enter and 0 options found, fallback:
                 if (await options.count()) == 0:
@@ -1067,8 +1087,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if press_enter:
                     # For customer search, enter selects current highlighted input
                     await search_input.press("Enter")
-                    await self.page.wait_for_timeout(500)
-                    return True
+                    await self.page.wait_for_timeout(1500)
+                    # Verify that a customer was actually selected after pressing Enter.
+                    # Without this check, an empty/failed search returns True, causing a
+                    # 30-second Save modal hang because FieldEdge blocks save with no customer.
+                    selected_check = dropdown.locator(".vs__selected, .selected-tag").first
+                    if await selected_check.count() > 0 and await selected_check.is_visible():
+                        return True
+                    # No selection made — do NOT proceed with empty customer field
+                    print(f"  -> Press-Enter fallback: No customer was selected for '{option_text}' (search returned no valid FieldEdge results). Aborting to prevent stuck Save modal.")
+                    return False
                 else:
                     print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
                     return False
