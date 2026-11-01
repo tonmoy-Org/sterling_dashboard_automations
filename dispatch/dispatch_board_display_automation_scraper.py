@@ -413,9 +413,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
         if c1 == c2:
             return True
-        # Prefix match for tech codes (e.g. 'p2' matching 'p2asher', 'f2' matching 'f2kelvin', 'p' matching 'pgene')
-        if re.match(rf'^{re.escape(c2)}(?:\D|$)', c1) or re.match(rf'^{re.escape(c1)}(?:\D|$)', c2):
-            return True
         words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
         words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
         for w1 in words1:
@@ -1049,12 +1046,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await opt_el.click(force=True)
                         return True
 
-                # Pass 2.5: Tech code prefix match (e.g. 'p2' matching 'p2 Asher', 'f2' matching 'f2 Kelvin')
-                if target_canon and re.match(rf'^{re.escape(target_canon)}(?:\D|$)', c_raw):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
                 # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
                 if core_name and len(core_name) >= 3:
                     if core_name in norm_raw or core_name in c_raw:
@@ -1138,7 +1129,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         first_opt = options.first
                         if await first_opt.is_visible():
                             f_raw = (await first_opt.text_content() or "").strip()
-                            if self.is_tech_match(f_raw, option_text) or bool(target_canon and re.match(rf'^{re.escape(target_canon)}(?:\D|$)', self.canonical_str(f_raw))):
+                            if self.canonical_str(f_raw) == target_canon or self.is_tech_match(f_raw, option_text):
                                 await first_opt.click(force=True)
                                 return True
                     # No selection made — do NOT proceed with empty field
@@ -1328,8 +1319,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     selected_tech_text == tech_name or
                     clean_actual_tech == clean_target_tech or
                     (len(clean_actual_tech) >= 4 and len(clean_target_tech) >= 4 and (clean_actual_tech in clean_target_tech or clean_target_tech in clean_actual_tech)) or
-                    self.is_tech_match(selected_tech_text, tech_name) or
-                    bool(clean_target_tech and re.match(rf'^{re.escape(clean_target_tech)}(?:\D|$)', clean_actual_tech))
+                    self.is_tech_match(selected_tech_text, tech_name)
                 )
                 if not tech_verified:
                     print(f"🛑 STRICT SAFETY STOP: Primary Tech modal value is '{selected_tech_text}', but expected '{tech_name}'! Aborting work order to prevent misassignment.")
@@ -1446,8 +1436,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     final_tech == tech_name or
                     clean_f == clean_t or
                     (len(clean_f) >= 4 and len(clean_t) >= 4 and (clean_f in clean_t or clean_t in clean_f)) or
-                    self.is_tech_match(final_tech, tech_name) or
-                    bool(clean_t and re.match(rf'^{re.escape(clean_t)}(?:\D|$)', clean_f))
+                    self.is_tech_match(final_tech, tech_name)
                 )
                 if not final_verified:
                     print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Primary Tech '{final_tech}' != expected '{tech_name}'. Aborting save.")
