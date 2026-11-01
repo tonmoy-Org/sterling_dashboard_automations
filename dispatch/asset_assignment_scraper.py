@@ -2133,28 +2133,18 @@ class AssetAssignmentScraper(BaseScraper):
 
             print(f"  🖱️ [Cancel WO #{wo_str}] Opening work order details...")
             try:
-                async with new_page.context.expect_page(timeout=5000) as spawned_info:
-                    await wo_span.click(button="right")
-                    await new_page.wait_for_timeout(500)
-                    action_item = new_page.locator("//li[contains(@class,'action')] | //li[contains(text(),'Open')]").first
-                    await action_item.click(timeout=3000)
-                wo_page = await spawned_info.value
-                await wo_page.wait_for_load_state()
-                print(f"  📄 Opened WO #{wo_str} details in spawned tab.")
+                await wo_span.click()
+                await new_page.wait_for_timeout(2000)
             except Exception as e1:
-                print(f"  ℹ️ Context menu open did not spawn tab ({e1}). Clicking direct link...")
-                try:
-                    await wo_span.click()
-                    await new_page.wait_for_timeout(3000)
-                    wo_page = new_page
-                except Exception as e2:
-                    print(f"  ℹ️ Direct click failed ({e2}). Double-clicking row...")
-                    await target_row.dblclick()
-                    await new_page.wait_for_timeout(3000)
-                    wo_page = new_page
+                print(f"  ℹ️ Direct click failed ({e1}). Trying double-click on row...")
+                await target_row.dblclick()
+                await new_page.wait_for_timeout(2000)
 
             # Process cancellation on Work Order page
-            save_btn_selector = "button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button'], button:has-text('Save')"
+            save_btn_selector = self.rules.get(
+                "unassigned_save_btn_selector",
+                "button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button']"
+            )
             try:
                 await wo_page.wait_for_selector(save_btn_selector, state="visible", timeout=20000)
             except Exception:
@@ -2171,29 +2161,49 @@ class AssetAssignmentScraper(BaseScraper):
             print("  ⏳ Waiting for Save / Dispatch Summary modal to appear...")
             await wo_page.wait_for_timeout(2000)
 
-            # Select 'Canceled' radio
-            radio_selector = ".field-radio-container:has-text('Canceled') .field-radio, input[type='radio'][value*='Cancel'], .field-radio-container:has-text('Cancelled') .field-radio"
-            notes_selector = "textarea[name='CancellationNotes'], textarea[name='notes'], textarea"
-            confirm_btn_selector = "button#confirm-save-dispatch-summary, button:has-text('Confirm'), button:has-text('Yes'), button:has-text('Submit')"
-            cancellation_reason = reason or "Unexpected truck assignment canceled by dispatch automation."
+            # Select 'Canceled' radio in Save modal (exactly like unassigned_job_clear_scraper)
+            radio_btn = self.rules.get("unassigned_canceled_radio_selector", ".field-radio-container:has-text('Canceled') .field-radio")
+            notes_sel = self.rules.get("unassigned_notes_textarea_selector", "textarea[name='CancellationNotes']")
+            confirm_btn_sel = self.rules.get("unassigned_confirm_btn_selector", "button#confirm-save-dispatch-summary, button:has-text('Confirm'), button:has-text('Yes'), button:has-text('Submit')")
+            cancel_reason_text = reason or self.rules.get("unassigned_cancellation_reason", "Duplicate visual aid work order created by dispatch board automation.")
 
             print(f"  🔘 Selecting 'Canceled' radio in Save modal...")
             try:
-                radio_elem = wo_page.locator(radio_selector).first
-                await radio_elem.wait_for(state="visible", timeout=7000)
-                await radio_elem.click()
+                await wo_page.wait_for_selector(radio_btn, state="visible", timeout=7000)
+                await wo_page.click(radio_btn)
             except Exception as inner_e:
-                print(f"  ⚠️ Primary radio selector failed ({inner_e}), trying text fallback...")
-                alt_radio = wo_page.locator("text='Canceled'").first
-                await alt_radio.click()
+                print(f"  ⚠️ Primary radio selector failed ({inner_e}), trying fallback selector...")
+                alt_radio = ".field-radio-container:has-text('Canceled') .field-radio"
+                try:
+                    await wo_page.wait_for_selector(alt_radio, state="visible", timeout=5000)
+                    await wo_page.click(alt_radio)
+                except Exception:
+                    await wo_page.locator("text='Canceled'").first.click()
 
-            print(f"  📝 Entering cancellation reason: '{cancellation_reason}'...")
-            try:
-                notes_elem = wo_page.locator(notes_selector).first
-                if await notes_elem.is_visible(timeout=3000):
-                    await notes_elem.fill(cancellation_reason)
-            except Exception as note_e:
-                print(f"  ℹ️ Notes textarea skipped: {note_e}")
+            # Wait for cancellation notes textarea to appear in modal
+            await wo_page.wait_for_timeout(1000)
+
+            print(f"  📝 Entering cancellation reason: '{cancel_reason_text}'...")
+            filled = False
+            for target_sel in [notes_sel, "textarea[name='CancellationNotes']", "textarea[name='notes']", ".modal textarea", ".v-modal textarea", "textarea:visible"]:
+                try:
+                    await wo_page.wait_for_selector(target_sel, state="visible", timeout=3000)
+                    await wo_page.fill(target_sel, cancel_reason_text)
+                    print(f"  ✅ Cancellation reason entered successfully using '{target_sel}'.")
+                    filled = True
+                    break
+                except Exception:
+                    continue
+
+            if not filled:
+                print(f"  ⚠️ Retrying direct fill on '{notes_sel}'...")
+                try:
+                    await wo_page.fill(notes_sel, cancel_reason_text)
+                    print("  ✅ Direct fill on cancellation notes succeeded.")
+                except Exception as note_e:
+                    print(f"  ❌ Could not fill cancellation notes: {note_e}")
+
+            await wo_page.wait_for_timeout(1000)
 
             print(f"  ✅ Confirming cancellation for WO #{wo_str}...")
             try:
@@ -2201,7 +2211,7 @@ class AssetAssignmentScraper(BaseScraper):
                 await confirm_btn.click(timeout=10000)
             except Exception:
                 print("  -> Fallback confirm button click...")
-                await wo_page.locator(f"{confirm_btn_selector} >> visible=true").first.click(timeout=10000)
+                await wo_page.locator(f"{confirm_btn_sel} >> visible=true").first.click(timeout=10000)
 
             await wo_page.wait_for_timeout(4000)
             print(f"  🎉 Successfully canceled WO #{wo_str}!")
