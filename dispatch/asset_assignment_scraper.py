@@ -1723,7 +1723,7 @@ class AssetAssignmentScraper(BaseScraper):
                         }
                     }
                 }
-                let note = '';
+                note = '';
                 const noteEl = document.querySelector('.summary-note_Dk8T7') ||
                                document.querySelector('[class*="summary-note"]') ||
                                document.querySelector('.content_cNaPa .summary-note_Dk8T7') ||
