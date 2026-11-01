@@ -2042,8 +2042,195 @@ class AssetAssignmentScraper(BaseScraper):
                 pass
             return False
 
-    async def click_work_order(self, work_order_number: str) -> bool:
-        return await self.click_and_reconcile_work_order(work_order_number)
+    async def cancel_work_order_via_list(self, wo_number: str, reason: str = "") -> bool:
+        """
+        Cancels a work order via FieldEdge Work Order List (https://login.fieldedge.com/#/List/0).
+        1. Opens a new tab on the browser context.
+        2. Navigates to https://login.fieldedge.com/#/List/0.
+        3. Searches for the work order number in input#search.
+        4. Finds the row in table.fixed-table tbody.fixed-body tr.regular.
+        5. Checks the status: if already 'Completed', skips cancellation.
+        6. If not completed, clicks the row/WO# to open the work order page.
+        7. On the work order page, clicks Save -> selects 'Canceled' radio -> enters note -> confirms save.
+        8. Closes the new tab and returns.
+        """
+        if not wo_number:
+            return False
+
+        wo_str = str(wo_number).strip()
+        print(f"\n🗑️ [Cancel WO #{wo_str}] Initiating cancellation via FieldEdge List (https://login.fieldedge.com/#/List/0)...")
+        new_page = None
+        wo_page = None
+
+        try:
+            new_page = await self.page.context.new_page()
+            list_url = "https://login.fieldedge.com/#/List/0"
+            print(f"  🌐 [Cancel WO #{wo_str}] Navigating to {list_url}...")
+            try:
+                await new_page.goto(list_url, wait_until="domcontentloaded", timeout=45000)
+            except Exception as nav_err:
+                print(f"  ⚠️ Navigation warning: {nav_err}")
+
+            if "login" in (new_page.url or "").lower():
+                print("  🔑 Login required on new tab, performing FieldEdge login...")
+                await self.login_fieldedge(page=new_page)
+                try:
+                    await new_page.goto(list_url, wait_until="domcontentloaded", timeout=45000)
+                except Exception:
+                    pass
+
+            # Wait for search box to be visible
+            print(f"  🔍 [Cancel WO #{wo_str}] Waiting for search input...")
+            search_input = new_page.locator("input#search, .custom-search input.search").first
+            await search_input.wait_for(state="visible", timeout=30000)
+            await new_page.wait_for_timeout(1000)
+
+            # Clear any previous search text
+            clear_btn = new_page.locator("button.clear-search:visible")
+            if await clear_btn.count() > 0:
+                try:
+                    await clear_btn.first.click()
+                    await new_page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+            await search_input.click()
+            await search_input.fill("")
+            await search_input.fill(wo_str)
+            await search_input.press("Enter")
+            print(f"  🔍 [Cancel WO #{wo_str}] Entered '{wo_str}' into search and pressed Enter. Waiting for results...")
+            await new_page.wait_for_timeout(2500)
+
+            # Find matching row in table
+            target_row = None
+            target_status = ""
+            for attempt in range(12):
+                rows = new_page.locator("table.fixed-table tbody.fixed-body tr.regular")
+                row_count = await rows.count()
+                for i in range(row_count):
+                    r = rows.nth(i)
+                    r_text = await r.inner_text()
+                    if wo_str in r_text:
+                        target_row = r
+                        cells = r.locator("td")
+                        if await cells.count() >= 4:
+                            target_status = (await cells.nth(3).inner_text()).strip()
+                        break
+                if target_row:
+                    break
+                await new_page.wait_for_timeout(1000)
+
+            if not target_row:
+                print(f"  ⚠️ [Cancel WO #{wo_str}] No table row found matching WO #{wo_str} in search results.")
+                return False
+
+            print(f"  📋 [Cancel WO #{wo_str}] Found row in search results. Status: '{target_status}'.")
+            if "complete" in target_status.lower():
+                print(f"  🛑 [Cancel WO #{wo_str}] WO #{wo_str} is already '{target_status}'. Skipping cancellation to protect completed work order.")
+                return False
+
+            # Open Work Order page
+            wo_page = new_page
+            wo_span = target_row.locator(".display-name-cell").first
+            if await wo_span.count() == 0:
+                wo_span = target_row.locator("td:nth-child(2)").first
+
+            print(f"  🖱️ [Cancel WO #{wo_str}] Opening work order details...")
+            try:
+                async with new_page.context.expect_page(timeout=5000) as spawned_info:
+                    await wo_span.click(button="right")
+                    await new_page.wait_for_timeout(500)
+                    action_item = new_page.locator("//li[contains(@class,'action')] | //li[contains(text(),'Open')]").first
+                    await action_item.click(timeout=3000)
+                wo_page = await spawned_info.value
+                await wo_page.wait_for_load_state()
+                print(f"  📄 Opened WO #{wo_str} details in spawned tab.")
+            except Exception as e1:
+                print(f"  ℹ️ Context menu open did not spawn tab ({e1}). Clicking direct link...")
+                try:
+                    await wo_span.click()
+                    await new_page.wait_for_timeout(3000)
+                    wo_page = new_page
+                except Exception as e2:
+                    print(f"  ℹ️ Direct click failed ({e2}). Double-clicking row...")
+                    await target_row.dblclick()
+                    await new_page.wait_for_timeout(3000)
+                    wo_page = new_page
+
+            # Process cancellation on Work Order page
+            save_btn_selector = "button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button'], button:has-text('Save')"
+            try:
+                await wo_page.wait_for_selector(save_btn_selector, state="visible", timeout=20000)
+            except Exception:
+                print(f"  ⚠️ Save button not immediately visible for WO #{wo_str}, waiting 3s...")
+                await wo_page.wait_for_timeout(3000)
+
+            save_btn = wo_page.locator(save_btn_selector).first
+            if await save_btn.count() == 0:
+                print(f"  ❌ Save button not found on Work Order page for WO #{wo_str}.")
+                return False
+
+            print(f"  💾 Clicking Save button on WO #{wo_str}...")
+            await save_btn.click()
+            print("  ⏳ Waiting for Save / Dispatch Summary modal to appear...")
+            await wo_page.wait_for_timeout(2000)
+
+            # Select 'Canceled' radio
+            radio_selector = ".field-radio-container:has-text('Canceled') .field-radio, input[type='radio'][value*='Cancel'], .field-radio-container:has-text('Cancelled') .field-radio"
+            notes_selector = "textarea[name='CancellationNotes'], textarea[name='notes'], textarea"
+            confirm_btn_selector = "button#confirm-save-dispatch-summary, button:has-text('Confirm'), button:has-text('Yes'), button:has-text('Submit')"
+            cancellation_reason = reason or "Unexpected truck assignment canceled by dispatch automation."
+
+            print(f"  🔘 Selecting 'Canceled' radio in Save modal...")
+            try:
+                radio_elem = wo_page.locator(radio_selector).first
+                await radio_elem.wait_for(state="visible", timeout=7000)
+                await radio_elem.click()
+            except Exception as inner_e:
+                print(f"  ⚠️ Primary radio selector failed ({inner_e}), trying text fallback...")
+                alt_radio = wo_page.locator("text='Canceled'").first
+                await alt_radio.click()
+
+            print(f"  📝 Entering cancellation reason: '{cancellation_reason}'...")
+            try:
+                notes_elem = wo_page.locator(notes_selector).first
+                if await notes_elem.is_visible(timeout=3000):
+                    await notes_elem.fill(cancellation_reason)
+            except Exception as note_e:
+                print(f"  ℹ️ Notes textarea skipped: {note_e}")
+
+            print(f"  ✅ Confirming cancellation for WO #{wo_str}...")
+            try:
+                confirm_btn = wo_page.locator("button#confirm-save-dispatch-summary:visible").first
+                await confirm_btn.click(timeout=10000)
+            except Exception:
+                print("  -> Fallback confirm button click...")
+                await wo_page.locator(f"{confirm_btn_selector} >> visible=true").first.click(timeout=10000)
+
+            await wo_page.wait_for_timeout(4000)
+            print(f"  🎉 Successfully canceled WO #{wo_str}!")
+            return True
+
+        except Exception as err:
+            print(f"  ❌ Error cancelling WO #{wo_str}: {err}")
+            return False
+
+        finally:
+            try:
+                if wo_page and wo_page != new_page:
+                    await wo_page.close()
+            except Exception:
+                pass
+            try:
+                if new_page:
+                    await new_page.close()
+            except Exception:
+                pass
+            try:
+                if self.page:
+                    await self.page.bring_to_front()
+            except Exception:
+                pass
 
     async def reconcile_single_date(
         self,
@@ -2243,6 +2430,7 @@ class AssetAssignmentScraper(BaseScraper):
 
                         print(f"  🎯 Template expected truck for '{tech_display}' is: '{expected_truck_name}'")
 
+                        matched_found = False
                         for r_truck in t_list:
                             t_name = r_truck.get("name", "")
                             c_t_name = self.canonical_str(t_name)
@@ -2255,10 +2443,24 @@ class AssetAssignmentScraper(BaseScraper):
                                     c_t_name in c_exp_truck
                                 )
                             )
-                            if is_match:
+                            if is_match and not matched_found:
+                                matched_found = True
                                 print(f"  ✅ Truck '{t_name}' (WO #{wo_num}) matches JSON template for '{tech_display}'.")
                             else:
-                                print(f"  ℹ️ Truck '{t_name}' (WO #{wo_num}) on '{tech_display}' does not match expected '{expected_truck_name}' (Cancellation disabled; preserving).")
+                                print(f"  ℹ️ Truck '{t_name}' (WO #{wo_num}) on '{tech_display}' does not match expected '{expected_truck_name}'. Initiating cancellation...")
+                                if click_wos and wo_num:
+                                    success = await self.cancel_work_order_via_list(
+                                        wo_number=wo_num,
+                                        reason=f"Extra/mismatched truck '{t_name}' on tech '{tech_display}' (expected '{expected_truck_name}')."
+                                    )
+                                    if success:
+                                        print(f"  🗑️ Cancelled extra/mismatched truck WO #{wo_num} ({t_name}) on '{tech_display}'.")
+                                        truck_headers = [h for h in truck_headers if str(h.get("work_order_number")) != str(wo_num)]
+                                        total_reconciled += 1
+                                    else:
+                                        print(f"  ⚠️ Could not cancel WO #{wo_num} ({t_name}) on '{tech_display}'. Preserving.")
+                                else:
+                                    print(f"  ℹ️ Cancellation skipped (click_wos={click_wos}, wo_num={wo_num}).")
 
                 # ── Duplicate Truck Detection Across Technicians (Informational Only - NO Cancellation) ──
                 truck_to_wos = {}
@@ -2288,7 +2490,7 @@ class AssetAssignmentScraper(BaseScraper):
                             if expected_tech and self.is_tech_match(t_tech or "", expected_tech):
                                 print(f"  ✅ WO #{wo_num} for '{truck_display}' is on expected tech '{t_tech}'.")
                             else:
-                                print(f"  ℹ️ WO #{wo_num} for '{truck_display}' is on '{t_tech}' (Cancellation disabled; preserving).")
+                                print(f"  ℹ️ WO #{wo_num} for '{truck_display}' is on '{t_tech}'.")
 
                 if click_wos:
                     print(f"\n🖱️ Reconciling {len(truck_headers)} truck work orders with Dashboard config for {normalized_date}...")
@@ -2326,8 +2528,21 @@ class AssetAssignmentScraper(BaseScraper):
                                         break
 
                             if expected_tech_already_has_it:
-                                print(f"[{idx}/{len(truck_headers)}] ℹ️ Truck '{truck_name}' (WO #{wo_num}) is on '{curr_tech_table}', but expected tech '{expected_tech}' ALREADY has '{truck_name}'. Skipping without canceling.")
-                                continue
+                                print(f"[{idx}/{len(truck_headers)}] ℹ️ Truck '{truck_name}' (WO #{wo_num}) is on '{curr_tech_table}', but expected tech '{expected_tech}' ALREADY has '{truck_name}'. Initiating cancellation of duplicate WO...")
+                                if click_wos and wo_num:
+                                    success = await self.cancel_work_order_via_list(
+                                        wo_number=wo_num,
+                                        reason=f"Duplicate truck '{truck_name}' on '{curr_tech_table}' (expected tech '{expected_tech}' already has it)."
+                                    )
+                                    if success:
+                                        print(f"[{idx}/{len(truck_headers)}] 🗑️ Cancelled duplicate truck WO #{wo_num} ({truck_name}) on '{curr_tech_table}'.")
+                                        total_reconciled += 1
+                                        continue
+                                    else:
+                                        print(f"[{idx}/{len(truck_headers)}] ⚠️ Could not cancel duplicate WO #{wo_num}. Preserving.")
+                                        continue
+                                else:
+                                    continue
 
                             total_checked += 1
                             print(f"\n[{idx}/{len(truck_headers)}] Checking WO #{wo_num} ({truck_name}) on {normalized_date} (Reassigning from '{curr_tech_table}' to expected '{expected_tech}')...")
