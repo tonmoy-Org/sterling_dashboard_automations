@@ -2323,8 +2323,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                                 if tech_match:
                                     for wo in wo_list:
-                                        if self.check_item_match(wo, canon_target, time_key, is_service_wo=is_service_wo):
-                                            board_count += 1
+                                        if not wo.get("is_appointment"):
+                                            if self.check_item_match(wo, canon_target, time_key, is_service_wo=is_service_wo):
+                                                board_count += 1
+                                        else:
+                                            # For appointments (PTO/OFF/SICK/TBD): only match if EXACT same start time!
+                                            w_time = wo.get("time_key", "")
+                                            norm_target = self.normalize_time_key(time_key)
+                                            norm_wo = self.normalize_time_key(w_time)
+                                            if norm_target and norm_wo and norm_target == norm_wo:
+                                                board_count += 1
                          
                             if board_count >= target_count_idx:
                                 print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) already exists on the board for tech '{h_tech}'. Recording in persistent history & skipping creation.")
