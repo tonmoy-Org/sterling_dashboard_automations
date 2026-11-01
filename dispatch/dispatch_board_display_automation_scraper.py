@@ -2327,11 +2327,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                             if self.check_item_match(wo, canon_target, time_key, is_service_wo=is_service_wo):
                                                 board_count += 1
                                         else:
-                                            # For appointments (PTO/OFF/SICK/TBD): only match if EXACT same start time!
-                                            w_time = wo.get("time_key", "")
-                                            norm_target = self.normalize_time_key(time_key)
-                                            norm_wo = self.normalize_time_key(w_time)
-                                            if norm_target and norm_wo and norm_target == norm_wo:
+                                            # For appointments (PTO/OFF/SICK/TBD): skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
+                                            appt_matched = False
+                                            if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
+                                                try:
+                                                    target_t = datetime.strptime(self.normalize_time_key(time_key), "%I:%M %p").time()
+                                                    if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
+                                                        appt_matched = True
+                                                except Exception:
+                                                    pass
+                                            if not appt_matched and wo.get("time_key") and time_key:
+                                                if self.normalize_time_key(wo["time_key"]) == self.normalize_time_key(time_key):
+                                                    appt_matched = True
+                                            if appt_matched:
                                                 board_count += 1
                          
                             if board_count >= target_count_idx:
@@ -2484,11 +2492,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                  if name_match and time_match:
                                                      board_count += 1
                                              else:
-                                                 # For appointments (PTO/OFF/SICK/TBD): only match if EXACT same start time!
-                                                 w_time = wo.get("time_key", "")
-                                                 norm_target = self.normalize_time_key(time_key)
-                                                 norm_wo = self.normalize_time_key(w_time)
-                                                 if norm_target and norm_wo and norm_target == norm_wo:
+                                                 # For appointments (PTO/OFF/SICK/TBD): skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
+                                                 appt_matched = False
+                                                 if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
+                                                     try:
+                                                         target_t = datetime.strptime(self.normalize_time_key(time_key), "%I:%M %p").time()
+                                                         if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
+                                                             appt_matched = True
+                                                     except Exception:
+                                                         pass
+                                                 if not appt_matched and wo.get("time_key") and time_key:
+                                                     if self.normalize_time_key(wo["time_key"]) == self.normalize_time_key(time_key):
+                                                         appt_matched = True
+                                                 if appt_matched:
                                                      board_count += 1
                              
                                 if board_count >= target_count_idx:
@@ -2586,11 +2602,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                              if name_match and time_match:
                                                  board_count += 1
                                          else:
-                                             # For appointments (PTO/OFF/SICK/TBD): only match if EXACT same start time!
-                                             w_time = wo.get("time_key", "")
-                                             norm_target = self.normalize_time_key(time_key)
-                                             norm_wo = self.normalize_time_key(w_time)
-                                             if norm_target and norm_wo and norm_target == norm_wo:
+                                             # For appointments (PTO/OFF/SICK/TBD): skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
+                                             appt_matched = False
+                                             if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
+                                                 try:
+                                                     target_t = datetime.strptime(self.normalize_time_key(time_key), "%I:%M %p").time()
+                                                     if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
+                                                         appt_matched = True
+                                                 except Exception:
+                                                     pass
+                                             if not appt_matched and wo.get("time_key") and time_key:
+                                                 if self.normalize_time_key(wo["time_key"]) == self.normalize_time_key(time_key):
+                                                     appt_matched = True
+                                             if appt_matched:
                                                  board_count += 1
 
                             if board_count >= target_count_idx:
@@ -2666,11 +2690,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if tech_match:
                                     for wo in wo_list:
                                         if wo.get("is_appointment"):
-                                            # Only count as appointment match if EXACT same start time!
-                                            w_time = wo.get("time_key", "")
-                                            norm_target = self.normalize_time_key(time_key)
-                                            norm_wo = self.normalize_time_key(w_time)
-                                            if norm_target and norm_wo and norm_target == norm_wo:
+                                            # Skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
+                                            appt_matched = False
+                                            if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
+                                                try:
+                                                    target_t = datetime.strptime(self.normalize_time_key(time_key), "%I:%M %p").time()
+                                                    if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
+                                                        appt_matched = True
+                                                except Exception:
+                                                    pass
+                                            if not appt_matched and wo.get("time_key") and time_key:
+                                                if self.normalize_time_key(wo["time_key"]) == self.normalize_time_key(time_key):
+                                                    appt_matched = True
+                                            if appt_matched:
                                                 tech_off_for_day = True
                                                 break
                                             continue
