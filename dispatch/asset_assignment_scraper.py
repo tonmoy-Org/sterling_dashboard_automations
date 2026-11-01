@@ -2178,7 +2178,7 @@ class AssetAssignmentScraper(BaseScraper):
                         is_tech_set = not target_tech or self.is_tech_match(curr_tech, target_tech) or (self.canonical_str(curr_tech) == self.canonical_str(target_tech))
                         is_prio_set = not target_priority or self.is_priority_match(curr_prio, target_priority)
 
-                        if is_tech_set and is_prio_set:
+                        if is_tech_set and is_prio_set and not service_note:
                             print(f"  ⏭️ WO #{wo_num} for '{asset_name}' is ALREADY fully set (Tech: '{curr_tech}', Priority: '{curr_prio}'). Skipping update.")
                             continue
 

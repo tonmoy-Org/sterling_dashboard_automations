@@ -1441,55 +1441,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception:
                 pass
 
-            # If summary_note is provided (e.g. for service needed assets), fill it in the modal
-            if summary_note:
-                try:
-                    print(f"  📝 Entering Summary Note: '{summary_note}'...")
-                    ta_set = await self.page.evaluate("""(note) => {
-                        const allTa = Array.from(document.querySelectorAll('div.on-bottom-modal textarea, .modal textarea, div[role="dialog"] textarea, textarea'));
-                        if (!allTa.length) return false;
-                        for (const ta of allTa) {
-                            const container = ta.closest('.form-group') || ta.closest('.summary-note-container_f6fBE') || ta.parentElement;
-                            const title = container ? container.querySelector('.field-title, label, .title') : null;
-                            if (title) {
-                                const t = (title.textContent || '').toLowerCase();
-                                if (t.includes('work summary') || (t.includes('summary') && !t.includes('description'))) {
-                                    ta.focus();
-                                    ta.value = note;
-                                    ta.dispatchEvent(new Event('input', { bubbles: true }));
-                                    ta.dispatchEvent(new Event('change', { bubbles: true }));
-                                    return true;
-                                }
-                            }
-                        }
-                        const targetTa = allTa.length > 1 ? allTa[1] : allTa[0];
-                        if (targetTa) {
-                            targetTa.focus();
-                            targetTa.value = note;
-                            targetTa.dispatchEvent(new Event('input', { bubbles: true }));
-                            targetTa.dispatchEvent(new Event('change', { bubbles: true }));
-                            return true;
-                        }
-                        return false;
-                    }""", summary_note)
-                    if not ta_set:
-                        for ta_sel in [
-                            "//div[contains(@class,'field-title') and contains(normalize-space(),'Summary')]/following::textarea[1]",
-                            ".summary-note-container_f6fBE textarea",
-                            "div[class*='summary'] textarea",
-                            "textarea[name*='Summary']",
-                            "textarea[placeholder*='Summary']"
-                        ]:
-                            try:
-                                loc = self.page.locator(ta_sel).first
-                                if await loc.count() > 0 and await loc.is_visible():
-                                    await loc.fill(summary_note)
-                                    break
-                            except Exception:
-                                pass
-                except Exception as ne:
-                    print(f"  Note on filling summary note: {ne}")
-
             # Pre-save final verification: Primary Tech must STILL match tech_name
             if tech_name:
                 final_tech = (await self.page.locator(tech_xpath).locator(".vs__selected").text_content() or "").strip()
@@ -2021,21 +1972,33 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "task": sn.get("task", task),
             })
 
-        sn_canonical_names = {
-            self.canonical_str(sn.get("name", ""))
-            for sn in service_needed_headers
-        }
+        sn_canonical_names = set()
+        sn_asset_numbers = set()
+        for sn in service_needed_headers:
+            c_n = self.canonical_str(sn.get("name", ""))
+            if c_n:
+                sn_canonical_names.add(c_n)
+            digits = re.findall(r'\b\d{2,4}\b', sn.get("name", ""))
+            for d in digits:
+                sn_asset_numbers.add(d)
+
+        def _is_sn_asset(header_item):
+            h_name = header_item.get("name", "")
+            h_asset = header_item.get("asset_name", "")
+            for check_str in (h_name, h_asset):
+                if not check_str:
+                    continue
+                if self.canonical_str(check_str) in sn_canonical_names:
+                    return True
+                h_digits = re.findall(r'\b\d{2,4}\b', check_str)
+                if any(d in sn_asset_numbers for d in h_digits):
+                    return True
+            return False
+
         if sn_canonical_names:
             # Prevent regular headers or truck assignments from running for assets currently in Service Needed
-            static_headers = [
-                h for h in static_headers
-                if self.canonical_str(h.get("name", "")) not in sn_canonical_names
-            ]
-            truck_assign_headers = [
-                h for h in truck_assign_headers
-                if self.canonical_str(h.get("name", "")) not in sn_canonical_names
-                and self.canonical_str(h.get("asset_name", "")) not in sn_canonical_names
-            ]
+            static_headers = [h for h in static_headers if not _is_sn_asset(h)]
+            truck_assign_headers = [h for h in truck_assign_headers if not _is_sn_asset(h)]
             print(f"🔧 Loaded {len(service_needed_headers)} active Service Needed asset(s) to create first: {', '.join([s['name'] for s in service_needed_headers])}")
             # Prepend Service Needed headers so they are created first before any other headers
             static_headers = service_needed_headers + static_headers
@@ -2285,6 +2248,24 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                                 continue
 
+                            # For Service Needed assets:
+                            # Strict check across the entire board: if this asset already exists ANYWHERE on the board (on ANY tech row),
+                            # DO NOT create a second work order!
+                            if is_service_wo:
+                                asset_already_on_board = False
+                                for c_tk, w_list in existing_wos.items():
+                                    for w in w_list:
+                                        if self.check_item_match(w, canon_target, require_customer_match=True):
+                                            asset_already_on_board = True
+                                            break
+                                    if asset_already_on_board:
+                                        break
+                                
+                                if asset_already_on_board:
+                                    print(f"⏭️ Service Needed asset '{name}' ALREADY exists on the dispatch board for {date_str}. Skipping creation to prevent duplicate.")
+                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                    continue
+
                             board_count = 0
                             for canon_tech_key, wo_list in existing_wos.items():
                                 if canon_h_tech:
@@ -2313,7 +2294,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 header.get('is_service_needed_duplicate') or
                                 (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
                             )
-                            header_summary = header.get('service_note', '') if is_service_wo else None
                             res = await self.fill_and_save_work_order(
                                 customer_name=name,
                                 task=h_task,
@@ -2324,7 +2304,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 duration=duration,
                                 tech_name=h_tech,
                                 immediate_action=immediate_action,
-                                summary_note=header_summary
+                                summary_note=None
                             )
                             if not res:
                                 print(f"  🔁 Attempt 1 aborted/failed for '{name}'. Retrying with fresh attempt in 3s...")
@@ -2340,7 +2320,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     duration=duration,
                                     tech_name=h_tech,
                                     immediate_action=immediate_action,
-                                    summary_note=header_summary
+                                    summary_note=None
                                 )
 
                             if res:
