@@ -2075,14 +2075,6 @@ class AssetAssignmentScraper(BaseScraper):
             except Exception as nav_err:
                 print(f"  ⚠️ Navigation warning: {nav_err}")
 
-            if "login" in (new_page.url or "").lower():
-                print("  🔑 Login required on new tab, performing FieldEdge login...")
-                await self.login_fieldedge(page=new_page)
-                try:
-                    await new_page.goto(list_url, wait_until="domcontentloaded", timeout=45000)
-                except Exception:
-                    pass
-
             # Wait for search box to be visible
             print(f"  🔍 [Cancel WO #{wo_str}] Waiting for search input...")
             search_input = new_page.locator("input#search, .custom-search input.search").first
