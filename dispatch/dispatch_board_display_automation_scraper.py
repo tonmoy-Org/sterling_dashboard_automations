@@ -440,6 +440,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return strings
 
     @staticmethod
+    def normalize_time_key(time_val: Optional[str]) -> str:
+        """Normalize any time string (e.g. '07:30 AM', '7:30 AM', '07:30:00', '7:30am') to standard 'H:MM AM/PM'."""
+        if not time_val:
+            return ""
+        s = str(time_val).strip()
+        for fmt in ["%I:%M %p", "%I:%M%p", "%I:%M:%S %p", "%H:%M:%S", "%H:%M"]:
+            try:
+                dt = datetime.strptime(s.upper(), fmt)
+                formatted = dt.strftime("%I:%M %p")
+                return formatted[1:] if formatted.startswith("0") else formatted
+            except Exception:
+                pass
+        return s.upper().lstrip("0")
+
+    @staticmethod
     def check_item_match(
         wo: Dict,
         canon_target: str,
@@ -451,6 +466,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if not canon_target:
             return False
 
+        # Appointments (PTO/OFF/SICK/TBD) never match work order customer names
+        if wo.get("is_appointment"):
+            return False
+
         wo_is_sn = bool(wo.get("is_service_needed"))
         if is_service_wo and not wo_is_sn:
             return False
@@ -458,9 +477,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
 
         w_time = wo.get("time_key", "")
-        if time_key and w_time and time_key != w_time:
-            if not is_service_wo:
-                return False
+        if time_key and w_time:
+            norm_target = DispatchBoardDisplayAutomationScraper.normalize_time_key(time_key)
+            norm_wo = DispatchBoardDisplayAutomationScraper.normalize_time_key(w_time)
+            if norm_target and norm_wo and norm_target != norm_wo:
+                if not is_service_wo:
+                    return False
 
         c_cust = wo.get("canon_customer", "")
         c_strings = wo.get("canon_strings", [])
@@ -579,28 +601,50 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     desc_name = str(appt.get("Description") or appt.get("Title") or appt.get("Name") or "OFF")
                     canon_customer = self.canonical_str(desc_name)
 
-                    dt_str = appt.get("ScheduledFrom") or appt.get("ScheduleDateTime")
-                    dt_to_str = appt.get("ScheduledTo")
+                    dt_str = (
+                        appt.get("ScheduledFrom") or
+                        appt.get("ScheduleDateTime") or
+                        appt.get("ScheduledDateTime") or
+                        appt.get("StartDateTime") or
+                        appt.get("StartTime")
+                    )
+                    dt_to_str = appt.get("ScheduledTo") or appt.get("EndDateTime")
                     time_key = ""
                     start_time_obj = None
                     end_time_obj = None
                     if dt_str:
-                        try:
-                            dt_str_clean = dt_str.replace("Z", "").replace("T", " ").split(".")[0].strip()
-                            local_dt = datetime.strptime(dt_str_clean, "%Y-%m-%d %H:%M:%S")
-                            time_key = local_dt.strftime("%I:%M %p")
-                            if time_key.startswith("0"): time_key = time_key[1:]
-                            start_time_obj = local_dt.time()
-                        except Exception:
-                            pass
+                        dt_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
+                        for fmt in [
+                            "%Y-%m-%d %H:%M:%S",
+                            "%Y-%m-%d %H:%M",
+                            "%I:%M %p",
+                            "%H:%M:%S",
+                            "%H:%M"
+                        ]:
+                            try:
+                                local_dt = datetime.strptime(dt_clean, fmt)
+                                time_key = local_dt.strftime("%I:%M %p")
+                                if time_key.startswith("0"): time_key = time_key[1:]
+                                start_time_obj = local_dt.time()
+                                break
+                            except Exception:
+                                pass
                             
                     if dt_to_str:
-                        try:
-                            dt_to_clean = dt_to_str.replace("Z", "").replace("T", " ").split(".")[0].strip()
-                            local_dt_to = datetime.strptime(dt_to_clean, "%Y-%m-%d %H:%M:%S")
-                            end_time_obj = local_dt_to.time()
-                        except Exception:
-                            pass
+                        dt_to_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_to_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
+                        for fmt in [
+                            "%Y-%m-%d %H:%M:%S",
+                            "%Y-%m-%d %H:%M",
+                            "%I:%M %p",
+                            "%H:%M:%S",
+                            "%H:%M"
+                        ]:
+                            try:
+                                local_dt_to = datetime.strptime(dt_to_clean, fmt)
+                                end_time_obj = local_dt_to.time()
+                                break
+                            except Exception:
+                                pass
 
                     existing_wos[canon_tech].append({
                         "canon_customer": canon_customer,
@@ -2400,6 +2444,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if canon_h_tech and canon_h_tech not in ("s4", "s3", "f2", "p2", "") and not canon_h_tech.startswith("s4") and canon_h_tech in existing_wos:
                                     tech_already_has_truck = False
                                     for wo in existing_wos[canon_h_tech]:
+                                        if wo.get("is_appointment"):
+                                            continue
                                         c_cust = wo.get("canon_customer", "")
                                         if any(self.canonical_str(t.get("name", "")) == c_cust for t in truck_assign_headers):
                                             tech_already_has_truck = True
@@ -2424,26 +2470,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                  c_cust = wo.get("canon_customer", "")
                                                  w_time = wo.get("time_key", "")
                                                  name_match = c_cust == canon_target
-                                                 time_match = is_service_needed_asset or not time_key or not w_time or time_key == w_time
+                                                 norm_target = self.normalize_time_key(time_key)
+                                                 norm_wo = self.normalize_time_key(w_time)
+                                                 time_match = is_service_needed_asset or not norm_target or not norm_wo or norm_target == norm_wo
                                                  if name_match and time_match:
                                                      board_count += 1
                                              else:
-                                                 # For appointments (PTO/OFF/SICK): check time range overlap
-                                                 match_found = False
-                                                 if wo.get("start_time_obj") and wo.get("end_time_obj"):
-                                                     try:
-                                                         target_t = datetime.strptime(time_key, "%I:%M %p").time()
-                                                         if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                             match_found = True
-                                                     except Exception:
-                                                         pass
-                                                 if not match_found and wo.get("time_key") == time_key:
-                                                     match_found = True
-                                                 if match_found:
+                                                 # For appointments (PTO/OFF/SICK/TBD): only match if EXACT same start time!
+                                                 w_time = wo.get("time_key", "")
+                                                 norm_target = self.normalize_time_key(time_key)
+                                                 norm_wo = self.normalize_time_key(w_time)
+                                                 if norm_target and norm_wo and norm_target == norm_wo:
                                                      board_count += 1
                              
                                 if board_count >= target_count_idx:
-                                    print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Recording in persistent history & skipping creation.")
+                                    print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech has appointment at {time_key}. Recording in persistent history & skipping creation.")
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
@@ -2531,26 +2572,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                              c_cust = wo.get("canon_customer", "")
                                              w_time = wo.get("time_key", "")
                                              name_match = c_cust == canon_target
-                                             time_match = not time_key or not w_time or time_key == w_time
+                                             norm_target = self.normalize_time_key(time_key)
+                                             norm_wo = self.normalize_time_key(w_time)
+                                             time_match = not norm_target or not norm_wo or norm_target == norm_wo
                                              if name_match and time_match:
                                                  board_count += 1
                                          else:
-                                             # For appointments (PTO/OFF/SICK): check time range overlap
-                                             match_found = False
-                                             if wo.get("start_time_obj") and wo.get("end_time_obj"):
-                                                 try:
-                                                     target_t = datetime.strptime(time_key, "%I:%M %p").time()
-                                                     if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                         match_found = True
-                                                 except Exception:
-                                                     pass
-                                             if not match_found and wo.get("time_key") == time_key:
-                                                 match_found = True
-                                             if match_found:
+                                             # For appointments (PTO/OFF/SICK/TBD): only match if EXACT same start time!
+                                             w_time = wo.get("time_key", "")
+                                             norm_target = self.normalize_time_key(time_key)
+                                             norm_wo = self.normalize_time_key(w_time)
+                                             if norm_target and norm_wo and norm_target == norm_wo:
                                                  board_count += 1
 
                             if board_count >= target_count_idx:
-                                print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech is OFF/occupied. Recording in persistent history & skipping creation.")
+                                print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech has appointment at {time_key}. Recording in persistent history & skipping creation.")
                                 self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": t_tech, "time": time_key})
                                 continue
 
@@ -2597,6 +2633,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                             target_count_idx = template_processed_counts[processed_key]
 
+                            time_key = ""
+                            if start_time:
+                                try:
+                                    t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
+                                    time_key = t_dt.strftime("%I:%M %p")
+                                    if time_key.startswith("0"): time_key = time_key[1:]
+                                except Exception:
+                                    time_key = ""
+
                             if not force and self.is_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx):
                                 print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) was previously created and recorded in history. Skipping 2nd creation.")
                                 continue
@@ -2613,16 +2658,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if tech_match:
                                     for wo in wo_list:
                                         if wo.get("is_appointment"):
-                                            tech_off_for_day = True
-                                            break
-                                        if self.check_item_match(wo, canon_target, None, require_customer_match=True):
+                                            # Only count as appointment match if EXACT same start time!
+                                            w_time = wo.get("time_key", "")
+                                            norm_target = self.normalize_time_key(time_key)
+                                            norm_wo = self.normalize_time_key(w_time)
+                                            if norm_target and norm_wo and norm_target == norm_wo:
+                                                tech_off_for_day = True
+                                                break
+                                            continue
+                                        if self.check_item_match(wo, canon_target, time_key, require_customer_match=True):
                                             board_count += 1
                                     if tech_off_for_day:
                                         break
                                         
                             if tech_off_for_day or board_count >= target_count_idx:
-                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) skipped (tech has OFF/Appointment on board). Recording in persistent history.")
-                                self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="existing_on_board", details={"name": t_name, "tech": t_assignment_name})
+                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) skipped (tech has matching appointment at {time_key} or already on board). Recording in persistent history.")
+                                self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="existing_on_board", details={"name": t_name, "tech": t_assignment_name, "time": time_key})
                                 continue
 
                         if dry_run:
@@ -2742,6 +2793,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             # -- Execution completion summary --
             _elapsed = time.time() - _start_time
+            if not dry_run and hasattr(self, "log_finish"):
+                await self.log_finish(
+                    status="error" if _error_occurred else "success",
+                    error_message=_error_occurred,
+                    records_processed=_records_processed,
+                    elapsed_seconds=_elapsed,
+                    details=_details
+                )
             if _error_occurred:
                 print(f"⚠️ Execution finished with ERROR ({round(_elapsed, 1)}s):")
                 print(_error_occurred)
