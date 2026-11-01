@@ -1724,31 +1724,36 @@ class AssetAssignmentScraper(BaseScraper):
                     }
                 }
                 note = '';
-                const noteEl = document.querySelector('.summary-note_Dk8T7') ||
-                               document.querySelector('[class*="summary-note"]') ||
-                               document.querySelector('.content_cNaPa .summary-note_Dk8T7') ||
-                               document.querySelector('.content_cNaPa div[title]') ||
-                               document.querySelector('.content_cNaPa') ||
-                               document.querySelector('.summary-note-container_f6fBE textarea') ||
-                               document.querySelector('.summary-note-container_f6fBE .content') ||
-                               document.querySelector('.summary-note-container_f6fBE');
-                if (noteEl) {
-                    note = (noteEl.value || noteEl.getAttribute('title') || noteEl.textContent || '').trim();
-                }
-                if (!note) {
-                    const cells = document.querySelectorAll('.cell, [class*="cell"]');
-                    for (const cell of cells) {
-                        const title = cell.querySelector('.field-title, [class*="field-title"]');
-                        if (title && title.textContent.toLowerCase().includes('work summary')) {
-                            const val = cell.querySelector('.summary-note_Dk8T7, [class*="summary-note"], textarea, div:not(.field-title)');
-                            if (val) {
-                                note = (val.value || val.getAttribute('title') || val.textContent || '').trim();
-                                if (note) break;
+                // Specifically find the cell titled 'Work Summary'
+                const allCells = document.querySelectorAll('.cell, [class*="cell"]');
+                for (const cell of allCells) {
+                    const title = cell.querySelector('.field-title, [class*="field-title"], .title, .label');
+                    if (title && title.textContent.toLowerCase().includes('work summary')) {
+                        const val = cell.querySelector('.summary-note_Dk8T7, [class*="summary-note"], div[title], textarea, div:not(.field-title)');
+                        if (val) {
+                            const candidate = (val.getAttribute('title') || val.value || val.textContent || '').trim();
+                            if (candidate && candidate !== '--') {
+                                note = candidate;
+                                break;
                             }
                         }
                     }
                 }
-                return { priority, note };
+                // Fallback: search all summary-note elements for non-empty, non-'--' text
+                if (!note) {
+                    const allNotes = document.querySelectorAll('.summary-note_Dk8T7, [class*="summary-note"]');
+                    for (const el of allNotes) {
+                        const candidate = (el.getAttribute('title') || el.value || el.textContent || '').trim();
+                        if (candidate && candidate !== '--') {
+                            note = candidate;
+                            break;
+                        }
+                    }
+                }
+                // Check whole WorkOrder card text
+                const woCard = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"]') || document.querySelector('.card_ngkhz');
+                const cardText = woCard ? woCard.innerText : '';
+                return { priority, note, cardText };
             }""")
 
             prio_to_check = sidepanel_wo_info.get("priority") or current_priority
@@ -1756,12 +1761,16 @@ class AssetAssignmentScraper(BaseScraper):
             need_priority_change = bool(target_priority and not is_prio_already_set)
 
             existing_note = sidepanel_wo_info.get("note") or ""
+            card_text = sidepanel_wo_info.get("cardText") or ""
+
+            # Check if note is set either via explicit field or if service_note is in the card text
             is_note_already_set = bool(
                 not service_note or
                 (existing_note and (
                     service_note.strip().lower() in existing_note.strip().lower() or
                     existing_note.strip().lower() in service_note.strip().lower()
-                ))
+                )) or
+                (service_note and service_note.strip().lower() in card_text.lower())
             )
             need_note_change = bool(service_note and not is_note_already_set)
 
@@ -1769,7 +1778,8 @@ class AssetAssignmentScraper(BaseScraper):
 
             # If both Assignment card and Work Order details are ALREADY set, skip entirely!
             if not need_assignment_update and not need_wo_update:
-                print(f"  ⏭️ WO #{work_order_number} ('{asset_name}') is ALREADY fully set (Tech: '{tech_to_check}', Priority: '{prio_to_check}', Note: '{existing_note}'). Skipping update.")
+                final_note = existing_note or (service_note if service_note and service_note.strip().lower() in card_text.lower() else "")
+                print(f"  ⏭️ WO #{work_order_number} ('{asset_name}') is ALREADY fully set (Tech: '{tech_to_check}', Priority: '{prio_to_check}', Note: '{final_note}'). Skipping update.")
                 await self.close_sidepanel()
                 return True
 
