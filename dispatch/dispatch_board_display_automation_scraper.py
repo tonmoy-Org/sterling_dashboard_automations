@@ -2674,7 +2674,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                             self.asset_scraper.playwright = self.playwright
                             self.asset_scraper.browser = self.browser
-                            self.asset_scraper.context = self.context
+                            self.asset_scraper.context = getattr(self, 'context', None) or (self.page.context if self.page else None)
                             self.asset_scraper.page = self.page
                             self.asset_scraper.template_data = self.template_data
 

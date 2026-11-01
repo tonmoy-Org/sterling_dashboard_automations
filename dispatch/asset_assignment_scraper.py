@@ -2063,7 +2063,11 @@ class AssetAssignmentScraper(BaseScraper):
         wo_page = None
 
         try:
-            new_page = await self.page.context.new_page()
+            browser_context = getattr(self, 'context', None) or (self.page.context if self.page else None)
+            if not browser_context:
+                print(f"  ❌ No browser context available for cancelling WO #{wo_str}.")
+                return False
+            new_page = await browser_context.new_page()
             list_url = "https://login.fieldedge.com/#/List/0"
             print(f"  🌐 [Cancel WO #{wo_str}] Navigating to {list_url}...")
             try:
