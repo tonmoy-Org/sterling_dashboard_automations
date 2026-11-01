@@ -939,16 +939,20 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         except Exception:
                             pass
 
-                # If STILL 0 options and the search term contains emoji/non-ASCII (e.g. '📝REPORTS NEEDED'),
-                # strip emoji and retry with plain-ASCII text only
+                # If STILL 0 options and the search term contains emoji/non-ASCII (e.g. '👥 | KELVIN'),
+                # extract only meaningful alphabetic words (>=3 chars) as a keyword fallback.
+                # IMPORTANT: Do NOT use raw ASCII-strip (re.sub r'[^\x00-\x7F]') because that leaves
+                # punctuation artifacts like '| KELVIN' which can match the wrong customer in FieldEdge.
                 if (await options.count()) == 0:
-                    stripped_ascii = re.sub(r'[^\x00-\x7F]+', '', clean_search).strip()
-                    if stripped_ascii and stripped_ascii != clean_search:
-                        print(f"  -> No options found for '{clean_search}'. Retrying customer search with ASCII-only term: '{stripped_ascii}'...")
+                    # Extract the longest meaningful alphabetic word from the name as a search keyword
+                    words = re.findall(r'[a-zA-Z]{3,}', option_text)
+                    keyword_fallback = max(words, key=len) if words else ""
+                    if keyword_fallback and keyword_fallback.upper() != option_text.upper():
+                        print(f"  -> No options found for '{clean_search}'. Retrying customer search with keyword: '{keyword_fallback}'...")
                         try:
                             await search_input.focus()
                             await search_input.fill("")
-                            await search_input.fill(stripped_ascii)
+                            await search_input.fill(keyword_fallback)
                             await self.page.wait_for_timeout(400)
                             await search_input.press("Enter")
                             await self.page.wait_for_timeout(3000)
