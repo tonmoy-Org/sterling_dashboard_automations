@@ -459,7 +459,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         w_time = wo.get("time_key", "")
         if time_key and w_time and time_key != w_time:
-            return False
+            if not is_service_wo:
+                return False
 
         c_cust = wo.get("canon_customer", "")
         c_strings = wo.get("canon_strings", [])
@@ -1440,6 +1441,55 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception:
                 pass
 
+            # If summary_note is provided (e.g. for service needed assets), fill it in the modal
+            if summary_note:
+                try:
+                    print(f"  📝 Entering Summary Note: '{summary_note}'...")
+                    ta_set = await self.page.evaluate("""(note) => {
+                        const allTa = Array.from(document.querySelectorAll('div.on-bottom-modal textarea, .modal textarea, div[role="dialog"] textarea, textarea'));
+                        if (!allTa.length) return false;
+                        for (const ta of allTa) {
+                            const container = ta.closest('.form-group') || ta.closest('.summary-note-container_f6fBE') || ta.parentElement;
+                            const title = container ? container.querySelector('.field-title, label, .title') : null;
+                            if (title) {
+                                const t = (title.textContent || '').toLowerCase();
+                                if (t.includes('work summary') || (t.includes('summary') && !t.includes('description'))) {
+                                    ta.focus();
+                                    ta.value = note;
+                                    ta.dispatchEvent(new Event('input', { bubbles: true }));
+                                    ta.dispatchEvent(new Event('change', { bubbles: true }));
+                                    return true;
+                                }
+                            }
+                        }
+                        const targetTa = allTa.length > 1 ? allTa[1] : allTa[0];
+                        if (targetTa) {
+                            targetTa.focus();
+                            targetTa.value = note;
+                            targetTa.dispatchEvent(new Event('input', { bubbles: true }));
+                            targetTa.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        }
+                        return false;
+                    }""", summary_note)
+                    if not ta_set:
+                        for ta_sel in [
+                            "//div[contains(@class,'field-title') and contains(normalize-space(),'Summary')]/following::textarea[1]",
+                            ".summary-note-container_f6fBE textarea",
+                            "div[class*='summary'] textarea",
+                            "textarea[name*='Summary']",
+                            "textarea[placeholder*='Summary']"
+                        ]:
+                            try:
+                                loc = self.page.locator(ta_sel).first
+                                if await loc.count() > 0 and await loc.is_visible():
+                                    await loc.fill(summary_note)
+                                    break
+                            except Exception:
+                                pass
+                except Exception as ne:
+                    print(f"  Note on filling summary note: {ne}")
+
             # Pre-save final verification: Primary Tech must STILL match tech_name
             if tech_name:
                 final_tech = (await self.page.locator(tech_xpath).locator(".vs__selected").text_content() or "").strip()
@@ -1948,6 +1998,47 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             static_headers = [h for h in static_headers if self.canonical_str(h.get("name", "")) not in oos_names]
             truck_assign_headers = [h for h in truck_assign_headers if self.canonical_str(h.get("name", "")) not in oos_names]
             print(f"🚫 Exempted {len(oos_names)} Out of Service vehicle(s) from dispatch board headers.")
+
+        # Service Needed Assets: Active items must be created FIRST before static headers
+        service_needed_headers = []
+        for sn in self.template_data.get("service_needed_assets", []):
+            if not sn.get("active", True):
+                continue
+            sn_name = (sn.get("asset_name") or "").strip()
+            if not sn_name:
+                continue
+            if self.canonical_str(sn_name) in oos_names:
+                continue
+            service_needed_headers.append({
+                "name": sn_name,
+                "start_time": sn.get("start_time") or "3:30 PM",
+                "duration": sn.get("duration") or "1:00",
+                "priority": sn.get("priority") or "[7] 7.12 SERVICE NEEDED",
+                "tech_name": sn.get("tech_name") or "s4",
+                "service_note": sn.get("service_note") or "",
+                "is_service_needed_duplicate": True,
+                "active": True,
+                "task": sn.get("task", task),
+            })
+
+        sn_canonical_names = {
+            self.canonical_str(sn.get("name", ""))
+            for sn in service_needed_headers
+        }
+        if sn_canonical_names:
+            # Prevent regular headers or truck assignments from running for assets currently in Service Needed
+            static_headers = [
+                h for h in static_headers
+                if self.canonical_str(h.get("name", "")) not in sn_canonical_names
+            ]
+            truck_assign_headers = [
+                h for h in truck_assign_headers
+                if self.canonical_str(h.get("name", "")) not in sn_canonical_names
+                and self.canonical_str(h.get("asset_name", "")) not in sn_canonical_names
+            ]
+            print(f"🔧 Loaded {len(service_needed_headers)} active Service Needed asset(s) to create first: {', '.join([s['name'] for s in service_needed_headers])}")
+            # Prepend Service Needed headers so they are created first before any other headers
+            static_headers = service_needed_headers + static_headers
         tech_defaults = self.template_data.get("technician_display_defaults", {})
         tech_jobs = self.template_data.get("tech_jobs", [])
 
@@ -2233,7 +2324,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 duration=duration,
                                 tech_name=h_tech,
                                 immediate_action=immediate_action,
-                                summary_note=None
+                                summary_note=header_summary
                             )
                             if not res:
                                 print(f"  🔁 Attempt 1 aborted/failed for '{name}'. Retrying with fresh attempt in 3s...")
@@ -2249,7 +2340,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     duration=duration,
                                     tech_name=h_tech,
                                     immediate_action=immediate_action,
-                                    summary_note=None
+                                    summary_note=header_summary
                                 )
 
                             if res:

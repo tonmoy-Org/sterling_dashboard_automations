@@ -132,12 +132,12 @@
     },
     {
       "name": "🚛 | 90",
-      "active": false,
+      "active": true,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
       "duration": "1:00",
-      "tech_name": ""
+      "tech_name": "d 𝐑𝐮𝐬𝐬𝐞𝐥l"
     },
     {
       "name": "🚛 | 124",
@@ -177,12 +177,12 @@
     },
     {
       "name": "🚛 | 122",
-      "active": true,
+      "active": false,
       "department": "pump",
       "priority": "[5] PT (Asset Assignment)",
       "start_time": "06:00 AM",
       "duration": "1:00",
-      "tech_name": "d 𝐑𝐮𝐬𝐬𝐞𝐥l"
+      "tech_name": ""
     },
     {
       "name": "🚛 | 87",
@@ -1134,7 +1134,7 @@
       "name": "🚛 | 90",
       "category": "Truck",
       "department": "pump",
-      "assigned_tech": ""
+      "assigned_tech": "d 𝐑𝐮𝐬𝐬𝐞𝐥l"
     },
     {
       "name": "🚛 | 124",
@@ -1164,7 +1164,7 @@
       "name": "🚛 | 122",
       "category": "Truck",
       "department": "pump",
-      "assigned_tech": "d 𝐑𝐮𝐬𝐬𝐞𝐥l"
+      "assigned_tech": ""
     },
     {
       "name": "🚛 | 87",
