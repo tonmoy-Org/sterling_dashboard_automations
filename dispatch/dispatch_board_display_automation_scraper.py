@@ -413,6 +413,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
         if c1 == c2:
             return True
+        # Prefix match for tech codes (e.g. 'p2' matching 'p2asher', 'f2' matching 'f2kelvin', 'p' matching 'pgene')
+        if re.match(rf'^{re.escape(c2)}(?:\D|$)', c1) or re.match(rf'^{re.escape(c1)}(?:\D|$)', c2):
+            return True
         words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
         words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
         for w1 in words1:
@@ -888,8 +891,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
 
             # For typing: use exact option_text directly as configured in JSON template
-            # (e.g. 'l 𝐂𝐫𝐢𝐬', 'f 𝐒𝐤𝐲𝐥𝐞𝐫', '8 - Internal', etc.) so Vue-select matches precisely
-            type_text = option_text.strip()
+            # (e.g. 'p2', 'l 𝐂𝐫𝐢𝐬', 'f 𝐒𝐤𝐲𝐥𝐞𝐫', '8 - Internal', etc.) so Vue-select matches precisely
+            type_text = option_text.strip('\r\n')
             await search_input.fill(type_text)
             await self.page.wait_for_timeout(600)
 
@@ -1046,6 +1049,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await opt_el.click(force=True)
                         return True
 
+                # Pass 2.5: Tech code prefix match (e.g. 'p2' matching 'p2 Asher', 'f2' matching 'f2 Kelvin')
+                if target_canon and re.match(rf'^{re.escape(target_canon)}(?:\D|$)', c_raw):
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
+
                 # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
                 if core_name and len(core_name) >= 3:
                     if core_name in norm_raw or core_name in c_raw:
@@ -1115,7 +1124,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             # Handle completion or safe failure (NO BLIND FALLBACK to first_opt!)
             if not clicked:
                 if press_enter:
-                    # For customer search, enter selects current highlighted input
+                    # Enter selects current highlighted input in Vue-select
                     await search_input.press("Enter")
                     await self.page.wait_for_timeout(1500)
                     # Verify that a customer was actually selected after pressing Enter.
@@ -1124,8 +1133,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     selected_check = dropdown.locator(".vs__selected, .selected-tag").first
                     if await selected_check.count() > 0 and await selected_check.is_visible():
                         return True
-                    # No selection made — do NOT proceed with empty customer field
-                    print(f"  -> Press-Enter fallback: No customer was selected for '{option_text}' (search returned no valid FieldEdge results). Aborting to prevent stuck Save modal.")
+                    # If dropdown still has filtered options, click the first one if it matches tech/target
+                    if await options.count() > 0:
+                        first_opt = options.first
+                        if await first_opt.is_visible():
+                            f_raw = (await first_opt.text_content() or "").strip()
+                            if self.is_tech_match(f_raw, option_text) or bool(target_canon and re.match(rf'^{re.escape(target_canon)}(?:\D|$)', self.canonical_str(f_raw))):
+                                await first_opt.click(force=True)
+                                return True
+                    # No selection made — do NOT proceed with empty field
+                    print(f"  -> Press-Enter fallback: No valid option was selected for '{option_text}'. Aborting to prevent misassignment.")
                     return False
                 else:
                     print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
@@ -1294,26 +1311,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     'dispatch_board_tech_name_xpath',
                     "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Primary Tech')]/following::div[contains(@class,'v-select')][1]"
                 )
-                # Select using exact tech_name from JSON template (e.g. 'l 𝐂𝐫𝐢𝐬', 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
-                tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=False)
-                if not tech_selected:
-                    # Fallback: try clean tech name if available
-                    clean_tech_name = None
-                    canon_tn = self.canonical_str(tech_name)
-                    for entry in self.template_data.get("active_techs", []):
-                        c_tname = self.canonical_str(entry.get("tech_name", ""))
-                        c_name = self.canonical_str(entry.get("name", ""))
-                        if canon_tn and (canon_tn == c_tname or canon_tn == c_name):
-                            clean_tech_name = entry.get("name", "")
-                            break
-                    if not clean_tech_name:
-                        norm_tn = unicodedata.normalize('NFKD', tech_name).strip()
-                        m_stripped = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', norm_tn).strip()
-                        clean_tech_name = m_stripped if len(m_stripped) >= 3 else tech_name
-                    if clean_tech_name and clean_tech_name != tech_name:
-                        print(f"  -> Retrying Primary Tech selection with fallback name '{clean_tech_name}'...")
-                        tech_selected = await self.select_dropdown_option(tech_xpath, clean_tech_name, press_enter=False)
-
+                # Select using exact tech_name from JSON template (e.g. 'p2', 'l 𝐂𝐫𝐢𝐬', 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
+                # Use press_enter=True so tech code (like 'p2') is submitted/filtered in Vue-select directly
+                tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True)
                 if not tech_selected:
                     print(f"❌ Failed to match and select expected technician '{tech_name}'. Aborting work order to prevent wrong/duplicate assignment.")
                     await self.close_create_wo_modal()
@@ -1328,7 +1328,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     selected_tech_text == tech_name or
                     clean_actual_tech == clean_target_tech or
                     (len(clean_actual_tech) >= 4 and len(clean_target_tech) >= 4 and (clean_actual_tech in clean_target_tech or clean_target_tech in clean_actual_tech)) or
-                    self.is_tech_match(selected_tech_text, tech_name)
+                    self.is_tech_match(selected_tech_text, tech_name) or
+                    bool(clean_target_tech and re.match(rf'^{re.escape(clean_target_tech)}(?:\D|$)', clean_actual_tech))
                 )
                 if not tech_verified:
                     print(f"🛑 STRICT SAFETY STOP: Primary Tech modal value is '{selected_tech_text}', but expected '{tech_name}'! Aborting work order to prevent misassignment.")
@@ -1445,7 +1446,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     final_tech == tech_name or
                     clean_f == clean_t or
                     (len(clean_f) >= 4 and len(clean_t) >= 4 and (clean_f in clean_t or clean_t in clean_f)) or
-                    self.is_tech_match(final_tech, tech_name)
+                    self.is_tech_match(final_tech, tech_name) or
+                    bool(clean_t and re.match(rf'^{re.escape(clean_t)}(?:\D|$)', clean_f))
                 )
                 if not final_verified:
                     print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Primary Tech '{final_tech}' != expected '{tech_name}'. Aborting save.")
