@@ -999,22 +999,32 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             m_core = re.sub(r'^[a-z0-9]\s*', '', target_norm)
             core_name = m_core if len(m_core) >= 3 else target_norm
 
-            # Helper to check if an option element matches target strictly
-            async def _check_and_click_option(opt_el) -> bool:
+            # Helper: exact raw match only (Pass 0)
+            async def _exact_match_option(opt_el) -> bool:
+                """Returns True and clicks ONLY if option text exactly matches raw_target."""
+                if not await opt_el.is_visible():
+                    return False
+                raw_text = await opt_el.text_content()
+                if raw_text and raw_text.strip() == raw_target:
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
+                return False
+
+            # Helper: fuzzy/canonical match (Pass 1–6)
+            async def _fuzzy_match_option(opt_el) -> bool:
+                """Returns True and clicks on normalized/canonical/fuzzy match."""
                 if not await opt_el.is_visible():
                     return False
                 raw_text = await opt_el.text_content()
                 if not raw_text:
                     return False
                 s_raw = raw_text.strip()
+                # Skip if this is an exact match — already handled in first pass
+                if s_raw == raw_target:
+                    return False
                 norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
                 c_raw = self.canonical_str(s_raw)
-
-                # Pass 0: Exact raw string match
-                if s_raw == raw_target:
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
 
                 # Pass 1: Exact normalized match
                 if norm_raw == target_norm or norm_raw == clean_core.lower():
@@ -1023,10 +1033,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     return True
 
                 # Pass 2: Canonical match (ignore special chars/whitespace/unicode fonts)
+                # IMPORTANT: only use canonical when target itself has non-alphanumeric characters
+                # (e.g. bold unicode tech names like 'f 𝐒𝐤𝐲𝐥𝐞𝐫'). Skip if target is plain text
+                # to avoid '👥 | KELVIN' (target) wrongly matching plain 'KELVIN' (option).
+                target_has_special = bool(re.search(r'[^a-zA-Z0-9\s]', option_text))
+                option_has_special = bool(re.search(r'[^a-zA-Z0-9\s]', s_raw))
                 if target_canon and (target_canon == c_raw or self.canonical_str(clean_core) == c_raw):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
+                    # Only accept canonical match if BOTH have special chars OR neither does
+                    # This prevents '👥 | KELVIN' matching plain 'KELVIN'
+                    if target_has_special == option_has_special:
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
 
                 # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
                 if core_name and len(core_name) >= 3:
@@ -1060,12 +1078,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 return False
 
-            # Check visible options
-            for i in range(count):
-                opt = options.nth(i)
-                if await _check_and_click_option(opt):
-                    clicked = True
-                    break
+            async def _scan_options(check_fn, opt_count) -> bool:
+                """Scan all currently visible options with the given check function."""
+                for i in range(opt_count):
+                    if await check_fn(options.nth(i)):
+                        return True
+                return False
+
+            # TWO-PASS STRATEGY:
+            # Pass A — Exact raw match across ALL options first.
+            #   This ensures '👥 | KELVIN' is always preferred over plain 'KELVIN'
+            #   even when both appear in the dropdown after a keyword fallback search.
+            # Pass B — Only if no exact match found, try canonical/fuzzy matching.
+            clicked = await _scan_options(_exact_match_option, count)
+            if not clicked:
+                clicked = await _scan_options(_fuzzy_match_option, count)
 
             # If not found and dropdown has scrollable menu, scroll down to reveal more items
             if not clicked and count > 0:
@@ -1076,11 +1103,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
                             await self.page.wait_for_timeout(300)
                             count_now = await options.count()
-                            for i in range(count_now):
-                                opt = options.nth(i)
-                                if await _check_and_click_option(opt):
-                                    clicked = True
-                                    break
+                            # Exact pass first on newly revealed items
+                            clicked = await _scan_options(_exact_match_option, count_now)
+                            if not clicked:
+                                clicked = await _scan_options(_fuzzy_match_option, count_now)
                             if clicked:
                                 break
                 except Exception:
