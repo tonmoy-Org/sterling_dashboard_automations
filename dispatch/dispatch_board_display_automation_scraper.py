@@ -896,8 +896,20 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if press_enter:
                 # Trigger search API for fields like Customer Name that require Enter
                 await search_input.press("Enter")
+                await self.page.wait_for_timeout(1000)
+
+                # Check if pressing Enter immediately selected the option in Vue-select (e.g. for tech selection)
+                selected_check = dropdown.locator(".vs__selected, .selected-tag").first
+                if await selected_check.count() > 0 and (await selected_check.text_content() or "").strip():
+                    sel_text = (await selected_check.text_content() or "").strip()
+                    c_sel = self.canonical_str(sel_text)
+                    c_target = self.canonical_str(option_text)
+                    if c_sel == c_target or c_sel.startswith(c_target) or self.is_tech_match(sel_text, option_text):
+                        print(f"  -> Selected '{sel_text}' via Enter directly.")
+                        return True
+
                 # Give API response time to load (longer budget for Linux server network latency)
-                await self.page.wait_for_timeout(2500)
+                await self.page.wait_for_timeout(1500)
 
             # Locate visible dropdown options
             options = self.page.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
@@ -1318,6 +1330,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 tech_verified = (
                     selected_tech_text == tech_name or
                     clean_actual_tech == clean_target_tech or
+                    clean_actual_tech.startswith(clean_target_tech) or
                     (len(clean_actual_tech) >= 4 and len(clean_target_tech) >= 4 and (clean_actual_tech in clean_target_tech or clean_target_tech in clean_actual_tech)) or
                     self.is_tech_match(selected_tech_text, tech_name)
                 )
@@ -1435,6 +1448,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 final_verified = (
                     final_tech == tech_name or
                     clean_f == clean_t or
+                    clean_f.startswith(clean_t) or
                     (len(clean_f) >= 4 and len(clean_t) >= 4 and (clean_f in clean_t or clean_t in clean_f)) or
                     self.is_tech_match(final_tech, tech_name)
                 )
