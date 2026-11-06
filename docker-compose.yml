@@ -14,7 +14,8 @@ services:
     env_file:
       - dispatch/.env
     environment:
-      - HEADLESS=true
+      - HEADLESS=false
+      - DISPLAY=:99
       - PORT=3000
       - TZ=America/Los_Angeles
     volumes:

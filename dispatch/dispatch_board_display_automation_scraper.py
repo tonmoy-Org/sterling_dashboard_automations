@@ -956,8 +956,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 # Give API response time to load (longer budget for Linux server network latency)
                 await self.page.wait_for_timeout(1500)
 
-            # Locate visible dropdown options
-            options = self.page.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
+            # Locate visible dropdown options (exclude loading indicators and 'no matching options' placeholders)
+            options = self.page.locator("ul.vs__dropdown-menu:visible li:not(.vs__no-options):not(.vs__spinner), ul[role='listbox']:visible li[role='option'], li.vs__dropdown-option:visible")
             try:
                 await options.first.wait_for(state="visible", timeout=6000)
             except Exception:
@@ -1059,79 +1059,83 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             # Helper: exact raw match only (Pass 0)
             async def _exact_match_option(opt_el) -> bool:
                 """Returns True and clicks ONLY if option text exactly matches raw_target."""
-                if not await opt_el.is_visible():
-                    return False
-                raw_text = await opt_el.text_content()
-                if raw_text and raw_text.strip() == raw_target:
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
+                try:
+                    raw_text = await opt_el.text_content()
+                    if raw_text and raw_text.strip() == raw_target:
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
+                except Exception:
+                    pass
                 return False
 
             # Helper: fuzzy/canonical match (Pass 1–6)
             async def _fuzzy_match_option(opt_el) -> bool:
                 """Returns True and clicks on normalized/canonical/fuzzy match."""
-                if not await opt_el.is_visible():
-                    return False
-                raw_text = await opt_el.text_content()
-                if not raw_text:
-                    return False
-                s_raw = raw_text.strip()
-                # Skip if this is an exact match — already handled in first pass
-                if s_raw == raw_target:
-                    return False
-                norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
-                c_raw = self.canonical_str(s_raw)
+                try:
+                    raw_text = await opt_el.text_content()
+                    if not raw_text:
+                        return False
+                    s_raw = raw_text.strip()
+                    if "no matching options" in s_raw.lower():
+                        return False
+                    # Skip if this is an exact match — already handled in first pass
+                    if s_raw == raw_target:
+                        return False
+                    norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
+                    c_raw = self.canonical_str(s_raw)
 
-                # Pass 1: Exact normalized match
-                if norm_raw == target_norm or norm_raw == clean_core.lower():
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                # Pass 2: Canonical match (ignore special chars/whitespace/unicode fonts)
-                # IMPORTANT: only use canonical when target itself has non-alphanumeric characters
-                # (e.g. bold unicode tech names like 'f 𝐒𝐤𝐲𝐥𝐞𝐫'). Skip if target is plain text
-                # to avoid '👥 | KELVIN' (target) wrongly matching plain 'KELVIN' (option).
-                target_has_special = bool(re.search(r'[^a-zA-Z0-9\s]', option_text))
-                option_has_special = bool(re.search(r'[^a-zA-Z0-9\s]', s_raw))
-                if target_canon and (target_canon == c_raw or self.canonical_str(clean_core) == c_raw):
-                    # Only accept canonical match if BOTH have special chars OR neither does
-                    # This prevents '👥 | KELVIN' matching plain 'KELVIN'
-                    if target_has_special == option_has_special:
+                    # Pass 1: Exact normalized match
+                    if norm_raw == target_norm or norm_raw == clean_core.lower():
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
 
-                # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
-                if core_name and len(core_name) >= 3:
-                    if core_name in norm_raw or core_name in c_raw:
+                    # Pass 2: Canonical match (ignore special chars/whitespace/unicode fonts)
+                    # IMPORTANT: only use canonical when target itself has non-alphanumeric characters
+                    # (e.g. bold unicode tech names like 'f 𝐒𝐤𝐲𝐥𝐞𝐫'). Skip if target is plain text
+                    # to avoid '👥 | KELVIN' (target) wrongly matching plain 'KELVIN' (option).
+                    target_has_special = bool(re.search(r'[^a-zA-Z0-9\s]', option_text))
+                    option_has_special = bool(re.search(r'[^a-zA-Z0-9\s]', s_raw))
+                    if target_canon and (target_canon == c_raw or self.canonical_str(clean_core) == c_raw):
+                        # Only accept canonical match if BOTH have special chars OR neither does
+                        # This prevents '👥 | KELVIN' matching plain 'KELVIN'
+                        if target_has_special == option_has_special:
+                            await opt_el.scroll_into_view_if_needed()
+                            await opt_el.click(force=True)
+                            return True
+
+                    # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
+                    if core_name and len(core_name) >= 3:
+                        if core_name in norm_raw or core_name in c_raw:
+                            await opt_el.scroll_into_view_if_needed()
+                            await opt_el.click(force=True)
+                            return True
+
+                    # Pass 4: Technician name matching using is_tech_match
+                    if self.is_tech_match(s_raw, option_text) or self.is_tech_match(s_raw, clean_search) or self.is_tech_match(s_raw, clean_core):
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
 
-                # Pass 4: Technician name matching using is_tech_match
-                if self.is_tech_match(s_raw, option_text) or self.is_tech_match(s_raw, clean_search) or self.is_tech_match(s_raw, clean_core):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
+                    # Pass 5: Substring match (ONLY allowed if BOTH target and option have length >= 4)
+                    # CRITICAL: NEVER do substring matching for short tokens (like 's7', 's6', 'c', 'e')!
+                    if len(target_norm) >= 4 and len(norm_raw) >= 4:
+                        if target_norm in norm_raw or norm_raw in target_norm:
+                            await opt_el.scroll_into_view_if_needed()
+                            await opt_el.click(force=True)
+                            return True
 
-                # Pass 5: Substring match (ONLY allowed if BOTH target and option have length >= 4)
-                # CRITICAL: NEVER do substring matching for short tokens (like 's7', 's6', 'c', 'e')!
-                if len(target_norm) >= 4 and len(norm_raw) >= 4:
-                    if target_norm in norm_raw or norm_raw in target_norm:
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
-                        return True
-
-                # Pass 6: Truck number / digits match (e.g. '124' in '🚛 | 124')
-                m_digits = re.search(r'\b\d{2,4}\b', target_canon)
-                if m_digits and len(target_canon) >= 4:
-                    d_target = m_digits.group(0)
-                    if d_target in c_raw:
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
-                        return True
+                    # Pass 6: Truck number / digits match (e.g. '124' in '🚛 | 124')
+                    m_digits = re.search(r'\b\d{2,4}\b', target_canon)
+                    if m_digits and len(target_canon) >= 4:
+                        d_target = m_digits.group(0)
+                        if d_target in c_raw:
+                            await opt_el.scroll_into_view_if_needed()
+                            await opt_el.click(force=True)
+                            return True
+                except Exception:
+                    pass
 
                 return False
 
@@ -1168,6 +1172,38 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 break
                 except Exception:
                     pass
+
+            # If initial scan didn't match and press_enter is True (Customer search), try fallback search terms
+            if not clicked and press_enter:
+                m_dig = re.search(r'\b\d{2,4}\b', clean_search)
+                fallback_term = None
+                if m_dig and m_dig.group(0) != clean_search:
+                    fallback_term = m_dig.group(0)
+                else:
+                    words = re.findall(r'[a-zA-Z]{3,}', option_text)
+                    kw = max(words, key=len) if words else ""
+                    if kw and kw.upper() != option_text.upper():
+                        fallback_term = kw
+
+                if fallback_term:
+                    print(f"  -> Retrying customer search with fallback term '{fallback_term}' for '{option_text}'...")
+                    try:
+                        await search_input.focus()
+                        await search_input.fill("")
+                        await search_input.fill(fallback_term)
+                        await self.page.wait_for_timeout(400)
+                        await search_input.press("Enter")
+                        await self.page.wait_for_timeout(2500)
+                        try:
+                            await options.first.wait_for(state="visible", timeout=4000)
+                        except Exception:
+                            pass
+                        count_fb = await options.count()
+                        clicked = await _scan_options(_exact_match_option, count_fb)
+                        if not clicked:
+                            clicked = await _scan_options(_fuzzy_match_option, count_fb)
+                    except Exception as fb_err:
+                        print(f"  -> Fallback search error: {fb_err}")
 
             # Handle completion or safe failure (NO BLIND FALLBACK to first_opt!)
             if not clicked:
@@ -1264,6 +1300,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True)
             if not success:
                 print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
+                await self.close_create_wo_modal()
                 return False
 
             # Smart wait: wait for all FieldEdge customer loading spinners to vanish and form to settle
@@ -2527,6 +2564,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     immediate_action=immediate_action,
                                     summary_note=None
                                 )
+                                if not res:
+                                    print(f"  🔁 Attempt 1 aborted/failed for '{name}'. Retrying with fresh attempt in 3s...")
+                                    await self.close_create_wo_modal()
+                                    await self.page.wait_for_timeout(3000)
+                                    res = await self.fill_and_save_work_order(
+                                        customer_name=name,
+                                        task=h_task,
+                                        lead_source=lead_source,
+                                        priority=priority,
+                                        target_date=date_str,
+                                        start_time=start_time,
+                                        duration=duration,
+                                        tech_name=h_tech,
+                                        immediate_action=immediate_action,
+                                        summary_note=None
+                                    )
                                 if res:
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
                                     # Refresh board data after save
@@ -2638,6 +2691,23 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 immediate_action=immediate_action,
                                 summary_note=None
                             )
+                            if not res:
+                                print(f"  🔁 Attempt 1 aborted/failed for '{name}'. Retrying with fresh attempt in 3s...")
+                                await self.close_create_wo_modal()
+                                await self.page.wait_for_timeout(3000)
+                                res = await self.fill_and_save_work_order(
+                                    customer_name=name,
+                                    task=j_task,
+                                    lead_source=lead_source,
+                                    priority=priority,
+                                    target_date=date_str,
+                                    start_time=start_time,
+                                    duration=duration,
+                                    tech_name=t_tech,
+                                    mark_completed=True,
+                                    immediate_action=immediate_action,
+                                    summary_note=None
+                                )
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": t_tech, "time": time_key})
                                 # Refresh board data after save
@@ -2733,6 +2803,24 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 task_type=task,
                                 summary_note=None
                             )
+                            if not res:
+                                print(f"  🔁 Attempt 1 aborted/failed for '{t_name}'. Retrying with fresh attempt in 3s...")
+                                await self.close_create_wo_modal()
+                                await self.page.wait_for_timeout(3000)
+                                res = await self.fill_and_save_work_order(
+                                    customer_name=t_name,
+                                    task=task,
+                                    lead_source=lead_source,
+                                    priority=priority,
+                                    target_date=date_str,
+                                    start_time=start_time,
+                                    duration=duration,
+                                    tech_name=t_assignment_name,
+                                    mark_completed=True,
+                                    immediate_action=immediate_action,
+                                    task_type=task,
+                                    summary_note=None
+                                )
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name})
                                 # Refresh board data after save

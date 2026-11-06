@@ -137,7 +137,7 @@ class BaseScraper:
                 fallback_kwargs = {k: v for k, v in launch_kwargs.items() if k != "channel"}
                 fallback_args = [a for a in chrome_args if a != "--headless=new"]
                 if HEADLESS_MODE:
-                    fallback_args.append("--headless")
+                    fallback_args.append("--headless=new")
                 fallback_kwargs["args"] = fallback_args
                 self.browser = await self.playwright.chromium.launch(**fallback_kwargs)
                 print("✅ Browser launched: bundled Chromium (fallback)")
