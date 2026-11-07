@@ -1689,8 +1689,8 @@ class AssetAssignmentScraper(BaseScraper):
             tech_to_check = sidepanel_info.get("tech") or current_tech
 
             need_tech_change = bool(target_tech and not self.is_tech_match(tech_to_check, target_tech) and self.canonical_str(tech_to_check) != self.canonical_str(target_tech))
-            # CRITICAL: Scheduled time must NEVER be edited on FieldEdge work orders. Keep existing scheduled time!
-            need_assignment_update = need_tech_change
+            need_time_change = bool(target_time and not self.is_time_matching(target_time, sched_to_check))
+            need_assignment_update = need_tech_change or need_time_change
 
             # ── Check Work Order details (Priority & Note) ──
             sidepanel_wo_info = await self.page.evaluate(r"""() => {
@@ -1783,9 +1783,9 @@ class AssetAssignmentScraper(BaseScraper):
                 await self.close_sidepanel()
                 return True
 
-            # ── Step 1: Update Assignment card if tech needs change ──
+            # ── Step 1: Update Assignment card if tech or scheduled time needs change ──
             if need_assignment_update:
-                print(f"  🕒 Updating Assignment card (Need tech: {need_tech_change})...")
+                print(f"  🕒 Updating Assignment card (Need tech: {need_tech_change}, Need time: {need_time_change})...")
                 # Scroll Assignment card into view
                 await self.page.evaluate("""() => {
                     const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
@@ -1799,7 +1799,8 @@ class AssetAssignmentScraper(BaseScraper):
                 # Check if Assignment card is already in edit mode
                 is_edit_mode = await self.page.evaluate("""() => {
                     const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                                 document.querySelector('.tech-dropdown_qufHC');
+                                 document.querySelector('.tech-dropdown_qufHC') ||
+                                 document.querySelector('.timepicker-container[name="Scheduled Time"]');
                     return !!card;
                 }""")
 
@@ -1841,6 +1842,62 @@ class AssetAssignmentScraper(BaseScraper):
                     await self.page.wait_for_timeout(600)
                 else:
                     print(f"  👤 Technician already matches '{target_tech}'. Skipping tech edit.")
+
+                # Update Scheduled Time if needed
+                if target_time and need_time_change:
+                    print(f"  ⏰ Setting scheduled time to '{target_time}'...")
+                    time_input_loc = self.page.locator(
+                        '.card_ngkhz.edit-mode-style_ABe0v div[name="Scheduled Time"] input, '
+                        '[data-edb-sidepanel-card*="Assignment"] div[name="Scheduled Time"] input, '
+                        '.card_ngkhz.edit-mode-style_ABe0v .timepicker-container input, '
+                        '[data-edb-sidepanel-card*="Assignment"] .timepicker-container input, '
+                        '.cell:has(.field-title:has-text("scheduled time")) input, '
+                        '.cell-pos-3x1 input, input[placeholder="Time"]'
+                    ).first
+
+                    if await time_input_loc.count() > 0 and await time_input_loc.is_visible():
+                        try:
+                            await time_input_loc.click(force=True)
+                            await self.page.wait_for_timeout(200)
+                            await time_input_loc.press("Control+A")
+                            await time_input_loc.press("Backspace")
+                            await time_input_loc.type(target_time, delay=50)
+                            await self.page.keyboard.press("Enter")
+                            await self.page.keyboard.press("Tab")
+                        except Exception as t_err:
+                            print(f"  ⚠️ Direct typing time note: {t_err}")
+
+                    # Also ensure via JavaScript evaluation that value and events are dispatched
+                    await self.page.evaluate("""(tVal) => {
+                        const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                                     document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                                     document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
+                                     document.querySelector('.card_ngkhz');
+                        if (!card) return false;
+                        let inp = card.querySelector('div[name="Scheduled Time"] input, .timepicker-container input, .cell-pos-3x1 input, input[placeholder="Time"]');
+                        if (!inp) {
+                            const cells = Array.from(card.querySelectorAll('.cell'));
+                            for (const c of cells) {
+                                const ft = c.querySelector('.field-title');
+                                if (ft && ft.textContent.toLowerCase().includes('scheduled time')) {
+                                    inp = c.querySelector('input');
+                                    if (inp) break;
+                                }
+                            }
+                        }
+                        if (inp) {
+                            inp.focus();
+                            inp.value = tVal;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                            inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                            return true;
+                        }
+                        return false;
+                    }""", target_time)
+                    await self.page.wait_for_timeout(600)
+                else:
+                    print(f"  ⏰ Scheduled time already matches '{target_time}'. Skipping time edit.")
 
                 # Click Save on Assignment card
                 print("  💾 Saving Assignment card...")
@@ -2402,12 +2459,13 @@ class AssetAssignmentScraper(BaseScraper):
 
                         print(f"  👉 Found existing WO #{wo_num} for '{asset_name}' on tech '{curr_tech}' (Sched: {curr_sched}, Priority: {curr_prio})")
 
-                        # Check tech & priority: if both are already set, skip sidepanel completely!
+                        # Check tech, time & priority: if all are already set, skip sidepanel completely!
                         is_tech_set = not target_tech or self.is_tech_match(curr_tech, target_tech) or (self.canonical_str(curr_tech) == self.canonical_str(target_tech))
+                        is_time_set = not target_time or self.is_time_matching(target_time, curr_sched)
                         is_prio_set = not target_priority or self.is_priority_match(curr_prio, target_priority)
 
-                        if is_tech_set and is_prio_set and not service_note:
-                            print(f"  ⏭️ WO #{wo_num} for '{asset_name}' is ALREADY fully set (Tech: '{curr_tech}', Priority: '{curr_prio}'). Skipping update.")
+                        if is_tech_set and is_time_set and is_prio_set and not service_note:
+                            print(f"  ⏭️ WO #{wo_num} for '{asset_name}' is ALREADY fully set (Tech: '{curr_tech}', Time: '{curr_sched}', Priority: '{curr_prio}'). Skipping update.")
                             continue
 
                         total_checked += 1
