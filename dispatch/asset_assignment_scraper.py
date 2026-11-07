@@ -693,8 +693,11 @@ class AssetAssignmentScraper(BaseScraper):
                             priorityName.toLowerCase().includes('asset assignment') ||
                             customerName.includes('🚛') ||
                             customerName.includes('🛻') ||
+                            customerName.includes('🏗️') ||
                             priorityName.includes('PT (') ||
-                            priorityName.includes('SER TR')
+                            priorityName.includes('SER TR') ||
+                            priorityName.includes('EXC (') ||
+                            priorityName.toLowerCase().includes('do not dispatch')
                         ) {
                             isAssetAssignment = true;
                         }
@@ -1512,19 +1515,27 @@ class AssetAssignmentScraper(BaseScraper):
             await self.close_sidepanel()
             return False
 
-    def find_asset_row(self, asset_name: str, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def find_asset_row(self, asset_name: str, rows: List[Dict[str, Any]], target_priority: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Finds the matching asset work order row on the board.
-        STRICT REQUIREMENT: Must be a genuine fleet vehicle work order (🚛 or 🛻).
+        STRICT REQUIREMENT: Must be a genuine fleet vehicle work order (🚛, 🛻, or 🏗️).
         Must NEVER match customer jobs, crew assignments, or regular work orders.
+        If multiple rows match, prefers the row whose priority matches target_priority.
         """
         if not asset_name or not rows:
             return None
         import re
         c_target = self.canonical_str(asset_name)
-        target_nums = re.findall(r'\d+', asset_name)
-        target_num = target_nums[0] if target_nums else ""
 
+        # Vehicle Type Determination
+        is_target_exc = ("🏗️" in asset_name or "u-40" in asset_name.lower() or "u-17" in asset_name.lower() or "exc" in asset_name.lower())
+        is_target_pump = ("🚛" in asset_name or "pt (" in asset_name.lower() or "pump" in asset_name.lower())
+        is_target_serv = ("🛻" in asset_name or "ser tr" in asset_name.lower() or "service" in asset_name.lower())
+
+        ident_target = asset_name.split("|")[-1].strip() if "|" in asset_name else asset_name.strip()
+        c_ident_target = self.canonical_str(ident_target)
+
+        matched_rows = []
         for r in rows:
             cust = (r.get("customer_name") or "").strip()
             prio = (r.get("priority_name") or "").strip()
@@ -1533,31 +1544,59 @@ class AssetAssignmentScraper(BaseScraper):
             if "👥" in cust or "laborer" in cust.lower() or "helper" in cust.lower():
                 continue
 
-            # 2. Must be a genuine fleet vehicle card (🚛 or 🛻) or explicit asset assignment
-            is_vehicle = ("🛻" in cust or "🚛" in cust)
+            # 2. Must be a genuine fleet vehicle card (🚛, 🛻, 🏗️) or explicit asset assignment
+            is_vehicle = ("🛻" in cust or "🚛" in cust or "🏗️" in cust)
             if not is_vehicle and not r.get("is_asset_assignment"):
-                if not ("asset assignment" in prio.lower() or "ser tr" in prio.lower() or "pt (" in prio.lower() or "service needed" in prio.lower()):
+                if not ("asset assignment" in prio.lower() or "ser tr" in prio.lower() or "pt (" in prio.lower() or "service needed" in prio.lower() or "exc (" in prio.lower() or "do not dispatch" in prio.lower()):
                     continue
+
+            # CRITICAL VEHICLE TYPE ISOLATION:
+            # Excavator (🏗️ / U-40 / U-17) must NEVER match Pump Truck (🚛) or Service Truck (🛻)!
+            is_cust_exc = ("🏗️" in cust or "u-40" in cust.lower() or "u-17" in cust.lower() or "exc" in prio.lower() or "exc" in cust.lower())
+            if is_target_exc != is_cust_exc:
+                continue
+
+            is_cust_pump = ("🚛" in cust or "pt (" in prio.lower() or "pump" in cust.lower())
+            is_cust_serv = ("🛻" in cust or "ser tr" in prio.lower() or "service" in cust.lower())
+            if is_target_pump and is_cust_serv:
+                continue
+            if is_target_serv and is_cust_pump:
+                continue
 
             c_cust = self.canonical_str(cust)
 
-            # 3. Exact canonical match (e.g. '🛻 | 71' matches '🛻 | 71')
+            # 3. Exact full canonical match (e.g. '🛻 | 71' matches '🛻 | 71' or '🏗️ | U-40 03')
+            is_match = False
             if c_target and c_target == c_cust:
-                return r
+                is_match = True
+            else:
+                ident_cust = cust.split("|")[-1].strip() if "|" in cust else cust.strip()
+                c_ident_cust = self.canonical_str(ident_cust)
 
-            # 4. Strict number match on the truck number after pipe '|' for vehicle work orders
-            if target_num and is_vehicle:
-                if "|" in cust:
-                    after_pipe = cust.split("|")[1].strip()
-                    pipe_nums = re.findall(r'\d+', after_pipe)
-                    if pipe_nums and int(pipe_nums[0]) == int(target_num):
-                        return r
-                else:
-                    cust_nums = re.findall(r'\d+', cust)
-                    if cust_nums and int(cust_nums[0]) == int(target_num):
-                        return r
+                # Exact identifier match (e.g. 'u4003' matches 'u4003', or '03' matches '03')
+                if c_ident_target and c_ident_target == c_ident_cust:
+                    is_match = True
+                elif not is_target_exc and not is_cust_exc:
+                    # Single-number truck matching ONLY for pure digits on standard trucks (e.g. '03' matching '3' or '71' matching '071')
+                    # NEVER match multi-token/alphanumeric excavator names like 'U-40 03'!
+                    cust_digits = re.findall(r'^\d+$', ident_cust)
+                    targ_digits = re.findall(r'^\d+$', ident_target)
+                    if cust_digits and targ_digits and int(cust_digits[0]) == int(targ_digits[0]):
+                        is_match = True
 
-        return None
+            if is_match:
+                matched_rows.append(r)
+
+        if not matched_rows:
+            return None
+
+        # If target_priority provided and multiple matches, prefer the row matching target_priority
+        if target_priority and len(matched_rows) > 1:
+            for r in matched_rows:
+                if self.is_priority_match(r.get("priority_name", ""), target_priority):
+                    return r
+
+        return matched_rows[0]
 
     def is_time_matching(self, target_time: str, sched_str: str) -> bool:
         if not target_time or not sched_str:
@@ -1612,6 +1651,8 @@ class AssetAssignmentScraper(BaseScraper):
         target_upper = str(target_priority).upper()
         if "SERVICE NEEDED" in target_upper and "SERVICE NEEDED" in curr_upper:
             return True
+        if "DO NOT DISPATCH" in target_upper and "DO NOT DISPATCH" in curr_upper:
+            return True
 
         m_curr = re.search(r'\b\d+\.\d+\b', str(current_priority))
         m_target = re.search(r'\b\d+\.\d+\b', str(target_priority))
@@ -1630,10 +1671,11 @@ class AssetAssignmentScraper(BaseScraper):
         target_tech: str = "s4",
         current_tech: str = "",
         current_sched: str = "",
-        current_priority: str = ""
+        current_priority: str = "",
+        stage_label: str = "Service Needed Update"
     ) -> bool:
         """
-        Updates an existing asset work order to be in 'Service Needed':
+        Updates an existing asset work order to be in 'Service Needed' or 'Out of Service':
         1. Open sidepanel by clicking WO #.
         2. In Assignment card:
            - If tech already matches target_tech, skip tech edit.
@@ -1645,7 +1687,7 @@ class AssetAssignmentScraper(BaseScraper):
            - Only edit and save Work Order details if either needs updating.
         4. If everything is already set, skip entirely and close sidepanel.
         """
-        print(f"\n🛠️ [Service Needed Update] Processing WO #{work_order_number} ('{asset_name}')...")
+        print(f"\n🛠️ [{stage_label}] Processing WO #{work_order_number} ('{asset_name}')...")
         try:
             if not await self.click_and_open_sidepanel(work_order_number):
                 return False
@@ -1717,7 +1759,7 @@ class AssetAssignmentScraper(BaseScraper):
                         if (priority) break;
                         const text = card.textContent || '';
                         const match = text.match(/\[\d+\]\s*[A-Za-z0-9\.\s\(\)\-_/]+/);
-                        if (match && (match[0].includes('SERVICE') || match[0].includes('ROUTINE') || match[0].includes('PT') || match[0].includes('SER TR') || match[0].includes('SHOP'))) {
+                        if (match && (match[0].includes('SERVICE') || match[0].includes('ROUTINE') || match[0].includes('PT') || match[0].includes('SER TR') || match[0].includes('SHOP') || match[0].includes('EXC') || match[0].includes('DO NOT DISPATCH') || match[0].includes('TRACKING'))) {
                             priority = match[0].trim();
                             break;
                         }
@@ -2023,7 +2065,7 @@ class AssetAssignmentScraper(BaseScraper):
                         for (const item of items) {
                             const txt = (item.textContent || '').trim();
                             const cTxt = norm(txt);
-                            if (cTxt === cTarget || (cTarget && cTxt.includes(cTarget)) || (cTxt && cTarget.includes(cTxt)) || (txt.toUpperCase().includes('SERVICE NEEDED') && target.toUpperCase().includes('SERVICE NEEDED'))) {
+                            if (cTxt === cTarget || (cTarget && cTxt.includes(cTarget)) || (cTxt && cTarget.includes(cTxt)) || (txt.toUpperCase().includes('SERVICE NEEDED') && target.toUpperCase().includes('SERVICE NEEDED')) || (txt.toUpperCase().includes('DO NOT DISPATCH') && target.toUpperCase().includes('DO NOT DISPATCH'))) {
                                 item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                                 item.click();
                                 item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -2036,7 +2078,7 @@ class AssetAssignmentScraper(BaseScraper):
                     if not prio_clicked:
                         try:
                             import re as _re
-                            opt_loc = self.page.locator('.vs__dropdown-menu li, ul[role="listbox"] li, li.vs__dropdown-option').filter(has_text=_re.compile(r'service\s*needed', _re.I)).first
+                            opt_loc = self.page.locator('.vs__dropdown-menu li, ul[role="listbox"] li, li.vs__dropdown-option').filter(has_text=_re.compile(r'service\s*needed|do\s*not\s*dispatch', _re.I)).first
                             if await opt_loc.count() > 0 and await opt_loc.is_visible():
                                 await opt_loc.click(force=True)
                                 prio_clicked = True
@@ -2406,7 +2448,7 @@ class AssetAssignmentScraper(BaseScraper):
             total_reconciled = 0
             total_checked = 0
 
-            # ── 0. Reconcile Out of Service Vehicles (Exempt from Board - NO Cancellation) ──
+            # ── 0. Reconcile Out of Service Vehicles (Update Existing Card to s4, 1:45 PM, [4] DO NOT DISPATCH) ──
             out_of_service_configs = [
                 s for s in self.template_data.get("out_of_service_assets", [])
                 if s.get("active", True)
@@ -2418,11 +2460,49 @@ class AssetAssignmentScraper(BaseScraper):
             }
 
             if out_of_service_configs and click_wos:
-                print(f"\n🚫 [Stage 0/3] Checking {len(out_of_service_configs)} Out of Service vehicle(s) on {normalized_date}...")
+                print(f"\n🚫 [Stage 0/3] Checking {len(out_of_service_configs)} active Out of Service vehicle(s) on {normalized_date}...")
                 for oos_cfg in out_of_service_configs:
                     asset_name = oos_cfg.get("asset_name", "")
-                    reason = oos_cfg.get("reason", "Vehicle is Out of Service for repairs.")
-                    print(f"  🚫 Vehicle '{asset_name}' is OUT OF SERVICE ({reason}). Exempting from reassignment (cancellation disabled).")
+                    target_time = oos_cfg.get("start_time", "1:45 PM")
+                    target_priority = oos_cfg.get("priority", "[4] DO NOT DISPATCH (Tracking)")
+                    service_note = oos_cfg.get("service_note") or oos_cfg.get("reason", "Vehicle is Out of Service for repairs.")
+                    target_tech = oos_cfg.get("tech_name", "s4")
+
+                    matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority)
+                    if matching_row:
+                        wo_num = matching_row.get("work_order_number", "")
+                        curr_tech = matching_row.get("tech_name", "")
+                        curr_sched = matching_row.get("scheduled_date", "")
+                        curr_prio = matching_row.get("priority_name", "")
+
+                        print(f"  👉 Found existing WO #{wo_num} for Out of Service '{asset_name}' on tech '{curr_tech}' (Sched: {curr_sched}, Priority: {curr_prio})")
+
+                        # Check tech, time & priority: if all are already set, skip sidepanel completely!
+                        is_tech_set = not target_tech or self.is_tech_match(curr_tech, target_tech) or (self.canonical_str(curr_tech) == self.canonical_str(target_tech))
+                        is_time_set = not target_time or self.is_time_matching(target_time, curr_sched)
+                        is_prio_set = not target_priority or self.is_priority_match(curr_prio, target_priority)
+
+                        if is_tech_set and is_time_set and is_prio_set:
+                            print(f"  ⏭️ WO #{wo_num} for Out of Service '{asset_name}' is ALREADY fully set (Tech: '{curr_tech}', Time: '{curr_sched}', Priority: '{curr_prio}'). Skipping sidepanel.")
+                            continue
+
+                        total_checked += 1
+                        updated = await self.update_service_needed_work_order(
+                            work_order_number=wo_num,
+                            asset_name=asset_name,
+                            target_time=target_time,
+                            target_priority=target_priority,
+                            service_note=service_note,
+                            target_tech=target_tech,
+                            current_tech=curr_tech,
+                            current_sched=curr_sched,
+                            current_priority=curr_prio,
+                            stage_label="Out of Service Update"
+                        )
+                        if updated:
+                            total_reconciled += 1
+                    else:
+                        print(f"  ⚠️ Could not find card for Out of Service vehicle '{asset_name}' on {normalized_date}.")
 
             if out_of_service_names and truck_headers:
                 truck_headers = [
@@ -2450,7 +2530,7 @@ class AssetAssignmentScraper(BaseScraper):
                     service_note = sn_cfg.get("service_note", "")
                     target_tech = sn_cfg.get("tech_name", "s4")
 
-                    matching_row = self.find_asset_row(asset_name, all_rows)
+                    matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority)
                     if matching_row:
                         wo_num = matching_row.get("work_order_number", "")
                         curr_tech = matching_row.get("tech_name", "")
@@ -2464,8 +2544,8 @@ class AssetAssignmentScraper(BaseScraper):
                         is_time_set = not target_time or self.is_time_matching(target_time, curr_sched)
                         is_prio_set = not target_priority or self.is_priority_match(curr_prio, target_priority)
 
-                        if is_tech_set and is_time_set and is_prio_set and not service_note:
-                            print(f"  ⏭️ WO #{wo_num} for '{asset_name}' is ALREADY fully set (Tech: '{curr_tech}', Time: '{curr_sched}', Priority: '{curr_prio}'). Skipping update.")
+                        if is_tech_set and is_time_set and is_prio_set:
+                            print(f"  ⏭️ WO #{wo_num} for Service Needed '{asset_name}' is ALREADY fully set (Tech: '{curr_tech}', Time: '{curr_sched}', Priority: '{curr_prio}'). Skipping sidepanel.")
                             continue
 
                         total_checked += 1

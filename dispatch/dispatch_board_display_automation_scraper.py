@@ -92,23 +92,83 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return status in ("created", "existing_on_board", "completed")
         return False
 
-    def is_wo_created(self, history: Dict, date_key: str, canon_tech: str, canon_target: str, target_count_idx: int) -> bool:
-        """Check if work order has already been created/logged in persistent history (API memory or local JSON)."""
-        key1 = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
-        if key1 in history and self._is_created_record(history[key1]):
-            return True
-        if not canon_tech:
-            key2 = f"{date_key}||{canon_target}|{target_count_idx}"
-            if key2 in history and self._is_created_record(history[key2]):
+    def is_wo_created(
+        self,
+        history: Dict,
+        date_key: str,
+        canon_tech: str,
+        canon_target: str,
+        target_count_idx: int,
+        time_key: Optional[str] = None
+    ) -> bool:
+        """Check if work order has already been created/logged in persistent history (API memory or local JSON).
+        Strictly requires matching time_key when both work order and history record have a time specified,
+        preventing duplicate names at different times (e.g. ABSENT at 5:00 AM vs 8:00 AM) from colliding.
+        """
+        norm_time = self.canonical_str(time_key) if time_key else ""
+
+        # 1. Primary lookup: direct key with time
+        if norm_time:
+            key_time = f"{date_key}|{canon_tech}|{canon_target}_{norm_time}|{target_count_idx}"
+            if key_time in history and self._is_created_record(history[key_time]):
+                return True
+            if not canon_tech:
+                key_time_notech = f"{date_key}||{canon_target}_{norm_time}|{target_count_idx}"
+                if key_time_notech in history and self._is_created_record(history[key_time_notech]):
+                    return True
+
+        # 2. Base key lookup (must verify time match if record has time)
+        base_key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
+        if base_key in history and self._is_created_record(history[base_key]):
+            rec = history[base_key]
+            rec_time = rec.get("time") or (rec.get("details", {}).get("time") if isinstance(rec.get("details"), dict) else None)
+            if time_key and rec_time:
+                if self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
+                    return True
+                # Different time: DO NOT match!
+            elif not time_key or not rec_time:
                 return True
 
-        # Check if history dict has any recorded entry matching date, canon_target, and occurrence
+        if not canon_tech:
+            base_key_notech = f"{date_key}||{canon_target}|{target_count_idx}"
+            if base_key_notech in history and self._is_created_record(history[base_key_notech]):
+                rec = history[base_key_notech]
+                rec_time = rec.get("time") or (rec.get("details", {}).get("time") if isinstance(rec.get("details"), dict) else None)
+                if time_key and rec_time:
+                    if self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
+                        return True
+                elif not time_key or not rec_time:
+                    return True
+
+        # 3. Fallback scan over history items
         for k, v in history.items():
-            if not self._is_created_record(v):
+            if not self._is_created_record(v) or not isinstance(v, dict):
                 continue
-            if (v.get("date") == date_key or k.startswith(f"{date_key}|")) and v.get("canon_target") == canon_target and v.get("occurrence") == target_count_idx:
+            if (v.get("date") == date_key or k.startswith(f"{date_key}|")):
+                v_target = v.get("canon_target", "")
+                v_base = v.get("base_target", "")
+                target_matched = (
+                    v_target == canon_target or
+                    v_base == canon_target or
+                    (norm_time and v_target == f"{canon_target}_{norm_time}")
+                )
+                if not target_matched:
+                    continue
+                if v.get("occurrence") != target_count_idx:
+                    continue
+
                 rec_tech = v.get("canon_tech") or ""
-                if rec_tech == canon_tech or (rec_tech and canon_tech and (rec_tech in canon_tech or canon_tech in rec_tech)):
+                tech_matched = (rec_tech == canon_tech or (rec_tech and canon_tech and (rec_tech in canon_tech or canon_tech in rec_tech)))
+                if not tech_matched:
+                    continue
+
+                # Enforce time match if both have time specified
+                rec_time = v.get("time") or (v.get("details", {}).get("time") if isinstance(v.get("details"), dict) else None)
+                if time_key and rec_time:
+                    if self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
+                        return True
+                    continue
+                elif not time_key or not rec_time:
                     return True
 
         return False
@@ -166,7 +226,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
             target_count_idx = template_processed_counts[processed_key]
 
-            if not self.is_wo_created(history, db_date_key, canon_h_tech, tracking_target, target_count_idx):
+            if not self.is_wo_created(history, db_date_key, canon_h_tech, tracking_target, target_count_idx, time_key=time_key):
                 return False
 
         # 2. Truck Assign Headers (if not weekend or not skipped)
@@ -188,7 +248,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                 target_count_idx = template_processed_counts[processed_key]
 
-                if not self.is_wo_created(history, db_date_key, canon_h_tech, canon_target, target_count_idx):
+                if not self.is_wo_created(history, db_date_key, canon_h_tech, canon_target, target_count_idx, time_key=time_key):
                     return False
 
         # 3. Tech Jobs
@@ -211,7 +271,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
             target_count_idx = template_processed_counts[processed_key]
 
-            if not self.is_wo_created(history, db_date_key, canon_t_tech, canon_target, target_count_idx):
+            if not self.is_wo_created(history, db_date_key, canon_t_tech, canon_target, target_count_idx, time_key=time_key):
                 return False
 
         # 4. Active Tech Completed Work Orders
@@ -223,7 +283,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
             target_count_idx = template_processed_counts[processed_key]
 
-            if not self.is_wo_created(history, db_date_key, canon_t_assignment, canon_target, target_count_idx):
+            if not self.is_wo_created(history, db_date_key, canon_t_assignment, canon_target, target_count_idx, time_key="4:45 AM"):
                 return False
 
         return True
@@ -239,18 +299,28 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         details: Optional[Dict] = None
     ):
         """Record work order creation in Dashboard API."""
-        key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         det = details or {}
+        time_key = det.get("time", "")
+        norm_time = self.canonical_str(time_key) if time_key else ""
+        target_with_time = f"{canon_target}_{norm_time}" if norm_time else canon_target
+        key = f"{date_key}|{canon_tech}|{target_with_time}|{target_count_idx}"
         rec_data = {
             "date": date_key,
             "canon_tech": canon_tech,
-            "canon_target": canon_target,
+            "canon_target": target_with_time,
+            "base_target": canon_target,
+            "time": time_key,
             "occurrence": target_count_idx,
             "created_at": datetime.now().isoformat(),
             "status": status,
             **det
         }
         history[key] = rec_data
+
+        # Also store base_key if not occupied to support legacy lookups
+        base_key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
+        if base_key not in history:
+            history[base_key] = rec_data
 
         # Sync to Central Dashboard API if reachable
         api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
@@ -470,7 +540,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         time_key: Optional[str] = None,
         require_customer_match: bool = False,
         is_service_wo: bool = False,
-        is_oos_wo: bool = False
+        is_oos_wo: bool = False,
+        match_any_status: bool = False
     ) -> bool:
         """Check if a target canonical string matches a schedule item object."""
         if not canon_target:
@@ -480,18 +551,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if wo.get("is_appointment"):
             return False
 
-        wo_is_sn = bool(wo.get("is_service_needed"))
-        wo_is_oos = bool(wo.get("is_out_of_service"))
+        if not match_any_status:
+            wo_is_sn = bool(wo.get("is_service_needed"))
+            wo_is_oos = bool(wo.get("is_out_of_service"))
 
-        if is_service_wo and not wo_is_sn:
-            return False
-        if not is_service_wo and wo_is_sn:
-            return False
+            if is_service_wo and not wo_is_sn:
+                return False
+            if not is_service_wo and wo_is_sn:
+                return False
 
-        if is_oos_wo and not wo_is_oos:
-            return False
-        if not is_oos_wo and wo_is_oos:
-            return False
+            if is_oos_wo and not wo_is_oos:
+                return False
+            if not is_oos_wo and wo_is_oos:
+                return False
 
         w_time = wo.get("time_key", "")
         if time_key and w_time:
@@ -507,12 +579,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         # For customer match or short targets (<= 4 chars, e.g. '71', '01', '03', '04', '90'):
         # NEVER do raw substring search in combined text, because short numbers match zip codes (98371),
         # phone numbers, lat/long, timestamps, balances, and IDs.
-        if require_customer_match or len(canon_target) <= 4:
+        if require_customer_match or len(canon_target) <= 4 or len(c_cust) <= 4:
             if c_cust == canon_target:
                 return True
             if canon_target in c_strings:
-                return True
-            if c_cust and (c_cust.startswith(canon_target) or c_cust.endswith(canon_target)):
+                # Disallow matching sub-digits of alphanumeric excavator model codes (e.g. '03' in 'u4003')
+                if not any(cs.startswith("u") or cs.startswith("t") for cs in [c_cust, canon_target]):
+                    return True
+            # Match only if exact or same pure numeric integer (e.g. '03' == '3')
+            # NEVER match if c_cust or canon_target has letters (e.g. 'u4003' must NEVER match '03')
+            if c_cust and canon_target and c_cust.isdigit() and canon_target.isdigit() and int(c_cust) == int(canon_target):
                 return True
             return False
 
@@ -520,8 +596,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if canon_target in c_strings:
             return True
 
-        # Exact match or substring in customer name
-        if c_cust and (canon_target == c_cust or canon_target in c_cust or c_cust in canon_target):
+        # Exact match or substring in customer name (only if BOTH >= 5 chars)
+        if c_cust and len(canon_target) >= 5 and len(c_cust) >= 5 and (canon_target == c_cust or canon_target in c_cust or c_cust in canon_target):
             return True
 
         # Match in combined string (only for longer target strings >= 5 chars)
@@ -531,15 +607,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         return False
 
-    def extract_existing_wos(self, board_data):
+    def extract_existing_wos(self, board_data, target_date_key: Optional[str] = None):
         """Extract existing work orders and active board date from intercepted JSON data."""
         if not board_data or "Board" not in board_data:
             return None, {}
         
-        board_date_str = None
+        board_date_str = target_date_key or None
         existing_wos = {}
         
-        if board_data["Board"].get("Headers"):
+        if not board_date_str and board_data["Board"].get("Headers"):
             first_header = board_data["Board"]["Headers"][0]
             dt_str = first_header.get("HeaderDateTime")
             if dt_str:
@@ -548,6 +624,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     board_date_str = dt_str.replace("T", " ").split(" ")[0]  # "YYYY-MM-DD"
                 except Exception:
                     pass
+
+        effective_date = target_date_key or board_date_str
         
         for group in board_data["Board"].get("Groups", []):
             for row in group.get("Rows", []):
@@ -575,6 +653,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         item.get("StartTime")
                     )
                     time_key = ""
+                    item_date_str = ""
                     if dt_str:
                         dt_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
                         for fmt in [
@@ -588,9 +667,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 local_dt = datetime.strptime(dt_clean, fmt)
                                 time_key = local_dt.strftime("%I:%M %p")
                                 if time_key.startswith("0"): time_key = time_key[1:]
+                                if "%Y" in fmt:
+                                    item_date_str = local_dt.strftime("%Y-%m-%d")
                                 break
                             except Exception:
                                 pass
+
+                    # Strictly ignore schedule items belonging to other calendar dates (e.g. yesterday 2026-12-06 on a 2026-12-07 board)
+                    if effective_date and item_date_str and item_date_str != effective_date:
+                        continue
 
                     item_prio = str(item.get("Priority") or item.get("PriorityName") or item.get("PriorityDescription") or "")
                     norm_prio = re.sub(r'[^a-zA-Z0-9]', '', item_prio).lower()
@@ -640,6 +725,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     time_key = ""
                     start_time_obj = None
                     end_time_obj = None
+                    appt_from_date = ""
+                    appt_to_date = ""
                     if dt_str:
                         dt_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
                         for fmt in [
@@ -654,6 +741,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 time_key = local_dt.strftime("%I:%M %p")
                                 if time_key.startswith("0"): time_key = time_key[1:]
                                 start_time_obj = local_dt.time()
+                                if "%Y" in fmt:
+                                    appt_from_date = local_dt.strftime("%Y-%m-%d")
                                 break
                             except Exception:
                                 pass
@@ -670,9 +759,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             try:
                                 local_dt_to = datetime.strptime(dt_to_clean, fmt)
                                 end_time_obj = local_dt_to.time()
+                                if "%Y" in fmt:
+                                    appt_to_date = local_dt_to.strftime("%Y-%m-%d")
                                 break
                             except Exception:
                                 pass
+
+                    # If appointment ended before effective_date or starts after effective_date, ignore it
+                    if effective_date:
+                        if appt_to_date and appt_to_date < effective_date:
+                            continue
+                        if appt_from_date and appt_from_date > effective_date:
+                            continue
 
                     existing_wos[canon_tech].append({
                         "canon_customer": canon_customer,
@@ -723,7 +821,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             """
             new_data = await self.page.evaluate(fetch_js)
             if new_data and "Board" in new_data:
-                b_date, e_wos = self.extract_existing_wos(new_data)
+                b_date, e_wos = self.extract_existing_wos(new_data, target_date_key=target_date_str)
                 print(f"📡 Dynamically fetched board date: '{b_date}' | Found {len(e_wos)} tech groups.")
                 return b_date, e_wos
             else:
@@ -1145,21 +1243,38 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     return True
 
                 # Pass 5: Substring match (ONLY allowed if BOTH target and option have length >= 4)
-                # CRITICAL: NEVER do substring matching for short tokens (like 's7', 's6', 'c', 'e')!
+                # CRITICAL: NEVER do substring matching across different vehicle categories!
+                is_target_exc = ("🏗️" in option_text or "u-40" in option_text.lower() or "u-17" in option_text.lower() or "exc" in option_text.lower())
+                is_raw_exc = ("🏗️" in s_raw or "u-40" in s_raw.lower() or "u-17" in s_raw.lower() or "exc" in s_raw.lower())
+                if is_target_exc != is_raw_exc:
+                    return False
+
+                is_target_pump = ("🚛" in option_text or "pump" in option_text.lower())
+                is_raw_serv = ("🛻" in s_raw or "service" in s_raw.lower())
+                if is_target_pump and is_raw_serv:
+                    return False
+
+                is_target_serv = ("🛻" in option_text or "service" in option_text.lower())
+                is_raw_pump = ("🚛" in s_raw or "pump" in s_raw.lower())
+                if is_target_serv and is_raw_pump:
+                    return False
+
                 if len(target_norm) >= 4 and len(norm_raw) >= 4:
                     if target_norm in norm_raw or norm_raw in target_norm:
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
 
-                # Pass 6: Truck number / digits match (e.g. '124' in '🚛 | 124')
-                m_digits = re.search(r'\b\d{2,4}\b', target_canon)
-                if m_digits and len(target_canon) >= 4:
-                    d_target = m_digits.group(0)
-                    if d_target in c_raw:
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
-                        return True
+                # Pass 6: Pure truck number match ONLY if both are pure trucks (🚛 / 🛻)
+                # NEVER allow for excavators (U-40 03) or cross-category matches!
+                if not is_target_exc and not is_raw_exc:
+                    after_pipe_target = option_text.split("|")[-1].strip() if "|" in option_text else option_text.strip()
+                    after_pipe_raw = s_raw.split("|")[-1].strip() if "|" in s_raw else s_raw.strip()
+                    if re.match(r'^\d{2,4}$', after_pipe_target) and re.match(r'^\d{2,4}$', after_pipe_raw):
+                        if int(after_pipe_target) == int(after_pipe_raw):
+                            await opt_el.scroll_into_view_if_needed()
+                            await opt_el.click(force=True)
+                            return True
 
                 return False
 
@@ -2081,9 +2196,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             c_n = self.canonical_str(oos_name)
             if c_n:
                 oos_canonical_names.add(c_n)
-            digits = re.findall(r'\b\d{2,4}\b', oos_name)
-            for d in digits:
-                oos_asset_numbers.add(d)
+            # Only add pure numeric truck numbers (e.g. '122' from '🚛 | 122')
+            # NEVER extract sub-digits from excavator model codes like 'U-40 03'!
+            after_pipe = oos_name.split("|")[-1].strip() if "|" in oos_name else oos_name.strip()
+            if re.match(r'^\d{2,4}$', after_pipe):
+                oos_asset_numbers.add(after_pipe)
 
             note = oos.get("service_note") or oos.get("reason") or ""
             out_of_service_headers.append({
@@ -2107,9 +2224,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     continue
                 if self.canonical_str(check_str) in oos_canonical_names:
                     return True
-                h_digits = re.findall(r'\b\d{2,4}\b', check_str)
-                if any(d in oos_asset_numbers for d in h_digits):
-                    return True
+                # Match truck number ONLY if check_str after pipe is a pure single-number truck
+                after_p = check_str.split("|")[-1].strip() if "|" in check_str else check_str.strip()
+                if re.match(r'^\d{2,4}$', after_p) and after_p in oos_asset_numbers:
+                    # Vehicle type safety: Truck cannot match Excavator
+                    is_h_truck = ("🛻" in check_str or "🚛" in check_str)
+                    if is_h_truck:
+                        return True
             return False
 
         if oos_canonical_names:
@@ -2146,9 +2267,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             c_n = self.canonical_str(sn.get("name", ""))
             if c_n:
                 sn_canonical_names.add(c_n)
-            digits = re.findall(r'\b\d{2,4}\b', sn.get("name", ""))
-            for d in digits:
-                sn_asset_numbers.add(d)
+            after_pipe = sn.get("name", "").split("|")[-1].strip() if "|" in sn.get("name", "") else sn.get("name", "").strip()
+            if re.match(r'^\d{2,4}$', after_pipe):
+                sn_asset_numbers.add(after_pipe)
 
         def _is_sn_asset(header_item):
             h_name = header_item.get("name", "")
@@ -2158,17 +2279,17 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     continue
                 if self.canonical_str(check_str) in sn_canonical_names:
                     return True
-                h_digits = re.findall(r'\b\d{2,4}\b', check_str)
-                if any(d in sn_asset_numbers for d in h_digits):
-                    return True
+                after_p = check_str.split("|")[-1].strip() if "|" in check_str else check_str.strip()
+                if re.match(r'^\d{2,4}$', after_p) and after_p in sn_asset_numbers:
+                    is_h_truck = ("🛻" in check_str or "🚛" in check_str)
+                    if is_h_truck:
+                        return True
             return False
 
         if service_needed_headers:
-            # Note: Do NOT remove Service Needed assets from static_headers/truck_assign_headers!
-            # The dashboard explicitly specifies that duplicates appear under 3 - SERVICE NEEDED,
-            # so assets (like 123 in Pump Trucks and 71 in Service Trucks) remain in their standard categories
-            # and ALSO have a duplicate card created under Service Needed.
-            print(f"🔧 Loaded {len(service_needed_headers)} active Service Needed duplicate asset(s) to create: {', '.join([s['name'] for s in service_needed_headers])}")
+            static_headers = [h for h in static_headers if not _is_sn_asset(h)]
+            truck_assign_headers = [h for h in truck_assign_headers if not _is_sn_asset(h)]
+            print(f"🚫 Exempted {len(sn_canonical_names)} Service Needed vehicle(s) from standard categories: {', '.join([s['name'] for s in service_needed_headers])}")
 
         # Prepend Out of Service and Service Needed headers so they are created first before standard headers
         special_headers = out_of_service_headers + service_needed_headers
@@ -2425,45 +2546,57 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             target_count_idx = template_processed_counts[processed_key]
                         
                             # Check persistent creation history first
-                            if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx):
+                            if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, time_key=time_key):
                                 print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                                 continue
 
                             # For Service Needed assets:
-                            # Strict check: only consider already on board if it exists on its intended tech row (s4)
+                            # If asset already exists ANYWHERE on the board (on ANY tech row), skip new creation so Asset Scraper can re-assign/update it
                             if is_service_wo:
-                                asset_already_on_board = False
+                                sn_existing_tech = None
                                 for c_tk, w_list in existing_wos.items():
-                                    if canon_h_tech and c_tk != canon_h_tech and canon_h_tech not in c_tk:
-                                        continue
                                     for w in w_list:
-                                        if self.check_item_match(w, canon_target, time_key=time_key, require_customer_match=True, is_service_wo=True, is_oos_wo=False):
-                                            asset_already_on_board = True
+                                        if self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
+                                            sn_existing_tech = c_tk
                                             break
-                                    if asset_already_on_board:
+                                    if sn_existing_tech:
                                         break
                                 
-                                if asset_already_on_board:
-                                    print(f"⏭️ Service Needed asset '{name}' ALREADY exists on tech '{h_tech}' for {date_str}. Skipping creation to prevent duplicate.")
+                                if sn_existing_tech:
+                                    print(f"⏭️ Service Needed asset '{name}' ALREADY exists on the board (tech '{sn_existing_tech}') for {date_str}. Skipping new creation so Asset Scraper can re-assign/update it.")
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
                             # For Out of Service assets:
-                            # Strict check: only consider already on board if it exists on its intended tech row (s4)
+                            # If asset already exists ANYWHERE on the board (on ANY tech row), skip new creation so Asset Scraper can re-assign/update it
                             if is_oos_wo:
-                                oos_already_on_board = False
+                                oos_existing_tech = None
                                 for c_tk, w_list in existing_wos.items():
-                                    if canon_h_tech and c_tk != canon_h_tech and canon_h_tech not in c_tk:
-                                        continue
                                     for w in w_list:
-                                        if self.check_item_match(w, canon_target, time_key=time_key, require_customer_match=True, is_service_wo=False, is_oos_wo=True):
-                                            oos_already_on_board = True
+                                        if self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
+                                            oos_existing_tech = c_tk
                                             break
-                                    if oos_already_on_board:
+                                    if oos_existing_tech:
                                         break
                                 
-                                if oos_already_on_board:
-                                    print(f"⏭️ Out of Service asset '{name}' ALREADY exists on tech '{h_tech}' for {date_str}. Skipping creation to prevent duplicate.")
+                                if oos_existing_tech:
+                                    print(f"⏭️ Out of Service asset '{name}' ALREADY exists on the board (tech '{oos_existing_tech}') for {date_str}. Skipping new creation so Asset Scraper can re-assign/update it.")
+                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                    continue
+
+                            # If this vehicle/asset is already on the board as Service Needed or Out of Service, skip standard static header creation!
+                            if not is_service_wo and not is_oos_wo:
+                                asset_already_sn_or_oos = False
+                                for c_tk, w_list in existing_wos.items():
+                                    for w in w_list:
+                                        if not w.get("is_appointment") and self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
+                                            if w.get("is_service_needed") or w.get("is_out_of_service"):
+                                                asset_already_sn_or_oos = True
+                                                break
+                                    if asset_already_sn_or_oos:
+                                        break
+                                if asset_already_sn_or_oos:
+                                    print(f"⏭️ Asset '{name}' is ALREADY on the board as Service Needed / Out of Service for {date_str}. Skipping standard static header creation.")
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
@@ -2473,7 +2606,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     tech_match = (
                                         canon_tech_key == canon_h_tech or
                                         canon_h_tech in canon_tech_key or
-                                        canon_tech_key in canon_h_tech
+                                        canon_tech_key in canon_h_tech or
+                                        self.is_tech_match(canon_h_tech, canon_tech_key)
                                     )
                                 else:
                                     tech_match = not canon_tech_key
@@ -2481,7 +2615,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if tech_match:
                                     for wo in wo_list:
                                         if not wo.get("is_appointment"):
-                                            if self.check_item_match(wo, canon_target, time_key, is_service_wo=is_service_wo, is_oos_wo=is_oos_wo):
+                                            # On staging rows (s4, s3, etc.) each vehicle/trailer/helper/banner is unique per date.
+                                            # Match without time restriction to prevent duplicates if scheduled time shifted.
+                                            check_time = None if canon_h_tech in ("s4", "s3", "f2", "p2") else time_key
+                                            if self.check_item_match(wo, canon_target, check_time, is_service_wo=is_service_wo, is_oos_wo=is_oos_wo, match_any_status=(is_service_wo or is_oos_wo or canon_h_tech in ("s4", "s3", "f2", "p2"))):
                                                 board_count += 1
                                         else:
                                             # For appointments (PTO/OFF/SICK/TBD): skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
@@ -2584,8 +2721,28 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 )
                             
                                 # Check persistent creation history first
-                                if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx):
+                                if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, time_key=time_key):
                                     print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
+                                    continue
+
+                                # Check if truck already exists on s4 as Service Needed or Out of Service
+                                is_oos_asset = any(
+                                    self.canonical_str(s.get("asset_name", "")) == canon_target
+                                    for s in self.template_data.get("out_of_service_assets", [])
+                                    if s.get("active", True)
+                                )
+                                truck_on_s4_sn_or_oos = False
+                                if is_service_needed_asset or is_oos_asset:
+                                    truck_on_s4_sn_or_oos = True
+                                else:
+                                    for wo in existing_wos.get("s4", []):
+                                        if not wo.get("is_appointment") and self.check_item_match(wo, canon_target, require_customer_match=True, match_any_status=True):
+                                            if wo.get("is_service_needed") or wo.get("is_out_of_service"):
+                                                truck_on_s4_sn_or_oos = True
+                                                break
+                                if truck_on_s4_sn_or_oos:
+                                    print(f"⏭️ Truck '{name}' is on 's4' as Service Needed / Out of Service for {date_str}. Skipping creating truck assign header on tech '{h_tech}'.")
+                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
                                 # Duplicate prevention: Check if this truck already exists on ANY REAL tech on the board
@@ -2735,7 +2892,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                             target_count_idx = template_processed_counts[processed_key]
 
-                            if not force and self.is_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx):
+                            if not force and self.is_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, time_key=time_key):
                                 print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                                 continue
 
@@ -2832,8 +2989,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 except Exception:
                                     time_key = ""
 
-                            if not force and self.is_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx):
-                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) was previously created and recorded in history. Skipping 2nd creation.")
+                            if not force and self.is_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, time_key=time_key):
+                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                                 continue
 
                             board_count = 0
@@ -2843,7 +3000,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     not canon_t_assignment or not canon_tech_key or
                                     canon_tech_key == canon_t_assignment or
                                     canon_t_assignment in canon_tech_key or
-                                    canon_tech_key in canon_t_assignment
+                                    canon_tech_key in canon_t_assignment or
+                                    self.is_tech_match(canon_t_assignment, canon_tech_key)
                                 )
                                 if tech_match:
                                     for wo in wo_list:
@@ -2864,13 +3022,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                 tech_off_for_day = True
                                                 break
                                             continue
-                                        if self.check_item_match(wo, canon_target, time_key, require_customer_match=True):
+                                        # Match technician completed shift WO: must match technician, name, and time on the target date!
+                                        if self.check_item_match(wo, canon_target, time_key=time_key, require_customer_match=True, match_any_status=True):
                                             board_count += 1
                                     if tech_off_for_day:
                                         break
                                         
                             if tech_off_for_day or board_count >= target_count_idx:
-                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx}) skipped (tech has matching appointment at {time_key} or already on board). Recording in persistent history.")
+                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx} at {time_key}) skipped (tech has matching appointment or already on board). Recording in persistent history.")
                                 self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="existing_on_board", details={"name": t_name, "tech": t_assignment_name, "time": time_key})
                                 continue
 
@@ -2892,7 +3051,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 summary_note=None
                             )
                             if res:
-                                self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name})
+                                self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name, "time": time_key})
                                 # Refresh board data after save
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                                 if f_date == db_date_key:
