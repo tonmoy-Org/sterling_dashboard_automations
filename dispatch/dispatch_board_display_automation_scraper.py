@@ -1,9 +1,3 @@
-"""
-Dispatch Board Display Automation Scraper
-Pre-creates static visual aid work orders and completed technician display work orders
-on the FieldEdge Dispatch Board up to 30 days in advance.
-"""
-
 import os
 import sys
 import json
@@ -23,29 +17,13 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-# Ensure local dispatch directory is on sys.path
 _dispatch_dir = os.path.dirname(os.path.abspath(__file__))
 if _dispatch_dir not in sys.path:
     sys.path.insert(0, _dispatch_dir)
 
-try:
-    from base_scraper import BaseScraper
-except ImportError:
-    try:
-        from automation.scrapers.base_scraper import BaseScraper  # type: ignore
-    except ImportError:
-        from dispatch.base_scraper import BaseScraper  # type: ignore
-
-
-
-
-
-
+from base_scraper import BaseScraper
 
 class DispatchBoardDisplayAutomationScraper(BaseScraper):
-    """
-    Scraper and automation engine for FieldEdge 'Dispatch Board Display Automation'.
-    """
 
     def __init__(self, template_path: Optional[str] = None):
         super().__init__()
@@ -60,10 +38,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         self.template_data = self._load_template()
 
     def _load_history(self) -> Dict:
-        """Load persistent work order creation history from Central Dashboard API."""
         history = {}
 
-        # Sync from Dashboard API if configured and reachable
         api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
         if api_url:
             try:
@@ -85,8 +61,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
     @staticmethod
     def _is_created_record(v) -> bool:
-        """Records that were created by automation or confirmed existing on the board are trusted for skipping.
-        This respects manual edits in FieldEdge and prevents redundant recreations."""
         if isinstance(v, dict):
             status = v.get("status", "")
             return status in ("created", "existing_on_board", "completed")
@@ -101,13 +75,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         target_count_idx: int,
         time_key: Optional[str] = None
     ) -> bool:
-        """Check if work order has already been created/logged in persistent history (API memory or local JSON).
-        Strictly requires matching time_key when both work order and history record have a time specified,
-        preventing duplicate names at different times (e.g. ABSENT at 5:00 AM vs 8:00 AM) from colliding.
-        """
         norm_time = self.canonical_str(time_key) if time_key else ""
 
-        # 1. Primary lookup: direct key with time
         if norm_time:
             key_time = f"{date_key}|{canon_tech}|{canon_target}_{norm_time}|{target_count_idx}"
             if key_time in history and self._is_created_record(history[key_time]):
@@ -117,7 +86,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if key_time_notech in history and self._is_created_record(history[key_time_notech]):
                     return True
 
-        # 2. Base key lookup (must verify time match if record has time)
         base_key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         if base_key in history and self._is_created_record(history[base_key]):
             rec = history[base_key]
@@ -125,7 +93,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if time_key and rec_time:
                 if self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
                     return True
-                # Different time: DO NOT match!
             elif not time_key or not rec_time:
                 return True
 
@@ -140,7 +107,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 elif not time_key or not rec_time:
                     return True
 
-        # 3. Fallback scan over history items
         for k, v in history.items():
             if not self._is_created_record(v) or not isinstance(v, dict):
                 continue
@@ -162,7 +128,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if not tech_matched:
                     continue
 
-                # Enforce time match if both have time specified
                 rec_time = v.get("time") or (v.get("details", {}).get("time") if isinstance(v.get("details"), dict) else None)
                 if time_key and rec_time:
                     if self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
@@ -185,16 +150,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         skip_vehicle_on_weekends: bool,
         force: bool = False
     ) -> bool:
-        """
-        Check if all items for db_date_key have already been recorded in history.
-        If force=True, always returns False so all items are verified/created on FieldEdge.
-        """
         if force:
             return False
 
         template_processed_counts = {}
 
-        # 1. Static Headers
         for header in static_headers:
             name = header.get("name")
             start_time = header.get("start_time")
@@ -229,7 +189,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if not self.is_wo_created(history, db_date_key, canon_h_tech, tracking_target, target_count_idx, time_key=time_key):
                 return False
 
-        # 2. Truck Assign Headers (if not weekend or not skipped)
         if not (is_weekend and skip_vehicle_on_weekends):
             for header in truck_assign_headers:
                 name = header.get("name")
@@ -251,7 +210,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if not self.is_wo_created(history, db_date_key, canon_h_tech, canon_target, target_count_idx, time_key=time_key):
                     return False
 
-        # 3. Tech Jobs
         for job in tech_jobs:
             if not job.get("active", True):
                 continue
@@ -274,7 +232,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if not self.is_wo_created(history, db_date_key, canon_t_tech, canon_target, target_count_idx, time_key=time_key):
                 return False
 
-        # 4. Active Tech Completed Work Orders
         for tech in active_techs:
             t_assignment_name = tech
             canon_target = self.canonical_str(tech)
@@ -298,7 +255,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         status: str = "created",
         details: Optional[Dict] = None
     ):
-        """Record work order creation in Dashboard API."""
         det = details or {}
         time_key = det.get("time", "")
         norm_time = self.canonical_str(time_key) if time_key else ""
@@ -317,12 +273,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         }
         history[key] = rec_data
 
-        # Also store base_key if not occupied to support legacy lookups
         base_key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         if base_key not in history:
             history[base_key] = rec_data
 
-        # Sync to Central Dashboard API if reachable
         api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
         if api_url:
             try:
@@ -345,8 +299,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
     @staticmethod
     def _extract_jwt_from_response(data) -> Optional[str]:
-        """Find a JWT access token in common login response shapes
-        (e.g. {"access": ...}, {"token": ...}, {"data": {"accessToken": ...}}, {"tokens": {"access": ...}})."""
         token_keys = ("access", "access_token", "accessToken", "token", "jwt", "id_token", "idToken", "auth_token")
         if isinstance(data, dict):
             for k in token_keys:
@@ -366,13 +318,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return None
 
     def _get_api_auth_headers(self) -> Dict[str, str]:
-        """
-        Build Authorization header for protected Dashboard API endpoints.
-        Priority:
-          1. BACKEND_API_TOKEN (static JWT / token from .env)
-          2. Login with BACKEND_API_EMAIL + BACKEND_API_PASSWORD at BACKEND_LOGIN_PATH (default: /auth/login)
-        Returns {} if no credentials are configured or login fails.
-        """
         static_token = os.getenv("BACKEND_API_TOKEN", "").strip()
         if static_token:
             return {"Authorization": static_token if " " in static_token else f"Bearer {static_token}"}
@@ -403,7 +348,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     token = self._extract_jwt_from_response(json.loads(raw))
                 except Exception:
                     pass
-                # Fallback: some backends return the JWT only as an HttpOnly cookie
                 if not token:
                     for cookie in response.headers.get_all("Set-Cookie") or []:
                         name, _, rest = cookie.partition("=")
@@ -426,7 +370,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return {}
 
     def _load_template(self) -> Dict:
-        """Load visual work order configuration template from API or local JSON file."""
         api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
         if api_url:
             try:
@@ -447,11 +390,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             except Exception:
                                 local_data = {}
 
-                        # Overwrite with live remote settings (truck assignments, techs, headers)
                         for key, value in remote_data.items():
                             local_data[key] = value
 
-                        # Cache live data back to local template file for offline fallback
                         try:
                             with open(self.template_path, "w", encoding="utf-8") as f:
                                 json.dump(local_data, f, indent=2, ensure_ascii=False)
@@ -471,7 +412,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
     @staticmethod
     def canonical_str(t: str) -> str:
-        """Strip everything except alphanumeric for robust duplicate comparison across emojis & whitespace."""
         if not t:
             return ""
         import unicodedata, re
@@ -482,7 +422,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
     @staticmethod
     def is_tech_match(tech1: str, tech2: str) -> bool:
-        """Compare two technician names matching across single-letter prefixes, unicode bold, and full names."""
         if not tech1 or not tech2:
             return False
         import unicodedata, re
@@ -505,7 +444,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
     @staticmethod
     def _extract_all_strings_recursive(obj) -> List[str]:
-        """Recursively extract all string values from a dict or list."""
         strings = []
         if isinstance(obj, str):
             if obj.strip():
@@ -520,7 +458,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
     @staticmethod
     def normalize_time_key(time_val: Optional[str]) -> str:
-        """Normalize any time string (e.g. '07:30 AM', '7:30 AM', '07:30:00', '7:30am') to standard 'H:MM AM/PM'."""
         if not time_val:
             return ""
         s = str(time_val).strip()
@@ -543,11 +480,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         is_oos_wo: bool = False,
         match_any_status: bool = False
     ) -> bool:
-        """Check if a target canonical string matches a schedule item object."""
         if not canon_target:
             return False
 
-        # Appointments (PTO/OFF/SICK/TBD) never match work order customer names
         if wo.get("is_appointment"):
             return False
 
@@ -576,31 +511,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         c_cust = wo.get("canon_customer", "")
         c_strings = wo.get("canon_strings", [])
 
-        # For customer match or short targets (<= 4 chars, e.g. '71', '01', '03', '04', '90'):
-        # NEVER do raw substring search in combined text, because short numbers match zip codes (98371),
-        # phone numbers, lat/long, timestamps, balances, and IDs.
         if require_customer_match or len(canon_target) <= 4 or len(c_cust) <= 4:
             if c_cust == canon_target:
                 return True
             if canon_target in c_strings:
-                # Disallow matching sub-digits of alphanumeric excavator model codes (e.g. '03' in 'u4003')
                 if not any(cs.startswith("u") or cs.startswith("t") for cs in [c_cust, canon_target]):
                     return True
-            # Match only if exact or same pure numeric integer (e.g. '03' == '3')
-            # NEVER match if c_cust or canon_target has letters (e.g. 'u4003' must NEVER match '03')
             if c_cust and canon_target and c_cust.isdigit() and canon_target.isdigit() and int(c_cust) == int(canon_target):
                 return True
             return False
 
-        # Exact match in any extracted string
         if canon_target in c_strings:
             return True
 
-        # Exact match or substring in customer name (only if BOTH >= 5 chars)
         if c_cust and len(canon_target) >= 5 and len(c_cust) >= 5 and (canon_target == c_cust or canon_target in c_cust or c_cust in canon_target):
             return True
 
-        # Match in combined string (only for longer target strings >= 5 chars)
         c_comb = wo.get("canon_combined", "")
         if c_comb and len(canon_target) >= 5 and (canon_target == c_comb or canon_target in c_comb):
             return True
@@ -608,7 +534,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return False
 
     def extract_existing_wos(self, board_data, target_date_key: Optional[str] = None):
-        """Extract existing work orders and active board date from intercepted JSON data."""
         if not board_data or "Board" not in board_data:
             return None, {}
         
@@ -620,8 +545,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             dt_str = first_header.get("HeaderDateTime")
             if dt_str:
                 try:
-                    # e.g., '2026-09-01T04:45:00' or '2026-09-01 04:45:00'
-                    board_date_str = dt_str.replace("T", " ").split(" ")[0]  # "YYYY-MM-DD"
+                    board_date_str = dt_str.replace("T", " ").split(" ")[0]
                 except Exception:
                     pass
 
@@ -635,7 +559,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if canon_tech not in existing_wos:
                     existing_wos[canon_tech] = []
                 
-                # Process ScheduleItems
                 for item in row.get("ScheduleItems", []):
                     all_raw_strings = self._extract_all_strings_recursive(item)
                     canon_strings = [self.canonical_str(s) for s in all_raw_strings if s]
@@ -673,7 +596,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             except Exception:
                                 pass
 
-                    # Strictly ignore schedule items belonging to other calendar dates (e.g. yesterday 2026-12-06 on a 2026-12-07 board)
                     if effective_date and item_date_str and item_date_str != effective_date:
                         continue
 
@@ -704,7 +626,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         "is_appointment": False
                     })
 
-                # Process AppointmentItems (e.g. OFF - AC, PTO, SICK)
                 for appt in row.get("AppointmentItems", []):
                     all_raw_strings = self._extract_all_strings_recursive(appt)
                     canon_strings = [self.canonical_str(s) for s in all_raw_strings if s]
@@ -765,7 +686,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             except Exception:
                                 pass
 
-                    # If appointment ended before effective_date or starts after effective_date, ignore it
                     if effective_date:
                         if appt_to_date and appt_to_date < effective_date:
                             continue
@@ -785,7 +705,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return board_date_str, existing_wos
 
     async def fetch_board_data_for_date(self, target_date_str: str, board_req: dict):
-        """Dynamically fetch fresh board data JSON from FieldEdge for target_date_str (YYYY-MM-DD)."""
         if not board_req or not board_req.get("url"):
             print(f"  ⚠️ Cannot dynamically fetch board data for {target_date_str}: board_req template missing.")
             return None, {}
@@ -831,51 +750,50 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return None, {}
 
     async def navigate_to_board_date(self, target_date_obj: datetime) -> bool:
-        """
-        Navigate to target_date on the Dispatch Board UI using direct URL navigation.
-        URL format: https://login.fieldedge.com/#/DispatchBoard/MM-DD-YYYY (e.g., https://login.fieldedge.com/#/DispatchBoard/09-23-2026)
-        """
         try:
             date_url_str = target_date_obj.strftime("%m-%d-%Y")
             target_url = f"https://login.fieldedge.com/#/DispatchBoard/{date_url_str}"
             print(f"🗓️ Navigating to Dispatch Board URL for date: {target_url}")
             
-            # Go to the URL and then force reload to ensure the SPA fetches the new date's data
             await self.page.goto(target_url, wait_until='domcontentloaded', timeout=30000)
             await self.page.reload(wait_until='domcontentloaded', timeout=30000)
-            await self.page.wait_for_timeout(4000)
+            try:
+                spinners = self.page.locator(".loading, .spinner, .v-spinner, div[class*='loading']:visible")
+                if await spinners.count() > 0:
+                    await spinners.first.wait_for(state="hidden", timeout=4000)
+            except Exception:
+                pass
+            await self.page.wait_for_timeout(1500)
             return True
         except Exception as e:
             print(f"⚠️ Could not navigate to board date via URL {target_url}: {e}")
             return False
 
     async def ensure_clean_dispatch_board(self, force_reload: bool = False):
-        """
-        Ensure page is cleanly loaded on Dispatch Board and not stuck in a loading spinner state.
-        Navigates or reloads to dispatch_url to guarantee a fresh interactable state.
-        """
         dispatch_url = self.rules.get('web_url', 'https://login.fieldedge.com/Dispatch')
         current_url = self.page.url
 
-        # Check for Login redirect
         if "Login" in current_url or await self.page.locator("input[name='UserName']").is_visible():
             print("⚠️ Detected Login redirect. Re-authenticating to FieldEdge...")
             try:
                 await self.login_fieldedge()
                 print(f"Returning to Dispatch Board: {dispatch_url}")
                 await self.page.goto(dispatch_url, wait_until='domcontentloaded')
-                await self.page.wait_for_timeout(4000)
+                try:
+                    btn_loc = self.page.locator("//button[contains(normalize-space(), 'Work Order') or contains(normalize-space(), 'Create Work Order')]")
+                    await btn_loc.first.wait_for(state="attached", timeout=4000)
+                except Exception:
+                    await self.page.wait_for_timeout(1000)
+                await self.page.wait_for_timeout(500)
             except Exception as e:
                 print(f"❌ Re-authentication failed: {e}")
             return
 
         needs_fresh_load = force_reload
 
-        # Check if URL is not main Dispatch Board or stuck on DispatchSummary
         if "Dispatch" not in current_url or "DispatchSummary" in current_url:
             needs_fresh_load = True
         else:
-            # Check if loading spinner / overlay is active and stuck
             try:
                 spinners = self.page.locator(".loading, .spinner, .v-spinner, div[class*='loading']:visible")
                 if await spinners.count() > 0 and await spinners.first.is_visible():
@@ -894,21 +812,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception as e:
                 print(f"⚠️ Navigation error ({e}). Retrying page reload...")
                 await self.page.reload(wait_until='domcontentloaded')
-            await self.page.wait_for_timeout(4000)
+            try:
+                btn_loc = self.page.locator("//button[contains(normalize-space(), 'Work Order') or contains(normalize-space(), 'Create Work Order')]")
+                await btn_loc.first.wait_for(state="attached", timeout=4000)
+            except Exception:
+                await self.page.wait_for_timeout(1000)
+            await self.page.wait_for_timeout(500)
 
     async def open_create_wo_modal(self):
-        """Click on the Create Work Order button in FieldEdge UI with session check & retry."""
         xpath = self.rules.get('dispatch_board_create_wo_btn_xpath') or "//button[contains(normalize-space(), 'Work Order') or contains(normalize-space(), 'Create Work Order')]"
         if not xpath:
             print("⚠️ 'dispatch_board_create_wo_btn_xpath' rule not defined.")
             return False
 
-        # Ensure board is in clean interactable state before clicking
         await self.ensure_clean_dispatch_board()
 
         try:
-            # FieldEdge sometimes has hidden 'Create Work Order' buttons in the DOM (e.g. mobile menus).
-            # .first locks onto the hidden one and times out. We must find the visible one.
             buttons = self.page.locator(xpath)
             await buttons.first.wait_for(state="attached", timeout=30000)
             
@@ -929,7 +848,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if not clicked:
                 raise Exception("No visible Create Work Order button found.")
                 
-            # Wait for Create WO modal/Customer dropdown to become visible (VPS rendering can be slower)
             customer_xpath = self.rules.get(
                 'dispatch_board_customer_xpath',
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]"
@@ -955,7 +873,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         pass
                 if modal_visible:
                     break
-                await self.page.wait_for_timeout(500)
+                await self.page.wait_for_timeout(150)
 
             if not modal_visible:
                 print("  -> Customer modal element not detected after initial click, attempting JS re-click...")
@@ -966,7 +884,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await self.page.evaluate("(el) => el.click()", await btn.element_handle())
                         except Exception:
                             pass
-                await self.page.wait_for_timeout(2000)
+                await self.page.wait_for_timeout(1000)
             return True
         except Exception as e:
             print(f"⚠️ Could not locate or click Create Work Order button: {e}. Retrying with fresh dispatch board reload...")
@@ -993,14 +911,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if not clicked:
                     raise Exception("No visible Create Work Order button found on retry.")
                     
-                await self.page.wait_for_timeout(3000)
+                await self.page.wait_for_timeout(1000)
                 return True
             except Exception as retry_err:
                 print(f"❌ Retry also failed: {retry_err}")
                 return False
 
     async def close_create_wo_modal(self):
-        """Close Create Work Order modal if open without saving to prevent unwanted changes."""
         try:
             cancel_candidates = [
                 "button:has-text('Cancel')",
@@ -1014,19 +931,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 btn = self.page.locator(cand).first
                 if await btn.count() > 0 and await btn.is_visible():
                     await btn.click(force=True)
-                    await self.page.wait_for_timeout(500)
+                    await self.page.wait_for_timeout(200)
                     return True
             await self.page.keyboard.press("Escape")
-            await self.page.wait_for_timeout(800)
+            await self.page.wait_for_timeout(250)
             return True
         except Exception:
             return False
 
     async def select_dropdown_option(self, dropdown_selector: str, option_text: str, press_enter: bool = True) -> bool:
-        """
-        Robust dropdown option selection for FieldEdge Vue-select dropdowns.
-        Works accurately on both Windows local and Linux headless servers with Unicode NFKD support.
-        """
         if not option_text:
             return True
 
@@ -1040,69 +953,73 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             await dropdown.scroll_into_view_if_needed()
             await dropdown.click(force=True)
-            await self.page.wait_for_timeout(400)
+            await self.page.wait_for_timeout(200)
 
-            # Locate search input field within the dropdown or globally active vue-select
             search_input = dropdown.locator("input.vs__search, input[type='search'], input").first
             if await search_input.count() == 0 or not await search_input.is_visible():
                 search_input = self.page.locator("input.vs__search:visible, input[type='search']:visible").first
 
-            # Ensure input is focused and clear existing input
             try:
                 await search_input.focus()
                 await search_input.fill("")
             except Exception:
                 pass
 
-            # Type option text into search input
             clean_search = unicodedata.normalize('NFKD', option_text).strip()
             clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
 
-            # For typing: use exact option_text directly as configured in JSON template
-            # (e.g. 'p2', 'l 𝐂𝐫𝐢𝐬', 'f 𝐒𝐤𝐲𝐥𝐞𝐫', '8 - Internal', etc.) so Vue-select matches precisely
             type_text = option_text.strip('\r\n')
             await search_input.fill(type_text)
-            await self.page.wait_for_timeout(600)
+            await self.page.wait_for_timeout(250)
 
             if press_enter:
-                # Trigger search API for fields like Customer Name that require Enter
                 await search_input.press("Enter")
-                await self.page.wait_for_timeout(1000)
+                await self.page.wait_for_timeout(350)
 
-                # Check if pressing Enter immediately selected the option in Vue-select (e.g. for tech selection)
                 selected_check = dropdown.locator(".vs__selected, .selected-tag").first
                 if await selected_check.count() > 0 and (await selected_check.text_content() or "").strip():
                     sel_text = (await selected_check.text_content() or "").strip()
                     c_sel = self.canonical_str(sel_text)
                     c_target = self.canonical_str(option_text)
-                    if c_sel == c_target or c_sel.startswith(c_target) or self.is_tech_match(sel_text, option_text):
+                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
+                    s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', sel_text.lower()))
+                    qualifier_conflict = (('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words))
+                    if not qualifier_conflict and (c_sel == c_target or self.is_tech_match(sel_text, option_text)):
                         print(f"  -> Selected '{sel_text}' via Enter directly.")
                         return True
+                    else:
+                        print(f"  -> Enter selected non-matching option '{sel_text}' (expected '{option_text}'). Clearing to pick from dropdown menu...")
+                        clear_btn = dropdown.locator(".vs__clear, button.close").first
+                        if await clear_btn.count() > 0 and await clear_btn.is_visible():
+                            await clear_btn.click(force=True)
+                        else:
+                            await search_input.click(force=True)
+                        await self.page.wait_for_timeout(200)
 
-                # Give API response time to load (longer budget for Linux server network latency)
-                await self.page.wait_for_timeout(1500)
+                try:
+                    dyn_opts = self.page.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
+                    await dyn_opts.first.wait_for(state="visible", timeout=1200)
+                except Exception:
+                    await self.page.wait_for_timeout(300)
 
-            # Locate visible dropdown options
             options = self.page.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
             try:
                 await options.first.wait_for(state="visible", timeout=6000)
             except Exception:
                 pass
 
-            # If press_enter and still no options, retry up to 2 more times (handles slow FieldEdge API)
             if press_enter:
                 for _retry in range(2):
                     if await options.count() > 0:
                         break
                     print(f"  -> Customer search: no results yet, retrying ({_retry + 1}/2)...")
                     await search_input.press("Enter")
-                    await self.page.wait_for_timeout(3000)
+                    await self.page.wait_for_timeout(1200)
                     try:
                         await options.first.wait_for(state="visible", timeout=4000)
                     except Exception:
                         pass
 
-                # If still 0 options and searching with emoji/symbols (e.g. '🚛 | 124'), fallback to clean truck digits
                 if (await options.count()) == 0:
                     m_dig = re.search(r'\b\d{2,4}\b', clean_search)
                     if m_dig and m_dig.group(0) != clean_search:
@@ -1112,9 +1029,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await search_input.focus()
                             await search_input.fill("")
                             await search_input.fill(fallback_term)
-                            await self.page.wait_for_timeout(400)
+                            await self.page.wait_for_timeout(200)
                             await search_input.press("Enter")
-                            await self.page.wait_for_timeout(3000)
+                            await self.page.wait_for_timeout(1200)
                             try:
                                 await options.first.wait_for(state="visible", timeout=5000)
                             except Exception:
@@ -1122,12 +1039,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         except Exception:
                             pass
 
-                # If STILL 0 options and the search term contains emoji/non-ASCII (e.g. '👥 | KELVIN'),
-                # extract only meaningful alphabetic words (>=3 chars) as a keyword fallback.
-                # IMPORTANT: Do NOT use raw ASCII-strip (re.sub r'[^\x00-\x7F]') because that leaves
-                # punctuation artifacts like '| KELVIN' which can match the wrong customer in FieldEdge.
                 if (await options.count()) == 0:
-                    # Extract the longest meaningful alphabetic word from the name as a search keyword
                     words = re.findall(r'[a-zA-Z]{3,}', option_text)
                     keyword_fallback = max(words, key=len) if words else ""
                     if keyword_fallback and keyword_fallback.upper() != option_text.upper():
@@ -1136,9 +1048,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await search_input.focus()
                             await search_input.fill("")
                             await search_input.fill(keyword_fallback)
-                            await self.page.wait_for_timeout(400)
+                            await self.page.wait_for_timeout(200)
                             await search_input.press("Enter")
-                            await self.page.wait_for_timeout(3000)
+                            await self.page.wait_for_timeout(1200)
                             try:
                                 await options.first.wait_for(state="visible", timeout=5000)
                             except Exception:
@@ -1146,27 +1058,24 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         except Exception:
                             pass
             else:
-                # If not press_enter and 0 options found, fallback:
                 if (await options.count()) == 0:
-                    # If clean_core is different from option_text, try searching clean_core
                     if clean_core and clean_core != option_text:
                         try:
                             await search_input.focus()
                             await search_input.fill("")
                             await search_input.fill(clean_core)
-                            await self.page.wait_for_timeout(500)
+                            await self.page.wait_for_timeout(250)
                             try:
                                 await options.first.wait_for(state="visible", timeout=2000)
                             except Exception:
                                 pass
                         except Exception:
                             pass
-                    # If still 0 options, clear input to reveal full list of dropdown options
                     if (await options.count()) == 0:
                         try:
                             await search_input.focus()
                             await search_input.fill("")
-                            await self.page.wait_for_timeout(500)
+                            await self.page.wait_for_timeout(250)
                             try:
                                 await options.first.wait_for(state="visible", timeout=3000)
                             except Exception:
@@ -1182,68 +1091,62 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             m_core = re.sub(r'^[a-z0-9]\s*', '', target_norm)
             core_name = m_core if len(m_core) >= 3 else target_norm
 
-            # Helper: exact raw match only (Pass 0)
             async def _exact_match_option(opt_el) -> bool:
-                """Returns True and clicks ONLY if option text exactly matches raw_target."""
-                if not await opt_el.is_visible():
-                    return False
-                raw_text = await opt_el.text_content()
-                if raw_text and raw_text.strip() == raw_target:
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-                return False
-
-            # Helper: fuzzy/canonical match (Pass 1–6)
-            async def _fuzzy_match_option(opt_el) -> bool:
-                """Returns True and clicks on normalized/canonical/fuzzy match."""
                 if not await opt_el.is_visible():
                     return False
                 raw_text = await opt_el.text_content()
                 if not raw_text:
                     return False
                 s_raw = raw_text.strip()
-                # Skip if this is an exact match — already handled in first pass
+                first_line = [l.strip() for l in s_raw.splitlines() if l.strip()][0] if s_raw else ""
+                norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
+                c_first = self.canonical_str(first_line)
+                c_raw = self.canonical_str(s_raw)
+                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
+                o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', s_raw.lower()))
+                if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
+                    return False
+                if s_raw == raw_target or norm_first == target_norm or c_first == target_canon or c_raw == target_canon:
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
+                return False
+
+            async def _fuzzy_match_option(opt_el) -> bool:
+                if not await opt_el.is_visible():
+                    return False
+                raw_text = await opt_el.text_content()
+                if not raw_text:
+                    return False
+                s_raw = raw_text.strip()
                 if s_raw == raw_target:
                     return False
                 norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
                 c_raw = self.canonical_str(s_raw)
 
-                # Pass 1: Exact normalized match
+                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
+                o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', s_raw.lower()))
+                if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
+                    return False
+
                 if norm_raw == target_norm or norm_raw == clean_core.lower():
                     await opt_el.scroll_into_view_if_needed()
                     await opt_el.click(force=True)
                     return True
 
-                # Pass 2: Canonical match (ignore special chars/whitespace/unicode fonts)
-                # IMPORTANT: only use canonical when target itself has non-alphanumeric characters
-                # (e.g. bold unicode tech names like 'f 𝐒𝐤𝐲𝐥𝐞𝐫'). Skip if target is plain text
-                # to avoid '👥 | KELVIN' (target) wrongly matching plain 'KELVIN' (option).
                 target_has_special = bool(re.search(r'[^a-zA-Z0-9\s]', option_text))
                 option_has_special = bool(re.search(r'[^a-zA-Z0-9\s]', s_raw))
                 if target_canon and (target_canon == c_raw or self.canonical_str(clean_core) == c_raw):
-                    # Only accept canonical match if BOTH have special chars OR neither does
-                    # This prevents '👥 | KELVIN' matching plain 'KELVIN'
                     if target_has_special == option_has_special:
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
 
-                # Pass 3: Core technician name match (e.g. 'skyler' in 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
-                if core_name and len(core_name) >= 3:
-                    if core_name in norm_raw or core_name in c_raw:
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
-                        return True
-
-                # Pass 4: Technician name matching using is_tech_match
                 if self.is_tech_match(s_raw, option_text) or self.is_tech_match(s_raw, clean_search) or self.is_tech_match(s_raw, clean_core):
                     await opt_el.scroll_into_view_if_needed()
                     await opt_el.click(force=True)
                     return True
 
-                # Pass 5: Substring match (ONLY allowed if BOTH target and option have length >= 4)
-                # CRITICAL: NEVER do substring matching across different vehicle categories!
                 is_target_exc = ("🏗️" in option_text or "u-40" in option_text.lower() or "u-17" in option_text.lower() or "exc" in option_text.lower())
                 is_raw_exc = ("🏗️" in s_raw or "u-40" in s_raw.lower() or "u-17" in s_raw.lower() or "exc" in s_raw.lower())
                 if is_target_exc != is_raw_exc:
@@ -1259,14 +1162,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if is_target_serv and is_raw_pump:
                     return False
 
-                if len(target_norm) >= 4 and len(norm_raw) >= 4:
+                if len(target_norm) >= 4 and len(norm_raw) >= 4 and not any(w in ('shop', 'am', 'pm') for w in t_words):
                     if target_norm in norm_raw or norm_raw in target_norm:
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
 
-                # Pass 6: Pure truck number match ONLY if both are pure trucks (🚛 / 🛻)
-                # NEVER allow for excavators (U-40 03) or cross-category matches!
                 if not is_target_exc and not is_raw_exc:
                     after_pipe_target = option_text.split("|")[-1].strip() if "|" in option_text else option_text.strip()
                     after_pipe_raw = s_raw.split("|")[-1].strip() if "|" in s_raw else s_raw.strip()
@@ -1279,31 +1180,23 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 return False
 
             async def _scan_options(check_fn, opt_count) -> bool:
-                """Scan all currently visible options with the given check function."""
                 for i in range(opt_count):
                     if await check_fn(options.nth(i)):
                         return True
                 return False
 
-            # TWO-PASS STRATEGY:
-            # Pass A — Exact raw match across ALL options first.
-            #   This ensures '👥 | KELVIN' is always preferred over plain 'KELVIN'
-            #   even when both appear in the dropdown after a keyword fallback search.
-            # Pass B — Only if no exact match found, try canonical/fuzzy matching.
             clicked = await _scan_options(_exact_match_option, count)
             if not clicked:
                 clicked = await _scan_options(_fuzzy_match_option, count)
 
-            # If not found and dropdown has scrollable menu, scroll down to reveal more items
             if not clicked and count > 0:
                 try:
                     menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
                     if await menu_container.count() > 0:
                         for scroll_step in range(3):
                             await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
-                            await self.page.wait_for_timeout(300)
+                            await self.page.wait_for_timeout(150)
                             count_now = await options.count()
-                            # Exact pass first on newly revealed items
                             clicked = await _scan_options(_exact_match_option, count_now)
                             if not clicked:
                                 clicked = await _scan_options(_fuzzy_match_option, count_now)
@@ -1312,35 +1205,31 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 except Exception:
                     pass
 
-            # Handle completion or safe failure (NO BLIND FALLBACK to first_opt!)
             if not clicked:
                 if press_enter:
-                    # Enter selects current highlighted input in Vue-select
-                    await search_input.press("Enter")
-                    await self.page.wait_for_timeout(1500)
-                    # Verify that a customer was actually selected after pressing Enter.
-                    # Without this check, an empty/failed search returns True, causing a
-                    # 30-second Save modal hang because FieldEdge blocks save with no customer.
                     selected_check = dropdown.locator(".vs__selected, .selected-tag").first
                     if await selected_check.count() > 0 and await selected_check.is_visible():
-                        return True
-                    # If dropdown still has filtered options, click the first one if it matches tech/target
+                        sel_val = (await selected_check.text_content() or "").strip()
+                        c_sel = self.canonical_str(sel_val)
+                        t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
+                        s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', sel_val.lower()))
+                        if (('am' in t_words) == ('am' in s_words) and ('pm' in t_words) == ('pm' in s_words)) and (c_sel == target_canon or self.is_tech_match(sel_val, option_text)):
+                            return True
                     if await options.count() > 0:
                         first_opt = options.first
                         if await first_opt.is_visible():
                             f_raw = (await first_opt.text_content() or "").strip()
-                            if self.canonical_str(f_raw) == target_canon or self.is_tech_match(f_raw, option_text):
+                            t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
+                            f_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', f_raw.lower()))
+                            if (('am' in t_words) == ('am' in f_words) and ('pm' in t_words) == ('pm' in f_words)) and (self.canonical_str(f_raw) == target_canon or self.is_tech_match(f_raw, option_text)):
                                 await first_opt.click(force=True)
                                 return True
-                    # No selection made — do NOT proceed with empty field
                     print(f"  -> Press-Enter fallback: No valid option was selected for '{option_text}'. Aborting to prevent misassignment.")
                     return False
                 else:
                     print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
                     return False
 
-            # Post-selection verification: verify what was actually selected into the dropdown
-            # For customer search (press_enter=True) on VPS, remote API response can take several seconds to populate
             verify_budget = 8.0 if press_enter else 2.5
             verify_start = time.time()
             is_verified = False
@@ -1352,15 +1241,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     selected_val = (await selected_el.text_content() or "").strip()
                     clean_sel = self.canonical_str(selected_val)
                     clean_opt = self.canonical_str(option_text)
-                    if (
+                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
+                    s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', selected_val.lower()))
+                    qualifier_conflict = (('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words))
+                    if not qualifier_conflict and (
                         selected_val == option_text or
                         clean_sel == clean_opt or
-                        (len(clean_sel) >= 4 and len(clean_opt) >= 4 and (clean_sel in clean_opt or clean_opt in clean_sel)) or
+                        selected_val.strip().lower() == option_text.strip().lower() or
                         self.is_tech_match(selected_val, option_text)
                     ):
                         is_verified = True
                         break
-                await self.page.wait_for_timeout(400)
+                await self.page.wait_for_timeout(150)
 
             if not is_verified:
                 print(f"❌ Selection verification failed: expected '{option_text}', but dropdown selected '{selected_val}'. Aborting selection.")
@@ -1369,7 +1261,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await clear_btn.click(force=True)
                 return False
 
-            await self.page.wait_for_timeout(500)
+            await self.page.wait_for_timeout(200)
             return True
         except Exception as e:
             print(f"⚠️ Failed to select '{option_text}' in dropdown ({dropdown_selector}): {e}")
@@ -1390,42 +1282,33 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         task_type: Optional[str] = None,
         summary_note: Optional[str] = None
     ) -> bool:
-        """
-        Fill the FieldEdge Create Work Order modal form and Save.
-        Order: Customer → Immediate Action → Task → Lead Source → Priority → Tech → Date → Time → Duration → Save
-        """
         try:
             opened = await self.open_create_wo_modal()
             if not opened:
                 return False
 
-            await self.page.wait_for_timeout(1000)
+            await self.page.wait_for_timeout(300)
 
             print(f"  [1/7] Customer: '{customer_name}'")
-            # Use simplified customer selector
             customer_xpath = self.rules.get('dispatch_board_customer_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]")
             success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True)
             if not success:
                 print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
                 return False
 
-            # Smart wait: wait for all FieldEdge customer loading spinners to vanish and form to settle
             print(f"  -> Waiting for customer data and background spinners to finish...")
             import time
             _load_start = time.time()
-            _max_load_wait = 45  # seconds total budget
+            _max_load_wait = 45
             _form_ready = False
 
-            # Initial pause to let Vue launch its customer background requests
-            await self.page.wait_for_timeout(1000)
+            await self.page.wait_for_timeout(300)
 
             while (time.time() - _load_start) < _max_load_wait:
                 try:
-                    # 1. Check for any active spinners or loaders
                     spinner_loc = self.page.locator(".spinner:visible, .vs__spinner:visible, .loading:visible, .p-progress-spinner:visible, .loading-mask:visible, .vs--loading:visible")
                     active_spinners = await spinner_loc.count()
 
-                    # 2. Check if Task dropdown is visible and not disabled
                     task_ready = self.page.locator(
                         self.rules.get('dispatch_board_task_xpath',
                             "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task') and not(contains(normalize-space(),'Duration'))]/following::div[contains(@class,'v-select')][1]")
@@ -1434,14 +1317,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     task_class = (await task_ready.get_attribute("class") or "") if task_vis else ""
                     task_disabled = "vs--disabled" in task_class or "disabled" in task_class
 
-                    # 3. Check for any customer popups or confirmation dialogs
                     dialog_confirm = self.page.locator(
                         "//div[contains(@class,'v-dialog') or contains(@class,'modal') or contains(@class,'p-dialog')]//button[contains(@class,'confirm') or contains(.,'Confirm') or contains(.,'OK') or contains(.,'Yes') or contains(.,'Select')]"
                     ).first
                     if await dialog_confirm.count() > 0 and await dialog_confirm.is_visible():
                         print("  -> Dismissing customer dialog/alert with Confirm button...")
                         await dialog_confirm.click(force=True)
-                        await self.page.wait_for_timeout(1000)
+                        await self.page.wait_for_timeout(300)
                         continue
 
                     if active_spinners == 0 and task_vis and not task_disabled:
@@ -1454,15 +1336,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 except Exception:
                     pass
 
-                await self.page.wait_for_timeout(1000)
+                await self.page.wait_for_timeout(200)
 
             if not _form_ready:
                 print(f"  ❌ Form not ready after {_max_load_wait}s (Customer '{customer_name}' data did not load or spinners hung). Aborting safely.")
                 await self.close_create_wo_modal()
                 return False
 
-            # Buffer for Vue DOM reactivity and field bindings to completely settle
-            await self.page.wait_for_timeout(1200)
+            await self.page.wait_for_timeout(350)
 
             print(f"  [2/7] Immediate Action: '{immediate_action}'")
             ia_xpath = self.rules.get(
@@ -1470,7 +1351,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Immediate Action')]/following::div[contains(@class,'v-select')][1]"
             )
             await self.select_dropdown_option(ia_xpath, immediate_action, press_enter=False)
-            await self.page.wait_for_timeout(500)
+            await self.page.wait_for_timeout(200)
 
             print(f"  [3/7] Task: '{task}'")
             task_xpath = self.rules.get(
@@ -1478,7 +1359,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task') and not(contains(normalize-space(),'Duration'))]/following::div[contains(@class,'v-select')][1]"
             )
             await self.select_dropdown_option(task_xpath, task, press_enter=False)
-            await self.page.wait_for_timeout(500)
+            await self.page.wait_for_timeout(200)
 
             print(f"  [4/7] Lead Source: '{lead_source}'")
             lead_xpath = self.rules.get(
@@ -1486,7 +1367,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Work Order Lead Source')]/following::div[contains(@class,'v-select')][1]"
             )
             await self.select_dropdown_option(lead_xpath, lead_source, press_enter=False)
-            await self.page.wait_for_timeout(500)
+            await self.page.wait_for_timeout(200)
 
             print(f"  [5/7] Priority: '{priority}'")
             priority_xpath = self.rules.get(
@@ -1494,7 +1375,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Priority')]/following::div[contains(@class,'v-select')][1]"
             )
             await self.select_dropdown_option(priority_xpath, priority, press_enter=False)
-            await self.page.wait_for_timeout(500)
+            await self.page.wait_for_timeout(200)
 
             if tech_name:
                 print(f"  [6/7] Primary Tech: '{tech_name}'")
@@ -1502,15 +1383,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     'dispatch_board_tech_name_xpath',
                     "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Primary Tech')]/following::div[contains(@class,'v-select')][1]"
                 )
-                # Select using exact tech_name from JSON template (e.g. 'p2', 'l 𝐂𝐫𝐢𝐬', 'f 𝐒𝐤𝐲𝐥𝐞𝐫')
-                # Use press_enter=True so tech code (like 'p2') is submitted/filtered in Vue-select directly
                 tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True)
                 if not tech_selected:
                     print(f"❌ Failed to match and select expected technician '{tech_name}'. Aborting work order to prevent wrong/duplicate assignment.")
                     await self.close_create_wo_modal()
                     return False
 
-                # Strict Verification: Confirm Primary Tech field in modal matches expected tech_name
                 tech_container = self.page.locator(tech_xpath).first
                 selected_tech_text = (await tech_container.locator(".vs__selected").text_content() or "").strip()
                 clean_actual_tech = self.canonical_str(selected_tech_text)
@@ -1527,7 +1405,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await self.close_create_wo_modal()
                     return False
 
-                # Smart wait: wait for Date field to become enabled (it's disabled until Tech is assigned)
                 print(f"  -> Waiting for Date/Time fields to become active...")
                 try:
                     date_input_xpath = self.rules.get('dispatch_board_date_input_xpath', "//input[@name='Start Date']")
@@ -1538,24 +1415,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         if is_disabled is None:
                             print(f"  -> Date field enabled. Ready.")
                             break
-                        await self.page.wait_for_timeout(300)
+                        await self.page.wait_for_timeout(150)
                 except Exception:
-                    await self.page.wait_for_timeout(500)
+                    await self.page.wait_for_timeout(200)
 
             print(f"  [7/7] Date: {target_date} | Time: {start_time} | Duration: {duration}")
             try:
-                # Date — wait for it to become enabled (it's disabled until Task is selected)
                 date_input = self.page.locator(
                     self.rules.get('dispatch_board_date_input_xpath', "//input[@name='Start Date']")
                 ).first
                 try:
                     await date_input.wait_for(state="visible", timeout=3000)
-                    # Wait until not disabled
                     for _ in range(10):
                         is_disabled = await date_input.get_attribute("disabled")
                         if is_disabled is None:
                             break
-                        await self.page.wait_for_timeout(300)
+                        await self.page.wait_for_timeout(150)
                 except Exception:
                     pass
 
@@ -1563,13 +1438,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await date_input.click(force=True)
                     await self.page.keyboard.press("Control+A")
                     await self.page.keyboard.press("Backspace")
-                    await date_input.type(target_date, delay=80)
+                    await date_input.type(target_date, delay=30)
                     await self.page.keyboard.press("Enter")
                     await date_input.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
                     await self.page.keyboard.press("Tab")
-                    await self.page.wait_for_timeout(400)
+                    await self.page.wait_for_timeout(150)
 
-                # Start Time
                 time_input = self.page.locator(
                     self.rules.get('dispatch_board_time_input_xpath',
                         "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Start Time')]/following::input[1]")
@@ -1578,13 +1452,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await time_input.click(force=True)
                     await self.page.keyboard.press("Control+A")
                     await self.page.keyboard.press("Backspace")
-                    await time_input.type(start_time, delay=80)
+                    await time_input.type(start_time, delay=30)
                     await self.page.keyboard.press("Enter")
                     await time_input.evaluate(f"el => {{ el.value = '{start_time}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
                     await self.page.keyboard.press("Tab")
-                    await self.page.wait_for_timeout(300)
+                    await self.page.wait_for_timeout(150)
 
-                    # Verify Start Time value in DOM and re-apply if FieldEdge auto-adjusted it
                     try:
                         actual_start_time = await time_input.input_value()
                         t_exp = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
@@ -1594,35 +1467,32 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await time_input.click(force=True)
                             await self.page.keyboard.press("Control+A")
                             await self.page.keyboard.press("Backspace")
-                            await time_input.type(start_time, delay=80)
+                            await time_input.type(start_time, delay=30)
                             await self.page.keyboard.press("Enter")
                             await time_input.evaluate(f"el => {{ el.value = '{start_time}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
                             await self.page.keyboard.press("Tab")
-                            await self.page.wait_for_timeout(300)
+                            await self.page.wait_for_timeout(150)
                     except Exception:
                         pass
 
-                # Task Duration
                 duration_input = self.page.locator(
                     self.rules.get('dispatch_board_duration_input_xpath',
                         "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task Duration')]/following::input[contains(@class,'base-input')][1]")
                 ).first
                 if await duration_input.is_visible(timeout=1500) and not await duration_input.get_attribute("disabled"):
-                    # Pad to 5 chars: '1:45' -> '01:45'
                     fmt_dur = ("0" + duration) if len(duration) == 4 and ":" in duration else duration
                     await duration_input.click(force=True)
                     await self.page.keyboard.press("Control+A")
                     await self.page.keyboard.press("Backspace")
-                    await duration_input.type(fmt_dur, delay=80)
+                    await duration_input.type(fmt_dur, delay=30)
                     await self.page.keyboard.press("Enter")
                     await duration_input.evaluate(f"el => {{ el.value = '{fmt_dur}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
                     await self.page.keyboard.press("Tab")
-                    await self.page.wait_for_timeout(300)
+                    await self.page.wait_for_timeout(150)
 
             except Exception as e:
                 print(f"  Note on Date/Time/Duration fields: {e}")
 
-            # Fill Work Order Summary note if provided
             if summary_note:
                 print(f"  📝 Entering Work Order Summary: '{summary_note[:40]}...'")
                 try:
@@ -1674,17 +1544,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 await ta_loc.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
                                 break
 
-                    await self.page.wait_for_timeout(300)
+                    await self.page.wait_for_timeout(150)
                 except Exception as note_err:
                     print(f"  ⚠️ Warning setting Work Order Summary note: {note_err}")
 
-            # Blur active input field first to ensure Vue v-model reactivity commits data
             try:
                 await self.page.evaluate("() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }")
             except Exception:
                 pass
 
-            # Pre-save final verification: Primary Tech must STILL match tech_name
             if tech_name:
                 final_tech = (await self.page.locator(tech_xpath).locator(".vs__selected").text_content() or "").strip()
                 clean_f = self.canonical_str(final_tech)
@@ -1726,10 +1594,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     return False
 
             print(f"  -> Waiting for form to validate and Save button to be ready...")
-            await self.page.wait_for_timeout(1500)
+            await self.page.wait_for_timeout(250)
 
-            # Wait up to 5s for Vue to enable the Save button naturally
-            for _ in range(20):
+            for _ in range(25):
                 try:
                     is_disabled = await save_btn.get_attribute("disabled")
                     btn_class = await save_btn.get_attribute("class") or ""
@@ -1738,7 +1605,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         break
                 except Exception:
                     pass
-                await self.page.wait_for_timeout(250)
+                await self.page.wait_for_timeout(150)
 
             async def _trigger_save_click():
                 if not save_btn:
@@ -1769,7 +1636,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             await _trigger_save_click()
             print(f"✅ Clicked Save for: '{customer_name}'")
 
-            # -- WAIT FOR SAVE TO COMPLETE --
             customer_xpath_val = self.rules.get(
                 'dispatch_board_customer_xpath',
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]"
@@ -1781,16 +1647,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             _save_start = time.time()
             _last_reclick = _save_start
 
-            await self.page.wait_for_timeout(1500)
+            await self.page.wait_for_timeout(350)
 
             while time.time() - _save_start < 30:
-                # 1. Check for redirect to DispatchSummary (for technician work orders)
                 current_url = self.page.url
                 if "DispatchSummary" in current_url:
                     modal_closed = True
                     break
 
-                # 2. Check for conflict/confirmation dialogs (e.g. Schedule Conflict / Confirm / Yes)
                 for conf_sel in [
                     "//div[contains(@class,'v-dialog') or contains(@class,'modal')]//button[contains(@class,'confirm') or contains(.,'Confirm') or contains(.,'Yes') or contains(.,'Save Anyway') or contains(.,'Proceed') or contains(.,'Continue')]",
                     "button:has-text('Confirm'):visible",
@@ -1805,12 +1669,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             if btn_text and 'Save' not in btn_text:
                                 print(f"  -> Found confirmation/conflict popup button '{btn_text}'. Clicking to confirm...")
                                 await conf_btn.click(force=True)
-                                await self.page.wait_for_timeout(1000)
+                                await self.page.wait_for_timeout(300)
                                 break
                     except Exception:
                         pass
 
-                # 3. Check if any error toast or banner appeared
                 try:
                     err_text = await self.page.evaluate("""
                         () => {
@@ -1834,7 +1697,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 except Exception:
                     pass
 
-                # 4. Check if modal indicators are still visible
                 save_btn_visible = False
                 try:
                     if await save_btn.count() > 0 and await save_btn.is_visible():
@@ -1857,20 +1719,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 except Exception:
                     modal_container_visible = False
 
-                # Modal is closed ONLY when both save button and customer field are no longer visible
                 if not save_btn_visible and not customer_visible and not modal_container_visible:
                     modal_closed = True
                     elapsed = round(time.time() - _save_start, 1)
                     print(f"  -> Save processed successfully (modal closed in {elapsed}s).")
                     break
 
-                # 5. Every 5 seconds, if still open, re-click Save
                 if (time.time() - _last_reclick) >= 5.0:
                     _last_reclick = time.time()
                     print("  -> Modal still open, re-clicking Save button...")
                     await _trigger_save_click()
 
-                await self.page.wait_for_timeout(1000)
+                await self.page.wait_for_timeout(200)
 
             if not modal_closed:
                 print(f"  ❌ Modal did not close after 30s for '{customer_name}'. Work order save was not confirmed!")
@@ -1878,30 +1738,24 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 await self.close_create_wo_modal()
                 return False
 
-            await self.page.wait_for_timeout(2000)
+            await self.page.wait_for_timeout(400)
 
             if mark_completed:
-                # Active technician flow → FieldEdge redirects to DispatchSummary after save
-                # For "Internal" task type, the redirect may be slower on VPS/headless; use robust retry.
                 print("  -> Waiting for DispatchSummary Save button...")
                 summary_completed = False
                 try:
                     summary_save_btn = self.page.locator("button#dispatch-summary-save-workorder").first
 
-                    # First attempt: wait up to 20s (VPS can be slower than local)
                     try:
                         await summary_save_btn.wait_for(state="visible", timeout=20000)
                     except Exception:
-                        # Fallback: check if URL already contains DispatchSummary
                         current_url = self.page.url
                         print(f"  -> DispatchSummary button not found in time. Current URL: {current_url}")
                         if "DispatchSummary" in current_url or "dispatch-summary" in current_url.lower():
                             print("  -> Detected DispatchSummary URL. Retrying button search...")
-                            await self.page.wait_for_timeout(2000)
+                            await self.page.wait_for_timeout(600)
                             await summary_save_btn.wait_for(state="visible", timeout=10000)
                         else:
-                            # If we selected "Complete Work Order" as immediate action and didn't redirect,
-                            # the WO is already completed.
                             if immediate_action == "Complete Work Order":
                                 print(f"🎉 WO '{customer_name}' auto-completed directly via Immediate Action (no redirect needed).")
                                 summary_completed = True
@@ -1912,13 +1766,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 raise Exception("DispatchSummary page not reached")
 
                     if not summary_completed:
-                        # Blur active input field first (ensures form state is committed)
                         try:
                             await self.page.keyboard.press("Tab")
-                            await self.page.wait_for_timeout(300)
+                            await self.page.wait_for_timeout(150)
                         except Exception:
                             pass
-
 
                         await summary_save_btn.scroll_into_view_if_needed()
                         print("  -> Waiting for DispatchSummary Save button to be enabled & interactable...")
@@ -1950,7 +1802,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             except Exception:
                                 pass
 
-                            # Single re-click attempt at 4s if modal hasn't appeared yet
                             if not _reclicked and (time.time() - _modal_start >= 4.0):
                                 _reclicked = True
                                 try:
@@ -1968,7 +1819,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 except Exception:
                                     pass
 
-                            await self.page.wait_for_timeout(800)
+                            await self.page.wait_for_timeout(200)
 
                         if modal_appeared:
                             print("  -> Selecting 'Completed' status in confirmation modal...")
@@ -1996,9 +1847,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     }
                                 """)
                                 print(f"  -> JS click 'Completed' radio: {'success' if clicked else 'element not found'}")
-                                await self.page.wait_for_timeout(800)
+                                await self.page.wait_for_timeout(250)
 
-                                # Verify selection; if not checked, try Playwright click
                                 checked_cls = await self.page.evaluate("""
                                     () => {
                                         const containers = document.querySelectorAll('.small.field-radio-container, .field-radio-container');
@@ -2017,18 +1867,17 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                         container_locator = self.page.locator(".small.field-radio-container, .field-radio-container").filter(has_text="Completed").first
                                         await container_locator.scroll_into_view_if_needed()
                                         await container_locator.click(force=True)
-                                        await self.page.wait_for_timeout(500)
+                                        await self.page.wait_for_timeout(200)
                                     except Exception:
                                         pass
 
                                 print("  -> Selected 'Completed' status. Giving Vue 1.5s to update...")
-                                await self.page.wait_for_timeout(1500)
+                                await self.page.wait_for_timeout(350)
                             except Exception as radio_err:
                                 print(f"  -> Radio selection note: {radio_err}")
 
                             print("  -> Clicking Confirm button in modal...")
                             
-                            # Ensure button has disabled state removed in Vue DOM
                             try:
                                 await self.page.evaluate("""
                                     () => {
@@ -2043,7 +1892,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             except Exception:
                                 pass
 
-                            # JS click on confirm button with full MouseEvents
                             try:
                                 await self.page.evaluate("""
                                     () => {
@@ -2070,7 +1918,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 pass
 
                             print("  -> Clicked Confirm. Waiting for save to process...")
-                            await self.page.wait_for_timeout(3000)
+                            await self.page.wait_for_timeout(300)
                             try:
                                 await confirm_btn.wait_for(state="hidden", timeout=10000)
                                 print("  -> Modal closed. Save confirmed!")
@@ -2079,14 +1927,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             summary_completed = True
                             print(f"🎉 Active Tech WO '{customer_name}' saved & completed!")
                         else:
-                            # Modal did not appear — WO may have saved directly without status prompt
                             summary_completed = True
                             print(f"🎉 Active Tech WO '{customer_name}' saved (no status modal)!")
                 except Exception as summary_err:
                     if not summary_completed:
                         print(f"  -> DispatchSummary flow note for '{customer_name}': {summary_err}")
             else:
-                # Static header flow
                 print(f"🎉 Static WO '{customer_name}' saved!")
 
             print(f"  Returning to Dispatch Board (fresh load)...")
@@ -2098,7 +1944,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
 
     async def check_and_handle_session(self, on_progress: Optional[Callable] = None) -> bool:
-        """Check if FieldEdge logged out (e.g. concurrent login from another location). If logged out, wait 30m and retry."""
         if not self.page:
             return True
         current_url = self.page.url or ""
@@ -2138,9 +1983,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return True
 
     async def run(self, days: int = 30, dry_run: bool = False, active_techs: Optional[List[str]] = None, start_date_str: Optional[str] = None, on_progress: Optional[Callable] = None, skip_asset: bool = False, force: bool = False):
-        """
-        Main execution method for Dispatch Board Display Automation.
-        """
         _start_time = time.time()
         _error_occurred = None
         _records_processed = 0
@@ -2164,7 +2006,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception:
                 pass
 
-        # Reload live template configuration from Dashboard API (Single Source of Truth)
         self.template_data = self._load_template()
 
         settings = self.template_data.get("general_settings", {})
@@ -2182,7 +2023,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if h.get("active", True)
         ]
 
-        # Out of Service Assets: Create under '⚠️ OUT OF SERVICE' column at 1:45 PM on s4
         out_of_service_headers = []
         oos_canonical_names = set()
         oos_asset_numbers = set()
@@ -2196,8 +2036,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             c_n = self.canonical_str(oos_name)
             if c_n:
                 oos_canonical_names.add(c_n)
-            # Only add pure numeric truck numbers (e.g. '122' from '🚛 | 122')
-            # NEVER extract sub-digits from excavator model codes like 'U-40 03'!
             after_pipe = oos_name.split("|")[-1].strip() if "|" in oos_name else oos_name.strip()
             if re.match(r'^\d{2,4}$', after_pipe):
                 oos_asset_numbers.add(after_pipe)
@@ -2224,22 +2062,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     continue
                 if self.canonical_str(check_str) in oos_canonical_names:
                     return True
-                # Match truck number ONLY if check_str after pipe is a pure single-number truck
                 after_p = check_str.split("|")[-1].strip() if "|" in check_str else check_str.strip()
                 if re.match(r'^\d{2,4}$', after_p) and after_p in oos_asset_numbers:
-                    # Vehicle type safety: Truck cannot match Excavator
                     is_h_truck = ("🛻" in check_str or "🚛" in check_str)
                     if is_h_truck:
                         return True
             return False
 
         if oos_canonical_names:
-            # Exempt Out of Service vehicles from appearing in their regular categories (Pump Trucks, Excavators, etc.)
             static_headers = [h for h in static_headers if not _is_oos_asset(h)]
             truck_assign_headers = [h for h in truck_assign_headers if not _is_oos_asset(h)]
             print(f"🚫 Exempted {len(oos_canonical_names)} Out of Service vehicle(s) from standard categories: {', '.join([s['name'] for s in out_of_service_headers])}")
 
-        # Service Needed Assets: Active items must be created FIRST before static headers
         service_needed_headers = []
         for sn in self.template_data.get("service_needed_assets", []):
             if not sn.get("active", True):
@@ -2291,7 +2125,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             truck_assign_headers = [h for h in truck_assign_headers if not _is_sn_asset(h)]
             print(f"🚫 Exempted {len(sn_canonical_names)} Service Needed vehicle(s) from standard categories: {', '.join([s['name'] for s in service_needed_headers])}")
 
-        # Prepend Out of Service and Service Needed headers so they are created first before standard headers
         special_headers = out_of_service_headers + service_needed_headers
         if special_headers:
             static_headers = special_headers + static_headers
@@ -2301,7 +2134,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         tech_priorities = {}
         tech_metadata = {}
 
-        # Load active technicians and their priorities/metadata from the template configuration
         template_techs = self.template_data.get("active_techs", [])
         
         for entry in template_techs:
@@ -2326,7 +2158,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 from dateutil import parser as date_parser
                 parsed_dt = date_parser.parse(start_date_str).date()
             except Exception:
-                # Fallback to standard formats if dateutil is not installed or fails
                 for fmt in ("%B %d", "%b %d", "%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
                     try:
                         dt = datetime.strptime(start_date_str, fmt)
@@ -2352,7 +2183,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         else:
             await self.initialize()
             
-            # Setup network intercept to capture Raw Dispatch Board JSON data
             board_data = None
             board_req = {}
             
@@ -2368,7 +2198,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             async def handle_response(response):
                 nonlocal board_data
                 if "GetDispatchBoardData" in response.url:
-                    # Only parse successful POST responses (skip OPTIONS preflight or cancelled/aborted redirects)
                     if response.status != 200 or response.request.method != "POST":
                         return
                     try:
@@ -2377,25 +2206,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             board_data = json.loads(text)
                             print("📡 Intercepted Dispatch Board API data successfully.")
                     except Exception as e:
-                        # Chromium discards response body from CDP memory during rapid page redirects/navigation
                         if "getResponseBody" not in str(e):
                             print(f"⚠️ Failed to parse intercepted board data: {e}")
 
             self.page.on("response", handle_response)
             
-            # Note: Avoid blocking images/fonts via page.route because FieldEdge Vue UI relies on web fonts & SVG icons
-            # and global request interception adds unnecessary Playwright IPC overhead for every API fetch call.
             
-            # Navigate to Dispatch Board exactly like locates does
             dispatch_url = self.rules.get('web_url', 'https://login.fieldedge.com/Dispatch')
             print(f"Navigating to Dispatch Board: {dispatch_url}")
             await self.page.goto(dispatch_url, wait_until='domcontentloaded')
             
-            # Login if necessary
             if "Login" in self.page.url:
                 await self.login_fieldedge()
 
-            # Wait for Dispatch Board to load (wait for the UI, not the absence of a spinner)
             print("Waiting for Dispatch Board UI to become interactable...")
             try:
                 xpath = self.rules.get('dispatch_board_create_wo_btn_xpath')
@@ -2405,17 +2228,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception:
                 print("Note: Create Work Order button not immediately found, but continuing script...")
             
-            # Wait up to 10 seconds for the intercepted GetDispatchBoardData response to load
             print("⏳ Waiting for Dispatch Board JSON API data to intercept...")
-            for _ in range(10):
+            for _ in range(50):
                 if board_data is not None:
                     break
-                await self.page.wait_for_timeout(1000)
+                await self.page.wait_for_timeout(200)
 
-            # Extract calendar date and existing work order names from intercepted JSON data
             board_date_str, existing_wos = self.extract_existing_wos(board_data)
-            # If initial board date is fully created (all template items already exist on today's board),
-            # automatically advance start_dt to start_dt + 1 day (tomorrow) so we work on upcoming future dates.
             initial_target_key = start_dt.strftime("%Y-%m-%d")
             if board_date_str and board_date_str != initial_target_key:
                 print(f"🗓️ Initial board date ('{board_date_str}') does not match requested start date ('{initial_target_key}'). Navigating UI date picker...")
@@ -2434,7 +2253,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 db_date_key = current_date.strftime("%Y-%m-%d")
                 is_weekend = current_date.weekday() >= 5
 
-                # ── SMART SKIP CHECK: Are Stage 1 template items already completed in history? ──
                 skip_stage1 = False
                 if not dry_run and not force and self.is_date_fully_completed(
                     history=created_history,
@@ -2497,7 +2315,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 board_date_str = fetched_date
                                 existing_wos = fetched_wos
                             elif nav_ok:
-                                # Fallback: URL navigation succeeded, update board_date_str and use fetched_wos if available
                                 board_date_str = db_date_key
                                 existing_wos = fetched_wos or {}
                             else:
@@ -2505,7 +2322,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 print(f"⛔ Skipping creation for date {db_date_key} to prevent duplicate work orders.")
                                 continue
 
-                    # Static Header Banners
                     for header in static_headers:
                         name = header.get("name")
                         start_time = header.get("start_time")
@@ -2514,7 +2330,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         h_tech = header.get("tech_name")
                         h_task = header.get("task", task)
 
-                        # Check if the header already exists on the board for the target date
                         if not dry_run:
                             canon_target = self.canonical_str(name)
                             is_service_wo = bool(
@@ -2545,13 +2360,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
                             target_count_idx = template_processed_counts[processed_key]
                         
-                            # Check persistent creation history first
                             if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, time_key=time_key):
                                 print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                                 continue
 
-                            # For Service Needed assets:
-                            # If asset already exists ANYWHERE on the board (on ANY tech row), skip new creation so Asset Scraper can re-assign/update it
                             if is_service_wo:
                                 sn_existing_tech = None
                                 for c_tk, w_list in existing_wos.items():
@@ -2567,8 +2379,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
-                            # For Out of Service assets:
-                            # If asset already exists ANYWHERE on the board (on ANY tech row), skip new creation so Asset Scraper can re-assign/update it
                             if is_oos_wo:
                                 oos_existing_tech = None
                                 for c_tk, w_list in existing_wos.items():
@@ -2584,7 +2394,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
-                            # If this vehicle/asset is already on the board as Service Needed or Out of Service, skip standard static header creation!
                             if not is_service_wo and not is_oos_wo:
                                 asset_already_sn_or_oos = False
                                 for c_tk, w_list in existing_wos.items():
@@ -2615,13 +2424,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if tech_match:
                                     for wo in wo_list:
                                         if not wo.get("is_appointment"):
-                                            # On staging rows (s4, s3, etc.) each vehicle/trailer/helper/banner is unique per date.
-                                            # Match without time restriction to prevent duplicates if scheduled time shifted.
                                             check_time = None if canon_h_tech in ("s4", "s3", "f2", "p2") else time_key
                                             if self.check_item_match(wo, canon_target, check_time, is_service_wo=is_service_wo, is_oos_wo=is_oos_wo, match_any_status=(is_service_wo or is_oos_wo or canon_h_tech in ("s4", "s3", "f2", "p2"))):
                                                 board_count += 1
                                         else:
-                                            # For appointments (PTO/OFF/SICK/TBD): skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
                                             appt_matched = False
                                             if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
                                                 try:
@@ -2664,7 +2470,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             if not res:
                                 print(f"  🔁 Attempt 1 aborted/failed for '{name}'. Retrying with fresh attempt in 3s...")
                                 await self.close_create_wo_modal()
-                                await self.page.wait_for_timeout(3000)
+                                await self.page.wait_for_timeout(1000)
                                 res = await self.fill_and_save_work_order(
                                     customer_name=name,
                                     task=h_task,
@@ -2680,12 +2486,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
-                                # Refresh board data after save
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                                 if f_date == db_date_key:
                                     board_date_str, existing_wos = f_date, f_wos
 
-                    # Truck Assign Headers (Internal Vehicle Work Orders)
                     if skip_vehicle_on_weekends and current_date.weekday() >= 5:
                         print(f"⏭️ Skipping internal vehicle work orders (truck_assign_headers) for weekend date {date_str} ({current_date.strftime('%A')}).")
                     else:
@@ -2697,7 +2501,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             h_tech = header.get("tech_name")
                             h_task = header.get("task", task)
 
-                            # Check if the header already exists on the board for the target date
                             if not dry_run:
                                 canon_target = self.canonical_str(name)
                                 try:
@@ -2720,12 +2523,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     if s.get("active", True)
                                 )
                             
-                                # Check persistent creation history first
                                 if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, time_key=time_key):
                                     print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
                                     continue
 
-                                # Check if truck already exists on s4 as Service Needed or Out of Service
                                 is_oos_asset = any(
                                     self.canonical_str(s.get("asset_name", "")) == canon_target
                                     for s in self.template_data.get("out_of_service_assets", [])
@@ -2745,9 +2546,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
-                                # Duplicate prevention: Check if this truck already exists on ANY REAL tech on the board
-                                # CRITICAL: Exclude staging/parking rows ("s4", "s3", "f2", "p2") because all fleet trucks
-                                # reside on s4 as static headers! We only check if the truck is already assigned to a real technician!
                                 truck_on_board = False
                                 found_tech_name = None
                                 found_cust_name = None
@@ -2757,7 +2555,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     for wo in w_list:
                                         if not wo.get("is_appointment"):
                                             c_cust = wo.get("canon_customer", "")
-                                            # Match genuine truck work order customer name on real technician row
                                             if c_cust and (c_cust == canon_target or c_cust in (f"truck{canon_target}", f"tr{canon_target}")):
                                                 truck_on_board = True
                                                 found_tech_name = c_t
@@ -2771,7 +2568,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
-                                # Duplicate prevention: Check if assigned tech already has a truck on the board
                                 if canon_h_tech and canon_h_tech not in ("s4", "s3", "f2", "p2", "") and not canon_h_tech.startswith("s4") and canon_h_tech in existing_wos:
                                     tech_already_has_truck = False
                                     for wo in existing_wos[canon_h_tech]:
@@ -2796,7 +2592,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     )
                                     if tech_match:
                                          for wo in wo_list:
-                                             # For non-appointment WOs: only skip if EXACT same name matches at same time
                                              if not wo.get("is_appointment"):
                                                  c_cust = wo.get("canon_customer", "")
                                                  w_time = wo.get("time_key", "")
@@ -2807,7 +2602,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                  if name_match and time_match:
                                                      board_count += 1
                                              else:
-                                                 # For appointments (PTO/OFF/SICK/TBD): skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
                                                  appt_matched = False
                                                  if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
                                                      try:
@@ -2844,12 +2638,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 )
                                 if res:
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
-                                    # Refresh board data after save
                                     f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                                     if f_date == db_date_key:
                                         board_date_str, existing_wos = f_date, f_wos
 
-                    # Tech Jobs (e.g. SHOP, internal meetings)
                     for job in tech_jobs:
                         if not job.get("active", True):
                             continue
@@ -2906,7 +2698,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 )
                                 if tech_match:
                                      for wo in wo_list:
-                                         # For non-appointment WOs: only skip if EXACT same name matches at same time
                                          if not wo.get("is_appointment"):
                                              c_cust = wo.get("canon_customer", "")
                                              w_time = wo.get("time_key", "")
@@ -2917,7 +2708,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                              if name_match and time_match:
                                                  board_count += 1
                                          else:
-                                             # For appointments (PTO/OFF/SICK/TBD): skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
                                              appt_matched = False
                                              if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
                                                  try:
@@ -2955,23 +2745,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             )
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": t_tech, "time": time_key})
-                                # Refresh board data after save
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                                 if f_date == db_date_key:
                                     board_date_str, existing_wos = f_date, f_wos
 
-                    # Technician Complete WOs
                     for tech in active_techs:
                         t_name = tech
                     
-                        # Fetch specific metadata for this tech, or fallback to defaults
                         meta = tech_metadata.get(t_name) or tech_metadata.get(self.canonical_str(t_name)) or {}
                         start_time = meta.get("start_time") or tech_defaults.get("start_time")
                         duration = meta.get("duration") or tech_defaults.get("duration")
                         t_assignment_name = meta.get("tech_name", tech)
                         priority = tech_priorities.get(t_name) or tech_priorities.get(self.canonical_str(t_name)) or tech_defaults.get("priority")
 
-                        # Check if the technician completed WO already exists on the board for the target date
                         if not dry_run:
                             canon_target = self.canonical_str(t_name)
                             canon_t_assignment = self.canonical_str(t_assignment_name or '')
@@ -3006,7 +2792,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if tech_match:
                                     for wo in wo_list:
                                         if wo.get("is_appointment"):
-                                            # Skip if creation time falls within appointment range [ScheduledFrom, ScheduledTo]
                                             appt_matched = False
                                             if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
                                                 try:
@@ -3022,7 +2807,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                 tech_off_for_day = True
                                                 break
                                             continue
-                                        # Match technician completed shift WO: must match technician, name, and time on the target date!
                                         if self.check_item_match(wo, canon_target, time_key=time_key, require_customer_match=True, match_any_status=True):
                                             board_count += 1
                                     if tech_off_for_day:
@@ -3052,7 +2836,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             )
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name, "time": time_key})
-                                # Refresh board data after save
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
                                 if f_date == db_date_key:
                                     board_date_str, existing_wos = f_date, f_wos
@@ -3061,7 +2844,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     _records_processed += 1
 
                     if not skip_asset:
-                        # Step 2: On the SAME date, run Asset Assignment Reconciler to verify & reconcile truck assignments!
                         formatted_current_date = current_date.strftime("%m/%d/%Y")
                         print(f"\n" + "-" * 60)
                         print(f"🚛 [Step 2: Asset Assignment] Checking & Reconciling truck assignments for {formatted_current_date}...")
@@ -3074,10 +2856,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 pass
                         try:
                             if not hasattr(self, 'asset_scraper') or self.asset_scraper is None:
-                                try:
-                                    from asset_assignment_scraper import AssetAssignmentScraper
-                                except ImportError:
-                                    from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
+                                from asset_assignment_scraper import AssetAssignmentScraper
                                 self.asset_scraper = AssetAssignmentScraper(template_path=self.template_path)
 
                             self.asset_scraper.playwright = self.playwright
@@ -3096,7 +2875,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         except Exception as asset_err:
                             print(f"⚠️ [Step 2: Asset Assignment] Note/Error on {formatted_current_date}: {asset_err}")
 
-                    # Mark entire date as completed in persistent history so it will never be recreated/re-assigned even if deleted in FieldEdge
                     self.record_wo_created(
                         created_history,
                         db_date_key,
@@ -3111,7 +2889,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     formatted_current_date = current_date.strftime("%m/%d/%Y")
                     print(f"  [Dry-Run] Step 2: Would reconcile Asset Assignments for {formatted_current_date}")
 
-                # Update progress after completing Day d + 1
                 self.progress_info.update({
                     "current_day": d + 1,
                     "completed_days": d + 1,
@@ -3148,7 +2925,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if not dry_run:
                 await self.cleanup()
 
-            # -- Execution completion summary --
             _elapsed = time.time() - _start_time
             if not dry_run and hasattr(self, "log_finish"):
                 await self.log_finish(
