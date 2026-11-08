@@ -3010,6 +3010,7 @@ class AssetAssignmentScraper(BaseScraper):
         _error_occurred = None
         total_checked = 0
         total_reconciled = 0
+        num_days = 0
 
         try:
             await self.initialize()
@@ -3135,8 +3136,23 @@ class AssetAssignmentScraper(BaseScraper):
             _error_occurred = f"{str(e)}\n{traceback.format_exc()}"
             return {"truck_assign_headers": [], "count": 0, "error": str(e)}
         finally:
-            await self.cleanup()
             _elapsed = time.time() - _start_time
+            if hasattr(self, "log_finish"):
+                try:
+                    await self.log_finish(
+                        status="error" if _error_occurred else "success",
+                        error_message=_error_occurred,
+                        records_processed=total_checked,
+                        elapsed_seconds=_elapsed,
+                        details={
+                            "reassignments": total_reconciled,
+                            "total_checked": total_checked,
+                            "days_processed": num_days,
+                        }
+                    )
+                except Exception as log_ex:
+                    print(f"⚠️ Error logging finish in Asset Assignment: {log_ex}")
+            await self.cleanup()
             if _error_occurred:
                 print(f"⚠️ Execution finished with ERROR ({round(_elapsed, 1)}s) for {self.scraper_name}:")
                 print(_error_occurred)
