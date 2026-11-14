@@ -2223,6 +2223,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     (re.findall(r'\d+', t.get("name", "")) and re.findall(r'\d+', sn_name) and
                      int(re.findall(r'\d+', t.get("name", ""))[0]) == int(re.findall(r'\d+', sn_name)[0])))
             ), None)
+            is_assigned_to_tech = bool(
+                matched_truck and
+                matched_truck.get("active", True) and
+                matched_truck.get("tech_name") and
+                matched_truck.get("tech_name").strip().lower() not in ("", "s4", "s3")
+            )
+            if is_assigned_to_tech:
+                continue
             sn_time = matched_truck.get("start_time") if (matched_truck and matched_truck.get("start_time")) else (sn.get("start_time") or "06:00 AM")
             service_needed_headers.append({
                 "name": sn_name,
@@ -2238,11 +2246,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         sn_canonical_names = set()
         sn_asset_numbers = set()
-        for sn in service_needed_headers:
-            c_n = self.canonical_str(sn.get("name", ""))
+        for sn in self.template_data.get("service_needed_assets", []):
+            if not sn.get("active", True):
+                continue
+            sn_a_name = (sn.get("asset_name") or "").strip()
+            c_n = self.canonical_str(sn_a_name)
             if c_n:
                 sn_canonical_names.add(c_n)
-            after_pipe = sn.get("name", "").split("|")[-1].strip() if "|" in sn.get("name", "") else sn.get("name", "").strip()
+            after_pipe = sn_a_name.split("|")[-1].strip() if "|" in sn_a_name else sn_a_name
             if re.match(r'^\d{2,4}$', after_pipe):
                 sn_asset_numbers.add(after_pipe)
 
@@ -2261,9 +2272,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         return True
             return False
 
-        if service_needed_headers:
+        if sn_canonical_names:
             static_headers = [h for h in static_headers if not _is_sn_asset(h)]
-            print(f"🔧 Configured {len(sn_canonical_names)} Service Needed vehicle(s) on s4: {', '.join([s['name'] for s in service_needed_headers])}")
+        assigned_truck_names = {
+            self.canonical_str(t.get("name", "")) for t in truck_assign_headers
+            if t.get("active", True) and t.get("tech_name") and t.get("tech_name").strip().lower() not in ("", "s4", "s3")
+        }
+        if assigned_truck_names:
+            static_headers = [
+                h for h in static_headers
+                if not (
+                    self.canonical_str(h.get("name", "")) in assigned_truck_names and
+                    h.get("tech_name", "").lower() in ("s4", "s3", "")
+                )
+            ]
+        if service_needed_headers:
+            print(f"🔧 Configured {len(service_needed_headers)} Service Needed vehicle(s) on s4: {', '.join([s['name'] for s in service_needed_headers])}")
 
         special_headers = out_of_service_headers + service_needed_headers
         if special_headers:
@@ -2636,9 +2660,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             priority = header.get("priority")
                             h_tech = header.get("tech_name")
                             h_task = header.get("task", task)
+                            canon_target = self.canonical_str(name)
+                            matched_sn = next((
+                                s for s in self.template_data.get("service_needed_assets", [])
+                                if s.get("active", True) and (
+                                    self.canonical_str(s.get("asset_name", "")) == canon_target or
+                                    (re.findall(r'\d+', s.get("asset_name", "")) and re.findall(r'\d+', name) and
+                                     int(re.findall(r'\d+', s.get("asset_name", ""))[0]) == int(re.findall(r'\d+', name)[0]))
+                                )
+                            ), None)
+                            if matched_sn:
+                                priority = matched_sn.get("priority") or "[7] 7.12 SERVICE NEEDED"
+                                summary_note = matched_sn.get("service_note") or header.get("service_note")
+                            else:
+                                summary_note = header.get("service_note")
 
                             if not dry_run:
-                                canon_target = self.canonical_str(name)
                                 try:
                                     t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
                                     time_key = t_dt.strftime("%I:%M %p")
@@ -2770,7 +2807,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     duration=duration,
                                     tech_name=h_tech,
                                     immediate_action=immediate_action,
-                                    summary_note=header.get("service_note")
+                                    summary_note=summary_note
                                 )
                                 if res:
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})

@@ -1523,12 +1523,12 @@ class AssetAssignmentScraper(BaseScraper):
         if not matched_rows:
             return None
 
-        if target_tech and len(matched_rows) > 1:
+        if target_tech:
             for r in matched_rows:
                 if self.canonical_str(r.get("tech_name", "")) == self.canonical_str(target_tech) or self.is_tech_match(r.get("tech_name", ""), target_tech):
                     return r
 
-        if target_priority and len(matched_rows) > 1:
+        if target_priority:
             for r in matched_rows:
                 if self.is_priority_match(r.get("priority_name", ""), target_priority):
                     return r
@@ -1538,7 +1538,6 @@ class AssetAssignmentScraper(BaseScraper):
                 r_tech = r.get("tech_name", "").strip().lower()
                 if r_tech in ("", "s4", "s3"):
                     return r
-            return None
 
         return matched_rows[0]
 
@@ -2758,10 +2757,46 @@ class AssetAssignmentScraper(BaseScraper):
                             (re.findall(r'\d+', t.get("name", "")) and re.findall(r'\d+', asset_name) and
                              int(re.findall(r'\d+', t.get("name", ""))[0]) == int(re.findall(r'\d+', asset_name)[0])))
                     ), None)
-                    target_time = matched_truck.get("start_time") if (matched_truck and matched_truck.get("start_time")) else (sn_cfg.get("start_time") or "06:00 AM")
+                    is_assigned_to_tech = bool(
+                        matched_truck and
+                        matched_truck.get("active", True) and
+                        matched_truck.get("tech_name") and
+                        matched_truck.get("tech_name").strip().lower() not in ("", "s4", "s3")
+                    )
+                    if is_assigned_to_tech:
+                        target_tech = matched_truck.get("tech_name")
+                        target_time = matched_truck.get("start_time") or "06:00 AM"
+                    else:
+                        target_tech = sn_cfg.get("tech_name", "s4")
+                        target_time = sn_cfg.get("start_time") or "06:00 AM"
                     target_priority = sn_cfg.get("priority", "[7] 7.12 SERVICE NEEDED")
                     service_note = sn_cfg.get("service_note", "")
-                    target_tech = sn_cfg.get("tech_name", "s4")
+
+                    if is_assigned_to_tech:
+                        s4_dupes = []
+                        c_a_name = self.canonical_str(asset_name)
+                        nums_a = re.findall(r'\d+', asset_name)
+                        for r in all_rows:
+                            r_cust = (r.get("customer_name") or "").strip()
+                            r_tech = (r.get("tech_name") or "").strip().lower()
+                            r_wo = r.get("work_order_number")
+                            if r_tech in ("s4", "s3", "") and r_wo:
+                                c_r_cust = self.canonical_str(r_cust)
+                                nums_r = re.findall(r'\d+', r_cust)
+                                num_match = bool(nums_r and nums_a and int(nums_r[0]) == int(nums_a[0]))
+                                if c_r_cust == c_a_name or num_match:
+                                    s4_dupes.append(r)
+
+                        for dupe_r in s4_dupes:
+                            dupe_wo = dupe_r.get("work_order_number")
+                            print(f"🗑️ Found duplicate service needed WO #{dupe_wo} for '{asset_name}' on s4. Asset is assigned to tech '{target_tech}'. Cancelling duplicate...")
+                            canceled = await self.cancel_work_order_via_list(
+                                wo_number=dupe_wo,
+                                reason=f"Duplicate service needed asset '{asset_name}' on s4; asset is assigned to technician '{target_tech}'."
+                            )
+                            if canceled:
+                                all_rows = [x for x in all_rows if str(x.get("work_order_number")) != str(dupe_wo)]
+                                total_reconciled += 1
 
                     matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority, target_tech=target_tech)
                     if matching_row:
