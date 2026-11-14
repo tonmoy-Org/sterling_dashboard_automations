@@ -2217,9 +2217,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 continue
             if self.canonical_str(sn_name) in oos_canonical_names:
                 continue
+            matched_truck = next((
+                t for t in self.template_data.get("truck_assign_headers", [])
+                if (self.canonical_str(t.get("name", "")) == self.canonical_str(sn_name) or
+                    (re.findall(r'\d+', t.get("name", "")) and re.findall(r'\d+', sn_name) and
+                     int(re.findall(r'\d+', t.get("name", ""))[0]) == int(re.findall(r'\d+', sn_name)[0])))
+            ), None)
+            sn_time = matched_truck.get("start_time") if (matched_truck and matched_truck.get("start_time")) else (sn.get("start_time") or "06:00 AM")
             service_needed_headers.append({
                 "name": sn_name,
-                "start_time": sn.get("start_time") or "3:30 PM",
+                "start_time": sn_time,
                 "duration": sn.get("duration") or "1:00",
                 "priority": sn.get("priority") or "[7] 7.12 SERVICE NEEDED",
                 "tech_name": "s4",
@@ -2256,8 +2263,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         if service_needed_headers:
             static_headers = [h for h in static_headers if not _is_sn_asset(h)]
-            truck_assign_headers = [h for h in truck_assign_headers if not _is_sn_asset(h)]
-            print(f"🚫 Exempted {len(sn_canonical_names)} Service Needed vehicle(s) from standard categories: {', '.join([s['name'] for s in service_needed_headers])}")
+            print(f"🔧 Configured {len(sn_canonical_names)} Service Needed vehicle(s) on s4: {', '.join([s['name'] for s in service_needed_headers])}")
 
         special_headers = out_of_service_headers + service_needed_headers
         if special_headers:
@@ -2499,17 +2505,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 continue
 
                             if is_service_wo:
-                                sn_existing_tech = None
-                                for c_tk, w_list in existing_wos.items():
-                                    for w in w_list:
-                                        if self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
-                                            sn_existing_tech = c_tk
-                                            break
-                                    if sn_existing_tech:
+                                sn_already_on_s4 = False
+                                for w in existing_wos.get(canon_h_tech, []):
+                                    if not w.get("is_appointment") and self.check_item_match(w, canon_target, require_customer_match=True, is_service_wo=True):
+                                        sn_already_on_s4 = True
                                         break
-                                
-                                if sn_existing_tech:
-                                    print(f"⏭️ Service Needed asset '{name}' ALREADY exists on the board (tech '{sn_existing_tech}') for {date_str}. Skipping new creation so Asset Scraper can re-assign/update it.")
+                                if sn_already_on_s4:
+                                    print(f"⏭️ Service Needed asset '{name}' ALREADY exists on tech '{h_tech}' for {date_str}. Skipping duplicate creation.")
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
@@ -2666,17 +2668,17 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     for s in self.template_data.get("out_of_service_assets", [])
                                     if s.get("active", True)
                                 )
-                                truck_on_s4_sn_or_oos = False
-                                if is_service_needed_asset or is_oos_asset:
-                                    truck_on_s4_sn_or_oos = True
+                                truck_on_s4_oos = False
+                                if is_oos_asset:
+                                    truck_on_s4_oos = True
                                 else:
                                     for wo in existing_wos.get("s4", []):
                                         if not wo.get("is_appointment") and self.check_item_match(wo, canon_target, require_customer_match=True, match_any_status=True):
-                                            if wo.get("is_service_needed") or wo.get("is_out_of_service"):
-                                                truck_on_s4_sn_or_oos = True
+                                            if wo.get("is_out_of_service"):
+                                                truck_on_s4_oos = True
                                                 break
-                                if truck_on_s4_sn_or_oos:
-                                    print(f"⏭️ Truck '{name}' is on 's4' as Service Needed / Out of Service for {date_str}. Skipping creating truck assign header on tech '{h_tech}'.")
+                                if truck_on_s4_oos:
+                                    print(f"⏭️ Truck '{name}' is on 's4' as Out of Service for {date_str}. Skipping creating truck assign header on tech '{h_tech}'.")
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
@@ -2732,7 +2734,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                  name_match = c_cust == canon_target
                                                  norm_target = self.normalize_time_key(time_key)
                                                  norm_wo = self.normalize_time_key(w_time)
-                                                 time_match = is_service_needed_asset or not norm_target or not norm_wo or norm_target == norm_wo
+                                                 time_match = not norm_target or not norm_wo or norm_target == norm_wo
                                                  if name_match and time_match:
                                                      board_count += 1
                                              else:

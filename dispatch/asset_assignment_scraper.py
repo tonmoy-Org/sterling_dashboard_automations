@@ -924,14 +924,6 @@ class AssetAssignmentScraper(BaseScraper):
                 if c_oos == c_item or (nums_item and nums_oos and int(nums_item[0]) == int(nums_oos[0])):
                     return True
 
-        for sn in self.template_data.get("service_needed_assets", []):
-            if sn.get("active", True):
-                sn_name = sn.get("asset_name", "")
-                c_sn = self.canonical_str(sn_name)
-                nums_sn = re.findall(r'\d+', sn_name) if sn_name else []
-                if c_sn == c_item or (nums_item and nums_sn and int(nums_item[0]) == int(nums_sn[0])):
-                    return True
-
         for h in self.template_data.get("truck_assign_headers", []):
             h_name = h.get("name", "")
             c_hname = self.canonical_str(h_name)
@@ -1471,7 +1463,7 @@ class AssetAssignmentScraper(BaseScraper):
             await self.close_sidepanel()
             return False
 
-    def find_asset_row(self, asset_name: str, rows: List[Dict[str, Any]], target_priority: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def find_asset_row(self, asset_name: str, rows: List[Dict[str, Any]], target_priority: Optional[str] = None, target_tech: Optional[str] = None) -> Optional[Dict[str, Any]]:
         if not asset_name or not rows:
             return None
         import re
@@ -1531,10 +1523,22 @@ class AssetAssignmentScraper(BaseScraper):
         if not matched_rows:
             return None
 
+        if target_tech and len(matched_rows) > 1:
+            for r in matched_rows:
+                if self.canonical_str(r.get("tech_name", "")) == self.canonical_str(target_tech) or self.is_tech_match(r.get("tech_name", ""), target_tech):
+                    return r
+
         if target_priority and len(matched_rows) > 1:
             for r in matched_rows:
                 if self.is_priority_match(r.get("priority_name", ""), target_priority):
                     return r
+
+        if target_tech:
+            for r in matched_rows:
+                r_tech = r.get("tech_name", "").strip().lower()
+                if r_tech in ("", "s4", "s3"):
+                    return r
+            return None
 
         return matched_rows[0]
 
@@ -2679,7 +2683,7 @@ class AssetAssignmentScraper(BaseScraper):
                     service_note = oos_cfg.get("service_note") or oos_cfg.get("reason", "Vehicle is Out of Service for repairs.")
                     target_tech = oos_cfg.get("tech_name", "s4")
 
-                    matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority)
+                    matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority, target_tech=target_tech)
                     if matching_row:
                         wo_num = matching_row.get("work_order_number", "")
                         curr_tech = matching_row.get("tech_name", "")
@@ -2744,21 +2748,22 @@ class AssetAssignmentScraper(BaseScraper):
                 s for s in self.template_data.get("service_needed_assets", [])
                 if s.get("active", True)
             ]
-            service_needed_names = {
-                self.canonical_str(s.get("asset_name", ""))
-                for s in service_needed_configs
-            }
-
             if service_needed_configs and click_wos:
                 print(f"\n🔧 [Stage 1/3] Checking {len(service_needed_configs)} active service-needed assets on {normalized_date}...")
                 for sn_cfg in service_needed_configs:
                     asset_name = sn_cfg.get("asset_name", "")
-                    target_time = sn_cfg.get("start_time", "3:30 PM")
+                    matched_truck = next((
+                        t for t in self.template_data.get("truck_assign_headers", [])
+                        if (self.canonical_str(t.get("name", "")) == self.canonical_str(asset_name) or
+                            (re.findall(r'\d+', t.get("name", "")) and re.findall(r'\d+', asset_name) and
+                             int(re.findall(r'\d+', t.get("name", ""))[0]) == int(re.findall(r'\d+', asset_name)[0])))
+                    ), None)
+                    target_time = matched_truck.get("start_time") if (matched_truck and matched_truck.get("start_time")) else (sn_cfg.get("start_time") or "06:00 AM")
                     target_priority = sn_cfg.get("priority", "[7] 7.12 SERVICE NEEDED")
                     service_note = sn_cfg.get("service_note", "")
                     target_tech = sn_cfg.get("tech_name", "s4")
 
-                    matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority)
+                    matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority, target_tech=target_tech)
                     if matching_row:
                         wo_num = matching_row.get("work_order_number", "")
                         curr_tech = matching_row.get("tech_name", "")
@@ -2791,32 +2796,6 @@ class AssetAssignmentScraper(BaseScraper):
                             total_reconciled += 1
                     else:
                         print(f"  ⚠️ Could not find card for service-needed asset '{asset_name}' on {normalized_date}.")
-
-            if service_needed_names and truck_headers:
-                sn_on_tech = [
-                    r for r in truck_headers
-                    if (self.canonical_str(r.get("name", "")) in service_needed_names
-                        or self.canonical_str(r.get("asset_name", "")) in service_needed_names)
-                    and r.get("tech_name", "").lower() not in ("s4", "s3", "")
-                ]
-                for r in sn_on_tech:
-                    wo_num = r.get("work_order_number")
-                    t_name = r.get("name", "")
-                    t_tech = r.get("tech_name", "")
-                    if not r.get("is_completed", False) and click_wos and wo_num:
-                        print(f"🚨 Service Needed vehicle '{t_name}' (WO #{wo_num}) is assigned to tech '{t_tech}'! Initiating auto-cancellation...")
-                        canceled = await self.cancel_work_order_via_list(
-                            wo_number=wo_num,
-                            reason=f"Vehicle '{t_name}' is Service Needed; cannot be assigned to tech '{t_tech}'."
-                        )
-                        if canceled:
-                            print(f"🗑️ Cancelled Service Needed vehicle WO #{wo_num} ({t_name}) on '{t_tech}'.")
-                            total_reconciled += 1
-                truck_headers = [
-                    r for r in truck_headers
-                    if self.canonical_str(r.get("name", "")) not in service_needed_names
-                    and self.canonical_str(r.get("asset_name", "")) not in service_needed_names
-                ]
 
             if truck_headers:
                 print(f"\n🚛 [Stage 2/2] Standard Truck Reconciliation: Found {len(truck_headers)} truck_assign_headers on {normalized_date}:")
