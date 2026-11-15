@@ -985,6 +985,48 @@ class AssetAssignmentScraper(BaseScraper):
 
         return False
 
+    def is_static_header_name(self, name: str) -> bool:
+        if not name:
+            return False
+        c_name = self.canonical_str(name)
+        static_patterns = (
+            "INTERNAL OPS", "SHOP", "POST-TRIP", "PRETRIP", "PARTS",
+            "REPAIR/MAINT", "REPAIR", "MISC", "REPORTS NEEDED", "TRAINING",
+            "ATTENDANCE", "BREAK", "DUMP", "PTO", "SICK", "ABSENT",
+            "EXCUSED", "IN LATE", "OFF EARLY", "NO CALL", "SHORT NOTICE",
+            "OUT OF SERVICE", "SERVICE NEEDED", "PUMP TRUCKS", "EXCAVATORS",
+            "SERVICE TRUCKS", "TRAILERS"
+        )
+        name_upper = name.upper()
+        if any(pat in name_upper for pat in static_patterns):
+            return True
+        for sh in self.template_data.get("static_headers", []):
+            sh_name = (sh.get("name") or "").strip()
+            if sh_name and self.canonical_str(sh_name) == c_name:
+                return True
+        return False
+
+    def is_fleet_vehicle_name(self, name: str) -> bool:
+        if not name:
+            return False
+        if self.is_static_header_name(name):
+            return False
+        c_name = self.canonical_str(name)
+        for tah in self.template_data.get("truck_assign_headers", []):
+            t_name = (tah.get("name") or "").strip()
+            if t_name and self.canonical_str(t_name) == c_name:
+                return True
+        for a in self.template_data.get("available_assets", []):
+            a_name = (a.get("name") or "").strip()
+            if a_name and self.canonical_str(a_name) == c_name:
+                if a.get("category") in ("Truck", "Trailer", "Excavator"):
+                    return True
+        if any(sym in name for sym in ("🚛", "🛻", "🏗️", "▭")):
+            return True
+        if re.search(r'\b(0[1-4]|71|87|90|122|123|124)\b', name):
+            return True
+        return False
+
     async def close_sidepanel(self):
         try:
             close_clicked = await self.page.evaluate("""() => {
@@ -1988,7 +2030,7 @@ class AssetAssignmentScraper(BaseScraper):
                     prio_clicked = await self.page.evaluate("""(target) => {
                         const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
                         const cTarget = norm(target);
-                        const isDnd = target.toUpperCase().includes('DO NOT DISPATCH') || target.includes('[4]');
+                        const isDnd = target.toUpperCase().includes('DO NOT DISPATCH');
                         const isSn = target.toUpperCase().includes('SERVICE NEEDED') || target.includes('7.12');
                         const isExc = target.toUpperCase().includes('EXC') || (target.includes('[5]') && target.toUpperCase().includes('EXC'));
                         const isSerTr = target.toUpperCase().includes('SER TR') || target.toUpperCase().includes('SER');
@@ -2002,7 +2044,7 @@ class AssetAssignmentScraper(BaseScraper):
 
                             const exactMatch = cTxt === cTarget;
                             const subMatch = cTarget && (cTxt.includes(cTarget) || cTarget.includes(cTxt));
-                            const dndMatch = isDnd && (txt.toUpperCase().includes('DO NOT DISPATCH') || txt.includes('[4]'));
+                            const dndMatch = isDnd && txt.toUpperCase().includes('DO NOT DISPATCH');
                             const snMatch = isSn && (txt.toUpperCase().includes('SERVICE NEEDED') || txt.includes('7.12'));
                             const excMatch = isExc && (txt.toUpperCase().includes('EXC') || (txt.includes('[5]') && txt.toUpperCase().includes('EXC')));
                             const serTrMatch = isSerTr && (txt.toUpperCase().includes('SER TR') || txt.toUpperCase().includes('SER'));
@@ -2020,9 +2062,9 @@ class AssetAssignmentScraper(BaseScraper):
                     }""", target_priority)
 
                     if not prio_clicked:
-                        if "DO NOT DISPATCH" in target_priority.upper() or "[4]" in target_priority:
+                        if "DO NOT DISPATCH" in target_priority.upper():
                             search_term = "DO NOT DISPATCH"
-                            pat = r'do\s*not\s*dispatch|\[4\]'
+                            pat = r'do\s*not\s*dispatch'
                         elif "SERVICE NEEDED" in target_priority.upper() or "7.12" in target_priority:
                             search_term = "SERVICE NEEDED"
                             pat = r'service\s*needed|7\.12'
@@ -2037,7 +2079,7 @@ class AssetAssignmentScraper(BaseScraper):
                             pat = r'\[5\]\s*pt|pt\s*\('
                         else:
                             search_term = target_priority
-                            pat = _re.escape(target_priority)
+                            pat = re.escape(target_priority)
 
                         try:
                             prio_inp = self.page.locator('input.vs__search:visible, input[type="search"]:visible').first
@@ -2062,7 +2104,7 @@ class AssetAssignmentScraper(BaseScraper):
                         prio_clicked = await self.page.evaluate("""(target) => {
                             const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
                             const cTarget = norm(target);
-                            const isDnd = target.toUpperCase().includes('DO NOT DISPATCH') || target.includes('[4]');
+                            const isDnd = target.toUpperCase().includes('DO NOT DISPATCH');
                             const isSn = target.toUpperCase().includes('SERVICE NEEDED') || target.includes('7.12');
                             const isExc = target.toUpperCase().includes('EXC') || (target.includes('[5]') && target.toUpperCase().includes('EXC'));
                             const isSerTr = target.toUpperCase().includes('SER TR') || target.toUpperCase().includes('SER');
@@ -2076,7 +2118,7 @@ class AssetAssignmentScraper(BaseScraper):
 
                                 const exactMatch = cTxt === cTarget;
                                 const subMatch = cTarget && (cTxt.includes(cTarget) || cTarget.includes(cTxt));
-                                const dndMatch = isDnd && (txt.toUpperCase().includes('DO NOT DISPATCH') || txt.includes('[4]'));
+                                const dndMatch = isDnd && txt.toUpperCase().includes('DO NOT DISPATCH');
                                 const snMatch = isSn && (txt.toUpperCase().includes('SERVICE NEEDED') || txt.includes('7.12'));
                                 const excMatch = isExc && (txt.toUpperCase().includes('EXC') || (txt.includes('[5]') && txt.toUpperCase().includes('EXC')));
                                 const serTrMatch = isSerTr && (txt.toUpperCase().includes('SER TR') || txt.toUpperCase().includes('SER'));
@@ -2095,7 +2137,7 @@ class AssetAssignmentScraper(BaseScraper):
 
                     if not prio_clicked:
                         try:
-                            opt_loc = self.page.locator('.vs__dropdown-menu li, ul[role="listbox"] li, li.vs__dropdown-option').filter(has_text=_re.compile(pat, _re.I)).first
+                            opt_loc = self.page.locator('.vs__dropdown-menu li, ul[role="listbox"] li, li.vs__dropdown-option').filter(has_text=re.compile(pat, re.I)).first
                             if await opt_loc.count() > 0 and await opt_loc.is_visible():
                                 await opt_loc.click(force=True)
                                 prio_clicked = True
@@ -2110,7 +2152,7 @@ class AssetAssignmentScraper(BaseScraper):
                         except Exception:
                             pass
                         prio_clicked = await self.page.evaluate("""(target) => {
-                            const isDnd = target.toUpperCase().includes('DO NOT DISPATCH') || target.includes('[4]');
+                            const isDnd = target.toUpperCase().includes('DO NOT DISPATCH');
                             const isSn = target.toUpperCase().includes('SERVICE NEEDED') || target.includes('7.12');
                             const isExc = target.toUpperCase().includes('EXC') || (target.includes('[5]') && target.toUpperCase().includes('EXC'));
                             const isSerTr = target.toUpperCase().includes('SER TR') || target.toUpperCase().includes('SER');
@@ -2118,7 +2160,7 @@ class AssetAssignmentScraper(BaseScraper):
                             const items = Array.from(document.querySelectorAll('.vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li, .vs__dropdown-menu .vs__dropdown-option'));
                             for (const item of items) {
                                 const txt = (item.textContent || '').trim();
-                                const dndMatch = isDnd && (txt.toUpperCase().includes('DO NOT DISPATCH') || txt.includes('[4]'));
+                                const dndMatch = isDnd && txt.toUpperCase().includes('DO NOT DISPATCH');
                                 const snMatch = isSn && (txt.toUpperCase().includes('SERVICE NEEDED') || txt.includes('7.12'));
                                 const excMatch = isExc && (txt.toUpperCase().includes('EXC') || (txt.includes('[5]') && txt.toUpperCase().includes('EXC')));
                                 const serTrMatch = isSerTr && (txt.toUpperCase().includes('SER TR') || txt.toUpperCase().includes('SER'));
@@ -2789,7 +2831,15 @@ class AssetAssignmentScraper(BaseScraper):
                     if not wo_num:
                         continue
 
-                    is_oos_prio = "DO NOT DISPATCH" in prio_name.upper() or "[4]" in prio_name
+                    # Skip non-vehicle static headers and operational tracking cards (Shop, Ops, Pretrip, Posttrip, Attendance, etc.)
+                    if self.is_static_header_name(cust_name):
+                        continue
+
+                    # Only process actual physical fleet vehicles (Trucks, Trailers, Excavators)
+                    if not self.is_fleet_vehicle_name(cust_name):
+                        continue
+
+                    is_oos_prio = "DO NOT DISPATCH" in prio_name.upper()
                     is_oos_slot = "1:45 PM" in curr_sched.upper() and curr_tech.lower() in ("s4", "s3")
 
                     if not (is_oos_prio or is_oos_slot):
@@ -2818,7 +2868,7 @@ class AssetAssignmentScraper(BaseScraper):
                         c_tah = self.canonical_str(tah_name)
                         tah_digits = re.findall(r'\d+', tah_name)
                         num_match = bool(cust_digits and tah_digits and cust_digits[-1] == tah_digits[-1])
-                        if c_tah == c_cust or (c_cust and c_cust in c_tah) or (c_tah and c_tah in c_cust) or num_match:
+                        if c_tah == c_cust or num_match:
                             tech = (tah.get("tech_name") or "").strip()
                             if tech and tech.lower() not in ("s3", "s4", "unassigned", "none", "clear", ""):
                                 assigned_truck = tah
@@ -2837,7 +2887,7 @@ class AssetAssignmentScraper(BaseScraper):
                             c_sh = self.canonical_str(sh_name)
                             sh_digits = re.findall(r'\d+', sh_name)
                             num_match = bool(cust_digits and sh_digits and cust_digits[-1] == sh_digits[-1])
-                            if c_sh == c_cust or (c_cust and c_cust in c_sh) or (c_sh and c_sh in c_cust) or num_match:
+                            if c_sh == c_cust or num_match:
                                 default_static = sh
                                 break
 
@@ -2926,10 +2976,18 @@ class AssetAssignmentScraper(BaseScraper):
                     if not wo_num:
                         continue
 
+                    # Skip non-vehicle static headers and operational tracking cards (Attendance, Shop, Ops, etc.)
+                    if self.is_static_header_name(cust_name):
+                        continue
+
+                    # Only process actual physical fleet vehicles (Trucks, Trailers, Excavators)
+                    if not self.is_fleet_vehicle_name(cust_name):
+                        continue
+
                     is_sn_prio = "SERVICE NEEDED" in prio_name.upper() or "7.12" in prio_name
                     is_sn_slot = "3:30 PM" in curr_sched.upper() and curr_tech.lower() in ("s4", "s3")
 
-                    if not (is_sn_prio or is_sn_slot):
+                    if not (is_sn_prio and is_sn_slot):
                         continue
 
                     c_cust = self.canonical_str(cust_name)
