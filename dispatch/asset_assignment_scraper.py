@@ -1805,14 +1805,25 @@ class AssetAssignmentScraper(BaseScraper):
                 if (!priority) {
                     const cards = document.querySelectorAll('.workorder-summary-card_mv9VQ, .workorder-details-card_kiboz, [data-edb-sidepanel-card*="WorkOrder"], .card_ngkhz');
                     for (const card of cards) {
-                        const cells = card.querySelectorAll('.cell, .field-container, tr, div');
+                        const prioEl = card.querySelector('.priority-name_jlW6h, [class*="priority-name"], .priority-image_cXTkL');
+                        if (prioEl) {
+                            const pTxt = (prioEl.getAttribute('title') || prioEl.textContent || '').trim();
+                            if (pTxt && pTxt.toLowerCase() !== 'priority') {
+                                priority = pTxt;
+                                break;
+                            }
+                        }
+                        const cells = card.querySelectorAll('.cell, .field-container, tr');
                         for (const cell of cells) {
                             const title = cell.querySelector('.field-title, .title, .label');
-                            if (title && title.textContent.toLowerCase().includes('priority')) {
-                                const val = cell.querySelector('.panel-content, .value, span, div:not(.field-title)');
-                                if (val && val.textContent) {
-                                    priority = val.textContent.trim();
-                                    break;
+                            if (title && (title.textContent || '').trim().toLowerCase() === 'priority') {
+                                const val = cell.querySelector('.priority-name_jlW6h, [class*="priority-name"], .priority-image_cXTkL, .break-line_Bz0vP, .panel-content, .value');
+                                if (val) {
+                                    const pTxt = (val.getAttribute('title') || val.textContent || '').trim();
+                                    if (pTxt && pTxt.toLowerCase() !== 'priority') {
+                                        priority = pTxt;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1929,8 +1940,10 @@ class AssetAssignmentScraper(BaseScraper):
 
                     try:
                         chevron_loc = self.page.locator(
+                            "[data-edb-sidepanel-card*='WorkOrder'] .details-icon_lgpCm, "
                             ".card_ngkhz:has(.workorder-summary-card_mv9VQ) .details-icon_lgpCm, "
-                            ".card_ngkhz:has(.panel-title:has-text('Work Order')) .details-icon_lgpCm"
+                            ".card_ngkhz:has(.panel-title:has-text('Work Order')) .details-icon_lgpCm, "
+                            ".details-icon_lgpCm"
                         ).first
                         if await chevron_loc.count() > 0:
                             await chevron_loc.scroll_into_view_if_needed()
@@ -1944,7 +1957,8 @@ class AssetAssignmentScraper(BaseScraper):
                         print(f"  ⚠️ Playwright chevron click note: {c_err}")
 
                     await self.page.evaluate("""() => {
-                        const wo = document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
+                        const wo = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"]') ||
+                                   document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
                                    document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz') ||
                                    Array.from(document.querySelectorAll('.card_ngkhz')).find(c => {
                                        const pt = c.querySelector('.panel-title, .field-title');
