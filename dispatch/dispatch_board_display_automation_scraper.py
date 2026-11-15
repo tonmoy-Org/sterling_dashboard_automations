@@ -4,13 +4,21 @@ import json
 import re
 import asyncio
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as datetime_time
+from zoneinfo import ZoneInfo
+try:
+    PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
+except Exception:
+    import pytz
+    PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
+
+DUMMY_HEADER_TECHS = ("s3", "s4", "s6", "s7", "t9", "t91", "f2", "p2")
 import time
 import traceback
 import urllib.request
 import urllib.error
 import unicodedata
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Tuple, Any
 
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -540,6 +548,52 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         return False
 
+    @staticmethod
+    def parse_fieldedge_datetime(dt_val: Any) -> Tuple[str, str, Optional[datetime_time]]:
+        """
+        Parses a FieldEdge datetime value into (date_str: YYYY-MM-DD, time_key: I:M p, time_obj: time).
+        Converts UTC timestamps with 'Z' or offset to America/Los_Angeles (Pacific Time).
+        """
+        if not dt_val:
+            return "", "", None
+        raw_str = str(dt_val).strip()
+        if not raw_str:
+            return "", "", None
+
+        has_tz = raw_str.endswith("Z") or bool(re.search(r'[+-]\d{2}:?\d{2}$', raw_str))
+        if has_tz:
+            try:
+                iso_clean = raw_str.replace("Z", "+00:00")
+                parsed_dt = datetime.fromisoformat(iso_clean)
+                pacific_dt = parsed_dt.astimezone(PACIFIC_TZ)
+                date_str = pacific_dt.strftime("%Y-%m-%d")
+                time_key = pacific_dt.strftime("%I:%M %p")
+                if time_key.startswith("0"):
+                    time_key = time_key[1:]
+                return date_str, time_key, pacific_dt.time()
+            except Exception:
+                pass
+
+        clean_naive = re.sub(r'[+-]\d{2}:?\d{2}$', '', raw_str.replace("Z", "")).replace("T", " ").split(".")[0].strip()
+        for fmt in [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%I:%M %p",
+            "%H:%M:%S",
+            "%H:%M"
+        ]:
+            try:
+                local_dt = datetime.strptime(clean_naive, fmt)
+                date_str = local_dt.strftime("%Y-%m-%d") if "%Y" in fmt else ""
+                time_key = local_dt.strftime("%I:%M %p")
+                if time_key.startswith("0"):
+                    time_key = time_key[1:]
+                return date_str, time_key, local_dt.time()
+            except Exception:
+                pass
+
+        return "", "", None
+
     def extract_existing_wos(self, board_data, target_date_key: Optional[str] = None):
         if not board_data or "Board" not in board_data:
             return None, {}
@@ -582,26 +636,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         item.get("StartDateTime") or
                         item.get("StartTime")
                     )
-                    time_key = ""
-                    item_date_str = ""
-                    if dt_str:
-                        dt_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
-                        for fmt in [
-                            "%Y-%m-%d %H:%M:%S",
-                            "%Y-%m-%d %H:%M",
-                            "%I:%M %p",
-                            "%H:%M:%S",
-                            "%H:%M"
-                        ]:
-                            try:
-                                local_dt = datetime.strptime(dt_clean, fmt)
-                                time_key = local_dt.strftime("%I:%M %p")
-                                if time_key.startswith("0"): time_key = time_key[1:]
-                                if "%Y" in fmt:
-                                    item_date_str = local_dt.strftime("%Y-%m-%d")
-                                break
-                            except Exception:
-                                pass
+                    item_date_str, time_key, time_obj = self.parse_fieldedge_datetime(dt_str)
 
                     if effective_date and item_date_str and item_date_str != effective_date:
                         continue
@@ -628,6 +663,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         "canon_strings": canon_strings,
                         "canon_combined": canon_combined,
                         "time_key": time_key,
+                        "time_obj": time_obj,
                         "is_service_needed": is_sn,
                         "is_out_of_service": is_oos,
                         "is_appointment": False
@@ -650,48 +686,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         appt.get("StartTime")
                     )
                     dt_to_str = appt.get("ScheduledTo") or appt.get("EndDateTime")
-                    time_key = ""
-                    start_time_obj = None
-                    end_time_obj = None
-                    appt_from_date = ""
-                    appt_to_date = ""
-                    if dt_str:
-                        dt_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
-                        for fmt in [
-                            "%Y-%m-%d %H:%M:%S",
-                            "%Y-%m-%d %H:%M",
-                            "%I:%M %p",
-                            "%H:%M:%S",
-                            "%H:%M"
-                        ]:
-                            try:
-                                local_dt = datetime.strptime(dt_clean, fmt)
-                                time_key = local_dt.strftime("%I:%M %p")
-                                if time_key.startswith("0"): time_key = time_key[1:]
-                                start_time_obj = local_dt.time()
-                                if "%Y" in fmt:
-                                    appt_from_date = local_dt.strftime("%Y-%m-%d")
-                                break
-                            except Exception:
-                                pass
-                            
-                    if dt_to_str:
-                        dt_to_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_to_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
-                        for fmt in [
-                            "%Y-%m-%d %H:%M:%S",
-                            "%Y-%m-%d %H:%M",
-                            "%I:%M %p",
-                            "%H:%M:%S",
-                            "%H:%M"
-                        ]:
-                            try:
-                                local_dt_to = datetime.strptime(dt_to_clean, fmt)
-                                end_time_obj = local_dt_to.time()
-                                if "%Y" in fmt:
-                                    appt_to_date = local_dt_to.strftime("%Y-%m-%d")
-                                break
-                            except Exception:
-                                pass
+                    appt_from_date, time_key, start_time_obj = self.parse_fieldedge_datetime(dt_str)
+                    appt_to_date, _, end_time_obj = self.parse_fieldedge_datetime(dt_to_str)
 
                     if effective_date:
                         if appt_to_date and appt_to_date < effective_date:
@@ -2628,8 +2624,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if tech_match:
                                     for wo in wo_list:
                                         if not wo.get("is_appointment"):
-                                            check_time = None if canon_h_tech in ("s4", "s3", "f2", "p2") else time_key
-                                            if self.check_item_match(wo, canon_target, check_time, is_service_wo=is_service_wo, is_oos_wo=is_oos_wo, match_any_status=(is_service_wo or is_oos_wo or canon_h_tech in ("s4", "s3", "f2", "p2"))):
+                                            is_dummy_tech = (
+                                                canon_h_tech in DUMMY_HEADER_TECHS or
+                                                any(canon_h_tech.startswith(dt) for dt in DUMMY_HEADER_TECHS)
+                                            )
+                                            check_time = None if is_dummy_tech else time_key
+                                            if self.check_item_match(
+                                                wo,
+                                                canon_target,
+                                                check_time,
+                                                is_service_wo=is_service_wo,
+                                                is_oos_wo=is_oos_wo,
+                                                match_any_status=(is_service_wo or is_oos_wo or is_dummy_tech)
+                                            ):
                                                 board_count += 1
                                         else:
                                             appt_matched = False
@@ -2690,8 +2697,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
+                                opt_wo = {
+                                    "canon_customer": canon_target,
+                                    "canon_strings": [canon_target],
+                                    "canon_combined": canon_target,
+                                    "time_key": time_key,
+                                    "is_service_needed": is_service_wo,
+                                    "is_out_of_service": is_oos_wo,
+                                    "is_appointment": False
+                                }
+                                if canon_h_tech not in existing_wos:
+                                    existing_wos[canon_h_tech] = []
+                                existing_wos[canon_h_tech].append(opt_wo)
+
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                                if f_date == db_date_key:
+                                if f_date == db_date_key and f_wos:
+                                    for t_key, w_list in existing_wos.items():
+                                        if t_key not in f_wos:
+                                            f_wos[t_key] = w_list
+                                        else:
+                                            old_matching = [w for w in w_list if w.get("canon_customer") == canon_target]
+                                            new_matching = [w for w in f_wos[t_key] if w.get("canon_customer") == canon_target]
+                                            if len(old_matching) > len(new_matching):
+                                                diff = len(old_matching) - len(new_matching)
+                                                f_wos[t_key].extend(old_matching[:diff])
                                     board_date_str, existing_wos = f_date, f_wos
 
                     if skip_vehicle_on_weekends and current_date.weekday() >= 5:
@@ -2749,7 +2778,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 found_tech_name = None
                                 found_cust_name = None
                                 for c_t, w_list in existing_wos.items():
-                                    if c_t in ("s4", "s3", "f2", "p2", "") or c_t.startswith("s4") or c_t.startswith("s3"):
+                                    if not c_t or c_t in DUMMY_HEADER_TECHS or any(c_t.startswith(dt) for dt in DUMMY_HEADER_TECHS):
                                         continue
                                     for wo in w_list:
                                         if not wo.get("is_appointment"):
@@ -2767,7 +2796,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
-                                if canon_h_tech and canon_h_tech not in ("s4", "s3", "f2", "p2", "") and not canon_h_tech.startswith("s4") and canon_h_tech in existing_wos:
+                                is_dummy_h_tech = (
+                                    not canon_h_tech or
+                                    canon_h_tech in DUMMY_HEADER_TECHS or
+                                    any(canon_h_tech.startswith(dt) for dt in DUMMY_HEADER_TECHS)
+                                )
+                                if not is_dummy_h_tech and canon_h_tech in existing_wos:
                                     tech_already_has_truck = False
                                     for wo in existing_wos[canon_h_tech]:
                                         if wo.get("is_appointment"):
@@ -2836,8 +2870,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 )
                                 if res:
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
+                                    opt_wo = {
+                                        "canon_customer": canon_target,
+                                        "canon_strings": [canon_target],
+                                        "canon_combined": canon_target,
+                                        "time_key": time_key,
+                                        "is_service_needed": False,
+                                        "is_out_of_service": False,
+                                        "is_appointment": False
+                                    }
+                                    if canon_h_tech not in existing_wos:
+                                        existing_wos[canon_h_tech] = []
+                                    existing_wos[canon_h_tech].append(opt_wo)
+
                                     f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                                    if f_date == db_date_key:
+                                    if f_date == db_date_key and f_wos:
+                                        for t_key, w_list in existing_wos.items():
+                                            if t_key not in f_wos:
+                                                f_wos[t_key] = w_list
+                                            else:
+                                                old_matching = [w for w in w_list if w.get("canon_customer") == canon_target]
+                                                new_matching = [w for w in f_wos[t_key] if w.get("canon_customer") == canon_target]
+                                                if len(old_matching) > len(new_matching):
+                                                    diff = len(old_matching) - len(new_matching)
+                                                    f_wos[t_key].extend(old_matching[:diff])
                                         board_date_str, existing_wos = f_date, f_wos
 
                     for job in tech_jobs:
@@ -2943,8 +2999,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             )
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": t_tech, "time": time_key})
+                                opt_wo = {
+                                    "canon_customer": canon_target,
+                                    "canon_strings": [canon_target],
+                                    "canon_combined": canon_target,
+                                    "time_key": time_key,
+                                    "is_service_needed": False,
+                                    "is_out_of_service": False,
+                                    "is_appointment": False
+                                }
+                                if canon_t_tech not in existing_wos:
+                                    existing_wos[canon_t_tech] = []
+                                existing_wos[canon_t_tech].append(opt_wo)
+
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                                if f_date == db_date_key:
+                                if f_date == db_date_key and f_wos:
+                                    for t_key, w_list in existing_wos.items():
+                                        if t_key not in f_wos:
+                                            f_wos[t_key] = w_list
+                                        else:
+                                            old_matching = [w for w in w_list if w.get("canon_customer") == canon_target]
+                                            new_matching = [w for w in f_wos[t_key] if w.get("canon_customer") == canon_target]
+                                            if len(old_matching) > len(new_matching):
+                                                diff = len(old_matching) - len(new_matching)
+                                                f_wos[t_key].extend(old_matching[:diff])
                                     board_date_str, existing_wos = f_date, f_wos
 
                     for tech in active_techs:
@@ -3034,8 +3112,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             )
                             if res:
                                 self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name, "time": time_key})
+                                opt_wo = {
+                                    "canon_customer": canon_target,
+                                    "canon_strings": [canon_target],
+                                    "canon_combined": canon_target,
+                                    "time_key": time_key,
+                                    "is_service_needed": False,
+                                    "is_out_of_service": False,
+                                    "is_appointment": False
+                                }
+                                if canon_t_assignment not in existing_wos:
+                                    existing_wos[canon_t_assignment] = []
+                                existing_wos[canon_t_assignment].append(opt_wo)
+
                                 f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                                if f_date == db_date_key:
+                                if f_date == db_date_key and f_wos:
+                                    for t_key, w_list in existing_wos.items():
+                                        if t_key not in f_wos:
+                                            f_wos[t_key] = w_list
+                                        else:
+                                            old_matching = [w for w in w_list if w.get("canon_customer") == canon_target]
+                                            new_matching = [w for w in f_wos[t_key] if w.get("canon_customer") == canon_target]
+                                            if len(old_matching) > len(new_matching):
+                                                diff = len(old_matching) - len(new_matching)
+                                                f_wos[t_key].extend(old_matching[:diff])
                                     board_date_str, existing_wos = f_date, f_wos
 
                 if not dry_run:
