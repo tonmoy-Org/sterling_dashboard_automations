@@ -3121,13 +3121,6 @@ class AssetAssignmentScraper(BaseScraper):
                     target_priority = sn_cfg.get("priority", "[7] 7.12 SERVICE NEEDED")
                     service_note = sn_cfg.get("service_note", "")
 
-                    # If vehicle is currently assigned to an active technician in truck_headers,
-                    # its priority and service note are reconciled directly on that technician's truck work order in Stage 2/2!
-                    assigned_tech_for_truck = self.get_expected_tech_for_truck(asset_name)
-                    if assigned_tech_for_truck and assigned_tech_for_truck.lower() not in ("s4", "s3", "unassigned", "none", ""):
-                        print(f"  👉 Vehicle '{asset_name}' is currently assigned to tech '{assigned_tech_for_truck}'. Service Needed priority will be reconciled on tech's column.")
-                        continue
-
                     matching_row = self.find_asset_row(
                         asset_name,
                         all_rows,
@@ -3294,59 +3287,12 @@ class AssetAssignmentScraper(BaseScraper):
                             continue
 
                         if wo_num:
-                            sn_match = None
-                            for s in service_needed_configs:
-                                if self.canonical_str(s.get("asset_name", "")) == self.canonical_str(truck_name) or (
-                                    self.canonical_str(truck_name) and self.canonical_str(truck_name) in self.canonical_str(s.get("asset_name", ""))
-                                ):
-                                    sn_match = s
-                                    break
-
-                            if sn_match:
-                                expected_prio = sn_match.get("priority", "[7] 7.12 SERVICE NEEDED")
-                                expected_note = sn_match.get("service_note", "")
-                                expected_time = sn_match.get("start_time") or "3:30 PM"
-                            else:
-                                hdr = self.get_expected_header_for_truck(truck_name)
-                                expected_prio = (hdr.get("priority") if hdr else None) or r.get("priority") or "[5] PT (Asset Assignment)"
-                                expected_note = ""
-                                expected_time = (hdr.get("start_time") if hdr else None) or r.get("start_time") or "06:00 AM"
-
-                            curr_prio_table = r.get("priority", "")
                             curr_sched_table = r.get("scheduled_date", "")
                             tech_matches = bool(curr_tech_table and expected_tech and self.is_tech_match(curr_tech_table, expected_tech))
-                            prio_matches = self.is_priority_match(curr_prio_table, expected_prio)
-                            time_matches = self.is_time_matching(expected_time, curr_sched_table)
 
                             if tech_matches:
-                                if prio_matches and time_matches:
-                                    print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' with matching priority '{curr_prio_table}' and time '{curr_sched_table}'. Skipping sidepanel.")
-                                    continue
-                                else:
-                                    reasons = []
-                                    if not prio_matches:
-                                        reasons.append(f"priority is '{curr_prio_table}' (expected '{expected_prio}')")
-                                    if not time_matches:
-                                        reasons.append(f"time is '{curr_sched_table}' (expected '{expected_time}')")
-                                    reason_str = " & ".join(reasons)
-                                    print(f"\n[{idx}/{len(truck_headers)}] ⚠️ Truck '{truck_name}' (WO #{wo_num}) is assigned to '{curr_tech_table}' but {reason_str}. Updating Priority & Time...")
-                                    if click_wos:
-                                        total_checked += 1
-                                        updated = await self.update_service_needed_work_order(
-                                            work_order_number=wo_num,
-                                            asset_name=truck_name,
-                                            target_time=expected_time,
-                                            target_priority=expected_prio,
-                                            service_note=expected_note,
-                                            target_tech=expected_tech,
-                                            current_tech=curr_tech_table,
-                                            current_sched=curr_sched_table,
-                                            current_priority=curr_prio_table,
-                                            stage_label="Assigned Truck Priority Reconciliation"
-                                        )
-                                        if updated:
-                                            total_reconciled += 1
-                                    continue
+                                print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' at morning slot ({curr_sched_table}). Skipping sidepanel.")
+                                continue
 
                             expected_tech_already_has_it = False
                             for other_r in truck_headers:
