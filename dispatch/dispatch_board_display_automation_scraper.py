@@ -2389,6 +2389,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             try:
                                 from automation.tech_checkin_service import evaluate_dispatch_board_data, ENABLE_QUO_LIVE_SMS
                                 evaluate_dispatch_board_data(board_data, dry_run=not ENABLE_QUO_LIVE_SMS)
+                            except (ImportError, ModuleNotFoundError):
+                                api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+                                if api_url:
+                                    try:
+                                        import urllib.request
+                                        endpoint = f"{api_url}/automation/tech-checkin/evaluate/" if api_url.endswith('/api') else f"{api_url}/api/automation/tech-checkin/evaluate/"
+                                        headers = {"User-Agent": "SterlingAutomations/1.0", "Content-Type": "application/json"}
+                                        headers.update(self._get_api_auth_headers())
+                                        payload = json.dumps({"board_data": board_data}).encode("utf-8")
+                                        req = urllib.request.Request(endpoint, data=payload, headers=headers)
+                                        with urllib.request.urlopen(req, timeout=10) as resp:
+                                            if resp.status == 200:
+                                                print("✅ Forwarded intercepted board data to Tech Check-in API successfully.")
+                                    except Exception as _fwd_err:
+                                        print(f"⚠️ Forwarding intercepted board data error: {_fwd_err}")
                             except Exception as _eval_err:
                                 print(f"⚠️ Tech Check-in evaluation on intercepted board data error: {_eval_err}")
                     except Exception as e:
