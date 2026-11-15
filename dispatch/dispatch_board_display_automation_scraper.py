@@ -797,7 +797,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
     async def get_or_fetch_board_data_for_date(self, target_date_obj: datetime, max_retries: int = 2) -> Tuple[Optional[str], Optional[Dict]]:
         target_date_key = target_date_obj.strftime("%Y-%m-%d")
 
-        # 1. First check if we already intercepted board data for this date
+        # 1. First check if we already have it in cache
         if target_date_key in self.intercepted_board_by_date:
             b_data = self.intercepted_board_by_date[target_date_key]
             b_date, e_wos = self.extract_existing_wos(b_data, target_date_key=target_date_key)
@@ -806,31 +806,23 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return b_date, e_wos
 
         # 2. Navigate to the date on the Dispatch Board
-        nav_ok = await self.navigate_to_board_date(target_date_obj, wait_for_api=True)
-        if target_date_key in self.intercepted_board_by_date:
-            b_data = self.intercepted_board_by_date[target_date_key]
-            b_date, e_wos = self.extract_existing_wos(b_data, target_date_key=target_date_key)
-            total_items = sum(len(w_list) for w_list in e_wos.values())
-            print(f"📡 Verified FieldEdge API board data after navigation for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
-            return b_date, e_wos
+        await self.navigate_to_board_date(target_date_obj)
 
         # 3. Dynamic fetch via page.evaluate
         if self.board_req and self.board_req.get("url"):
-            print(f"🔄 Waiting for API interception timed out; attempting dynamic fetch for target date {target_date_key}...")
+            print(f"🔄 Fetching FieldEdge API board data for target date {target_date_key}...")
             b_date, e_wos = await self.fetch_board_data_for_date(target_date_key, self.board_req)
-            if b_date == target_date_key and e_wos:
+            if b_date == target_date_key and e_wos is not None:
                 total_items = sum(len(w_list) for w_list in e_wos.values())
                 print(f"📡 Verified FieldEdge API board data via fetch for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
                 return b_date, e_wos
 
-        # 4. If navigation didn't trigger API response, try a fresh reload once more
+        # 4. If retry is allowed, retry once
         if max_retries > 0:
-            print(f"🔁 Retrying FieldEdge API board check for {target_date_key}...")
-            await self.page.reload(wait_until='domcontentloaded', timeout=30000)
-            await self.page.wait_for_timeout(2000)
-            if target_date_key in self.intercepted_board_by_date:
-                b_data = self.intercepted_board_by_date[target_date_key]
-                b_date, e_wos = self.extract_existing_wos(b_data, target_date_key=target_date_key)
+            print(f"🔁 Retrying FieldEdge API board fetch for {target_date_key}...")
+            await self.page.wait_for_timeout(1000)
+            b_date, e_wos = await self.fetch_board_data_for_date(target_date_key, self.board_req)
+            if b_date == target_date_key and e_wos is not None:
                 total_items = sum(len(w_list) for w_list in e_wos.values())
                 print(f"📡 Verified FieldEdge API board data on retry for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
                 return b_date, e_wos
@@ -839,8 +831,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         print(f"⛔ CRITICAL SAFETY GUARD: Could NOT verify FieldEdge Dispatch Board API for date {target_date_key}!")
         return None, None
 
-    async def navigate_to_board_date(self, target_date_obj: datetime, wait_for_api: bool = True) -> bool:
-        target_date_key = target_date_obj.strftime("%Y-%m-%d")
+    async def navigate_to_board_date(self, target_date_obj: datetime) -> bool:
         try:
             date_url_str = target_date_obj.strftime("%m-%d-%Y")
             target_url = f"https://login.fieldedge.com/#/DispatchBoard/{date_url_str}"
@@ -854,12 +845,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await spinners.first.wait_for(state="hidden", timeout=4000)
             except Exception:
                 pass
-
-            if wait_for_api:
-                for _ in range(25):  # up to 5 seconds
-                    if target_date_key in self.intercepted_board_by_date:
-                        return True
-                    await self.page.wait_for_timeout(200)
 
             await self.page.wait_for_timeout(1000)
             return True
@@ -2466,62 +2451,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     
             self.page.on("request", handle_request)
             
-            async def handle_response(response):
-                if "GetDispatchBoardData" in response.url:
-                    if response.status != 200 or response.request.method != "POST":
-                        return
-                    try:
-                        text = await response.text()
-                        if text:
-                            data = json.loads(text)
-                            if data and "Board" in data:
-                                req_date = None
-                                try:
-                                    post_d = json.loads(response.request.post_data)
-                                    if "Date" in post_d:
-                                        req_date = str(post_d["Date"]).replace("T", " ").split(" ")[0]
-                                except Exception:
-                                    pass
-                                
-                                if not req_date and data["Board"].get("Headers"):
-                                    try:
-                                        hdr_dt = data["Board"]["Headers"][0].get("HeaderDateTime")
-                                        if hdr_dt:
-                                            req_date = str(hdr_dt).replace("T", " ").split(" ")[0]
-                                    except Exception:
-                                        pass
-                                
-                                if req_date:
-                                    self.intercepted_board_by_date[req_date] = data
-                                    print(f"📡 Intercepted Dispatch Board API data for date '{req_date}' successfully.")
-                                else:
-                                    print("📡 Intercepted Dispatch Board API data successfully.")
-                            
-                                try:
-                                    from automation.tech_checkin_service import evaluate_dispatch_board_data, ENABLE_QUO_LIVE_SMS
-                                    evaluate_dispatch_board_data(data, dry_run=not ENABLE_QUO_LIVE_SMS)
-                                except (ImportError, ModuleNotFoundError):
-                                    api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
-                                    if api_url:
-                                        try:
-                                            import urllib.request
-                                            endpoint = f"{api_url}/automation/tech-checkin/evaluate/" if api_url.endswith('/api') else f"{api_url}/api/automation/tech-checkin/evaluate/"
-                                            headers = {"User-Agent": "SterlingAutomations/1.0", "Content-Type": "application/json"}
-                                            headers.update(self._get_api_auth_headers())
-                                            payload = json.dumps({"board_data": data}).encode("utf-8")
-                                            req = urllib.request.Request(endpoint, data=payload, headers=headers)
-                                            with urllib.request.urlopen(req, timeout=10) as resp:
-                                                if resp.status == 200:
-                                                    print("✅ Forwarded intercepted board data to Tech Check-in API successfully.")
-                                        except Exception as _fwd_err:
-                                            print(f"⚠️ Forwarding intercepted board data error: {_fwd_err}")
-                                except Exception as _eval_err:
-                                    print(f"⚠️ Tech Check-in evaluation on intercepted board data error: {_eval_err}")
-                    except Exception as e:
-                        if "getResponseBody" not in str(e):
-                            print(f"⚠️ Failed to parse intercepted board data: {e}")
-
-            self.page.on("response", handle_response)
+            # Response interception removed per user request. Board data is fetched on-demand via fetch_board_data_for_date.
             
             
             dispatch_url = self.rules.get('web_url', 'https://login.fieldedge.com/Dispatch')
