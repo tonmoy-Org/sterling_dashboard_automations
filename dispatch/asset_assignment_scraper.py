@@ -1535,18 +1535,47 @@ class AssetAssignmentScraper(BaseScraper):
             await self.close_sidepanel()
             return False
 
-    def find_asset_row(self, asset_name: str, rows: List[Dict[str, Any]], target_priority: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def is_morning_fleet_time(sched_str: str) -> bool:
+        if not sched_str:
+            return False
+        import re
+        times = re.findall(r'(\d{1,2}):(\d{2})\s*(am|pm)?', sched_str, re.IGNORECASE)
+        if times:
+            sh_s, sm, sp = times[0]
+            sh = int(sh_s)
+            sp = (sp or '').lower()
+            # 5:00 AM to 8:59 AM are morning fleet banner and tech assignment slots
+            if sp == 'am' and 5 <= sh <= 8:
+                return True
+        return False
+
+    def find_asset_row(
+        self,
+        asset_name: str,
+        rows: List[Dict[str, Any]],
+        target_priority: Optional[str] = None,
+        target_time: Optional[str] = None,
+        target_tech: Optional[str] = None,
+        is_service_needed: bool = False,
+        is_out_of_service: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         if not asset_name or not rows:
             return None
         import re
         c_target = self.canonical_str(asset_name)
 
-        is_target_exc = ("🏗️" in asset_name or "u-40" in asset_name.lower() or "u-17" in asset_name.lower() or "exc" in asset_name.lower())
-        is_target_pump = ("🚛" in asset_name or "pt (" in asset_name.lower() or "pump" in asset_name.lower())
-        is_target_serv = ("🛻" in asset_name or "ser tr" in asset_name.lower() or "service" in asset_name.lower())
+        target_has_pump = "🚛" in asset_name
+        target_has_serv = "🛻" in asset_name
+        target_has_exc = "🏗️" in asset_name
+
+        is_target_exc = (target_has_exc or "u-40" in asset_name.lower() or "u-17" in asset_name.lower() or "exc" in asset_name.lower())
+        is_target_pump = (target_has_pump or "pt (" in asset_name.lower() or "pump" in asset_name.lower())
+        is_target_serv = (target_has_serv or "ser tr" in asset_name.lower() or "service" in asset_name.lower())
 
         ident_target = asset_name.split("|")[-1].strip() if "|" in asset_name else asset_name.strip()
         c_ident_target = self.canonical_str(ident_target)
+        targ_digits = re.findall(r'\d+', ident_target)
 
         matched_rows = []
         for r in rows:
@@ -1556,21 +1585,31 @@ class AssetAssignmentScraper(BaseScraper):
             if "👥" in cust or "laborer" in cust.lower() or "helper" in cust.lower():
                 continue
 
-            is_vehicle = ("🛻" in cust or "🚛" in cust or "🏗️" in cust)
-            if not is_vehicle and not r.get("is_asset_assignment"):
-                if not ("asset assignment" in prio.lower() or "ser tr" in prio.lower() or "pt (" in prio.lower() or "service needed" in prio.lower() or "exc (" in prio.lower() or "do not dispatch" in prio.lower()):
+            cust_has_pump = "🚛" in cust
+            cust_has_serv = "🛻" in cust
+            cust_has_exc = "🏗️" in cust
+
+            # 1. Authoritative vehicle category check via emoji:
+            # Emojis on customer_name are absolute. Never let priority dictate vehicle type!
+            if target_has_pump and (cust_has_serv or cust_has_exc):
+                continue
+            if target_has_serv and (cust_has_pump or cust_has_exc):
+                continue
+            if target_has_exc and (cust_has_pump or cust_has_serv):
+                continue
+
+            # Fallback text check only if emojis are missing:
+            if not (target_has_pump or target_has_serv or target_has_exc) or not (cust_has_pump or cust_has_serv or cust_has_exc):
+                is_cust_exc = ("🏗️" in cust or "u-40" in cust.lower() or "u-17" in cust.lower() or "exc" in cust.lower())
+                if is_target_exc != is_cust_exc:
                     continue
 
-            is_cust_exc = ("🏗️" in cust or "u-40" in cust.lower() or "u-17" in cust.lower() or "exc" in prio.lower() or "exc" in cust.lower())
-            if is_target_exc != is_cust_exc:
-                continue
-
-            is_cust_pump = ("🚛" in cust or "pt (" in prio.lower() or "pump" in cust.lower())
-            is_cust_serv = ("🛻" in cust or "ser tr" in prio.lower() or "service" in cust.lower())
-            if is_target_pump and is_cust_serv:
-                continue
-            if is_target_serv and is_cust_pump:
-                continue
+                is_cust_pump = ("🚛" in cust or "pt (" in cust.lower() or "pump" in cust.lower())
+                is_cust_serv = ("🛻" in cust or "ser tr" in cust.lower() or "service" in cust.lower())
+                if is_target_pump and is_cust_serv:
+                    continue
+                if is_target_serv and is_cust_pump:
+                    continue
 
             c_cust = self.canonical_str(cust)
 
@@ -1580,13 +1619,12 @@ class AssetAssignmentScraper(BaseScraper):
             else:
                 ident_cust = cust.split("|")[-1].strip() if "|" in cust else cust.strip()
                 c_ident_cust = self.canonical_str(ident_cust)
+                cust_digits = re.findall(r'\d+', ident_cust)
 
                 if c_ident_target and c_ident_target == c_ident_cust:
                     is_match = True
-                elif not is_target_exc and not is_cust_exc:
-                    cust_digits = re.findall(r'^\d+$', ident_cust)
-                    targ_digits = re.findall(r'^\d+$', ident_target)
-                    if cust_digits and targ_digits and int(cust_digits[0]) == int(targ_digits[0]):
+                elif not is_target_exc and not ("🏗️" in cust or "exc" in cust.lower()):
+                    if cust_digits and targ_digits and int(cust_digits[-1]) == int(targ_digits[-1]):
                         is_match = True
 
             if is_match:
@@ -1595,12 +1633,44 @@ class AssetAssignmentScraper(BaseScraper):
         if not matched_rows:
             return None
 
-        if target_priority and len(matched_rows) > 1:
-            for r in matched_rows:
-                if self.is_priority_match(r.get("priority_name", ""), target_priority):
-                    return r
+        if len(matched_rows) == 1 and not is_service_needed and not is_out_of_service:
+            return matched_rows[0]
 
-        return matched_rows[0]
+        scored = []
+        for r in matched_rows:
+            score = 0
+            curr_prio = r.get("priority_name") or ""
+            curr_sched = r.get("scheduled_date") or ""
+            curr_tech = r.get("tech_name") or ""
+
+            p_match = self.is_priority_match(curr_prio, target_priority) if target_priority else False
+            t_match = self.is_time_matching(target_time, curr_sched) if target_time else False
+            tech_match = (
+                self.is_tech_match(curr_tech, target_tech)
+                or (self.canonical_str(curr_tech) == self.canonical_str(target_tech))
+            ) if target_tech else False
+            is_morn = self.is_morning_fleet_time(curr_sched)
+
+            if p_match:
+                score += 100
+            if t_match:
+                score += 50
+            if tech_match:
+                score += 25
+
+            if is_service_needed or is_out_of_service:
+                if is_morn:
+                    score -= 500
+
+            scored.append((score, r))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Protect morning static banners & tech slots from being mangled for service-needed / out-of-service
+        if (is_service_needed or is_out_of_service) and scored[0][0] < 0:
+            return None
+
+        return scored[0][1]
 
     def is_time_matching(self, target_time: str, sched_str: str) -> bool:
         if not target_time or not sched_str:
@@ -2781,7 +2851,14 @@ class AssetAssignmentScraper(BaseScraper):
                     service_note = oos_cfg.get("service_note") or oos_cfg.get("reason", "Vehicle is Out of Service for repairs.")
                     target_tech = oos_cfg.get("tech_name", "s4")
 
-                    matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority)
+                    matching_row = self.find_asset_row(
+                        asset_name,
+                        all_rows,
+                        target_priority=target_priority,
+                        target_time=target_time,
+                        target_tech=target_tech,
+                        is_out_of_service=True
+                    )
                     if matching_row:
                         wo_num = matching_row.get("work_order_number", "")
                         curr_tech = matching_row.get("tech_name", "")
@@ -3014,7 +3091,14 @@ class AssetAssignmentScraper(BaseScraper):
                     target_priority = sn_cfg.get("priority", "[7] 7.12 SERVICE NEEDED")
                     service_note = sn_cfg.get("service_note", "")
 
-                    matching_row = self.find_asset_row(asset_name, all_rows, target_priority=target_priority)
+                    matching_row = self.find_asset_row(
+                        asset_name,
+                        all_rows,
+                        target_priority=target_priority,
+                        target_time=target_time,
+                        target_tech=target_tech,
+                        is_service_needed=True
+                    )
                     if matching_row:
                         wo_num = matching_row.get("work_order_number", "")
                         curr_tech = matching_row.get("tech_name", "")
