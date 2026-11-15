@@ -3305,32 +3305,42 @@ class AssetAssignmentScraper(BaseScraper):
                             if sn_match:
                                 expected_prio = sn_match.get("priority", "[7] 7.12 SERVICE NEEDED")
                                 expected_note = sn_match.get("service_note", "")
+                                expected_time = sn_match.get("start_time") or "3:30 PM"
                             else:
                                 hdr = self.get_expected_header_for_truck(truck_name)
                                 expected_prio = (hdr.get("priority") if hdr else None) or r.get("priority") or "[5] PT (Asset Assignment)"
                                 expected_note = ""
+                                expected_time = (hdr.get("start_time") if hdr else None) or r.get("start_time") or "06:00 AM"
 
                             curr_prio_table = r.get("priority", "")
+                            curr_sched_table = r.get("scheduled_date", "")
                             tech_matches = bool(curr_tech_table and expected_tech and self.is_tech_match(curr_tech_table, expected_tech))
                             prio_matches = self.is_priority_match(curr_prio_table, expected_prio)
+                            time_matches = self.is_time_matching(expected_time, curr_sched_table)
 
                             if tech_matches:
-                                if prio_matches:
-                                    print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' with matching priority '{curr_prio_table}'. Skipping sidepanel.")
+                                if prio_matches and time_matches:
+                                    print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' with matching priority '{curr_prio_table}' and time '{curr_sched_table}'. Skipping sidepanel.")
                                     continue
                                 else:
-                                    print(f"\n[{idx}/{len(truck_headers)}] ⚠️ Truck '{truck_name}' (WO #{wo_num}) is assigned to '{curr_tech_table}' but priority is '{curr_prio_table}' (expected '{expected_prio}'). Updating Priority & Note...")
+                                    reasons = []
+                                    if not prio_matches:
+                                        reasons.append(f"priority is '{curr_prio_table}' (expected '{expected_prio}')")
+                                    if not time_matches:
+                                        reasons.append(f"time is '{curr_sched_table}' (expected '{expected_time}')")
+                                    reason_str = " & ".join(reasons)
+                                    print(f"\n[{idx}/{len(truck_headers)}] ⚠️ Truck '{truck_name}' (WO #{wo_num}) is assigned to '{curr_tech_table}' but {reason_str}. Updating Priority & Time...")
                                     if click_wos:
                                         total_checked += 1
                                         updated = await self.update_service_needed_work_order(
                                             work_order_number=wo_num,
                                             asset_name=truck_name,
-                                            target_time=r.get("start_time", "06:00 AM"),
+                                            target_time=expected_time,
                                             target_priority=expected_prio,
                                             service_note=expected_note,
                                             target_tech=expected_tech,
                                             current_tech=curr_tech_table,
-                                            current_sched=r.get("scheduled_date", ""),
+                                            current_sched=curr_sched_table,
                                             current_priority=curr_prio_table,
                                             stage_label="Assigned Truck Priority Reconciliation"
                                         )
