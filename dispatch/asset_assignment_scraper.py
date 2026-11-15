@@ -2060,70 +2060,72 @@ class AssetAssignmentScraper(BaseScraper):
 
                 print("  👉 Clicking Work Order edit icon (.edit-icon_vG0FU)...")
                 edit_wo_clicked = False
-                for _ in range(5):
-                    is_in_edit = await self.page.evaluate("""() => {
-                        return !!(
-                            document.querySelector('.workorder-details-card_kiboz .v-select') ||
-                            document.querySelector('.v-select') ||
-                            document.querySelector('.workorder-details-card_kiboz input.vs__search') ||
-                            document.querySelector('input.vs__search') ||
-                            document.querySelector('textarea') ||
-                            document.querySelector('button.confirm_I8LeR')
-                        );
+                for edit_attempt in range(5):
+                    # Check if edit icon is present and visible
+                    edit_icon_present = await self.page.evaluate("""() => {
+                        const btn = document.querySelector('.edit-icon_vG0FU, .base-icon.edit.edit-icon_vG0FU, .workorder-details-card_kiboz .edit-icon_vG0FU');
+                        return !!(btn && btn.offsetParent !== null);
                     }""")
-                    if is_in_edit:
-                        edit_wo_clicked = True
-                        break
 
+                    if not edit_icon_present:
+                        # If edit icon is gone and priority-select or save button is present, we are in edit mode!
+                        already_edit = await self.page.evaluate("""() => {
+                            return !!(document.querySelector('.priority-select') || 
+                                      document.querySelector('button.confirm_I8LeR') ||
+                                      document.querySelector('.button_a3g51.confirm_I8LeR'));
+                        }""")
+                        if already_edit:
+                            edit_wo_clicked = True
+                            print(f"  👉 Work Order is already in edit mode (Attempt {edit_attempt + 1})!")
+                            break
+
+                    # Click edit icon via Playwright first
+                    clicked = False
                     try:
                         pw_edit = self.page.locator(
-                            '.workorder-details-card_kiboz .edit-icon_vG0FU, '
-                            '.flex-container__lYVi .edit-icon_vG0FU, '
-                            '.card_ngkhz.no-bottom-padding_XvTa4 .edit-icon_vG0FU, '
-                            '.base-icon.edit.edit-icon_vG0FU, '
                             '.edit-icon_vG0FU, '
-                            '[class*="edit-icon_vG0FU"], '
+                            '.workorder-details-card_kiboz .edit-icon_vG0FU, '
                             '.workorder-details-card_kiboz .base-icon.edit, '
-                            '[data-edb-sidepanel-card*="WorkOrder"] .base-icon.edit'
+                            '.flex-container__lYVi .edit-icon_vG0FU, '
+                            '.base-icon.edit.edit-icon_vG0FU'
                         ).first
                         if await pw_edit.count() > 0 and await pw_edit.is_visible():
                             await pw_edit.scroll_into_view_if_needed()
-                            await pw_edit.click()
-                            edit_wo_clicked = True
-                            break
-                    except Exception:
-                        pass
+                            await self.page.wait_for_timeout(100)
+                            await pw_edit.click(force=True)
+                            clicked = True
+                    except Exception as e_err:
+                        print(f"  ⚠️ Playwright edit button click note: {e_err}")
 
-                    edit_wo_clicked = await self.page.evaluate("""() => {
-                        const btn = document.querySelector('.workorder-details-card_kiboz .edit-icon_vG0FU') ||
-                                    document.querySelector('.flex-container__lYVi .edit-icon_vG0FU') ||
-                                    document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
-                                    document.querySelector('.edit-icon_vG0FU') ||
-                                    document.querySelector('[class*="edit-icon_vG0FU"]') ||
-                                    document.querySelector('.workorder-details-card_kiboz .base-icon.edit') ||
-                                    document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .base-icon.edit');
-                        if (btn && btn.offsetParent !== null) {
-                            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
-                            btn.click();
-                            btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                            btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                            return true;
-                        }
-                        return false;
-                    }""")
-                    if edit_wo_clicked:
-                        break
+                    # Fallback JS click
+                    if not clicked:
+                        clicked = await self.page.evaluate("""() => {
+                            const btn = document.querySelector('.edit-icon_vG0FU') ||
+                                        document.querySelector('.workorder-details-card_kiboz .edit-icon_vG0FU') ||
+                                        document.querySelector('.flex-container__lYVi .edit-icon_vG0FU') ||
+                                        document.querySelector('.workorder-details-card_kiboz .base-icon.edit');
+                            if (btn && btn.offsetParent !== null) {
+                                btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                                btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                btn.click();
+                                return true;
+                            }
+                            return false;
+                        }""")
 
-                    for _ in range(6):
-                        await self.page.wait_for_timeout(150)
-                        if await self.page.evaluate("""() => !!(
-                            document.querySelector('.workorder-details-card_kiboz .v-select') ||
-                            document.querySelector('.v-select') ||
-                            document.querySelector('input.vs__search') ||
-                            document.querySelector('textarea') ||
-                            document.querySelector('button.confirm_I8LeR')
-                        )"""):
+                    # Wait for edit mode to appear (.priority-select or Save button, and edit icon gone)
+                    for _ in range(8):
+                        await self.page.wait_for_timeout(200)
+                        is_in_edit = await self.page.evaluate("""() => {
+                            const hasPrio = !!document.querySelector('.priority-select');
+                            const hasSave = !!document.querySelector('button.confirm_I8LeR');
+                            const editIcon = document.querySelector('.edit-icon_vG0FU');
+                            const editIconGone = !editIcon || (editIcon.offsetParent === null);
+                            return (hasPrio || hasSave) && editIconGone;
+                        }""")
+                        if is_in_edit:
                             edit_wo_clicked = True
                             break
                     if edit_wo_clicked:
@@ -2160,7 +2162,7 @@ class AssetAssignmentScraper(BaseScraper):
                     # 2. Check if dropdown is expanded; if not, open via single click on input
                     is_prio_open = await self.page.evaluate("""() => {
                         const vs = document.querySelector('.priority-select') ||
-                                   document.querySelector('.cell:has(.field-title:has-text("Priority")) .v-select') ||
+                                   Array.from(document.querySelectorAll('.cell')).find(c => (c.textContent || '').includes('Priority'))?.querySelector('.v-select') ||
                                    document.querySelector('.v-select.priority-select');
                         if (!vs) return false;
                         const cb = vs.querySelector('[role="combobox"]');
@@ -2173,7 +2175,7 @@ class AssetAssignmentScraper(BaseScraper):
                     if not is_prio_open:
                         await self.page.evaluate("""() => {
                             const vs = document.querySelector('.priority-select') ||
-                                       document.querySelector('.cell:has(.field-title:has-text("Priority")) .v-select');
+                                       Array.from(document.querySelectorAll('.cell')).find(c => (c.textContent || '').includes('Priority'))?.querySelector('.v-select');
                             if (vs) {
                                 const inp = vs.querySelector('input.vs__search') || vs.querySelector('.vs__dropdown-toggle');
                                 if (inp) inp.click();
@@ -2194,7 +2196,8 @@ class AssetAssignmentScraper(BaseScraper):
                         pass
 
                     await self.page.evaluate("""(term) => {
-                        const vs = document.querySelector('.priority-select') || document.querySelector('.cell:has(.field-title:has-text("Priority")) .v-select');
+                        const vs = document.querySelector('.priority-select') || 
+                                   Array.from(document.querySelectorAll('.cell')).find(c => (c.textContent || '').includes('Priority'))?.querySelector('.v-select');
                         const inp = (vs ? vs.querySelector('input.vs__search') : null) || document.querySelector('input.vs__search:focus');
                         if (inp) {
                             inp.focus();
@@ -2240,7 +2243,8 @@ class AssetAssignmentScraper(BaseScraper):
                     # 5. Check if selection succeeded
                     if not prio_clicked:
                         prio_clicked = await self.page.evaluate("""() => {
-                            const vs = document.querySelector('.priority-select') || document.querySelector('.cell:has(.field-title:has-text("Priority")) .v-select');
+                            const vs = document.querySelector('.priority-select') || 
+                                       Array.from(document.querySelectorAll('.cell')).find(c => (c.textContent || '').includes('Priority'))?.querySelector('.v-select');
                             const sel = vs ? vs.querySelector('.vs__selected') : null;
                             const txt = (sel ? sel.textContent : '').toLowerCase();
                             return txt.includes('7.12') || txt.includes('service needed');
