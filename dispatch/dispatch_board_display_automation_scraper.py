@@ -43,6 +43,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
     def __init__(self, template_path: Optional[str] = None):
         super().__init__()
         self.scraper_name = "dispatch-board-display-automation"
+        self.intercepted_board_by_date: Dict[str, Any] = {}
+        self.board_req: Dict[str, Any] = {}
         if template_path:
             self.template_path = template_path
         else:
@@ -516,10 +518,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 return False
 
         w_time = wo.get("time_key", "")
-        if time_key and w_time:
+        wo_time_keys = wo.get("time_keys") or ({DispatchBoardDisplayAutomationScraper.normalize_time_key(w_time)} if w_time else set())
+        if time_key:
             norm_target = DispatchBoardDisplayAutomationScraper.normalize_time_key(time_key)
-            norm_wo = DispatchBoardDisplayAutomationScraper.normalize_time_key(w_time)
-            if norm_target and norm_wo and norm_target != norm_wo:
+            if norm_target and wo_time_keys and norm_target not in wo_time_keys:
                 if not (is_service_wo or is_oos_wo):
                     return False
 
@@ -638,8 +640,36 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     )
                     item_date_str, time_key, time_obj = self.parse_fieldedge_datetime(dt_str)
 
-                    if effective_date and item_date_str and item_date_str != effective_date:
-                        continue
+                    naive_date_str = ""
+                    naive_time_key = ""
+                    if dt_str:
+                        raw_dt_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
+                        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%I:%M %p", "%H:%M:%S", "%H:%M"]:
+                            try:
+                                ldt = datetime.strptime(raw_dt_clean, fmt)
+                                if "%Y" in fmt:
+                                    naive_date_str = ldt.strftime("%Y-%m-%d")
+                                t_k = ldt.strftime("%I:%M %p")
+                                if t_k.startswith("0"): t_k = t_k[1:]
+                                naive_time_key = t_k
+                                break
+                            except Exception:
+                                pass
+
+                    if effective_date:
+                        date_matches = (
+                            item_date_str == effective_date or
+                            naive_date_str == effective_date or
+                            (not item_date_str and not naive_date_str)
+                        )
+                        if not date_matches:
+                            continue
+
+                    time_keys = set()
+                    if time_key:
+                        time_keys.add(self.normalize_time_key(time_key))
+                    if naive_time_key:
+                        time_keys.add(self.normalize_time_key(naive_time_key))
 
                     item_prio = str(item.get("Priority") or item.get("PriorityName") or item.get("PriorityDescription") or "")
                     norm_prio = re.sub(r'[^a-zA-Z0-9]', '', item_prio).lower()
@@ -648,21 +678,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         "serviceneeded" in norm_prio or
                         "712" in norm_prio or
                         any("serviceneeded" in s.lower() or "712" in s for s in canon_strings) or
-                        (time_key in ["3:30 PM", "3:30", "03:30 PM", "3:30pm"] and canon_tech in ["s3", "s4"])
+                        bool(time_keys.intersection({"3:30 PM", "3:30", "03:30 PM", "3:30pm"})) and canon_tech in ["s3", "s4"]
                     )
 
                     is_oos = (
                         "donotdispatch" in norm_prio or
                         "outofservice" in norm_prio or
                         any("donotdispatch" in s.lower() or "outofservice" in s.lower() for s in canon_strings) or
-                        (time_key in ["1:45 PM", "1:45", "01:45 PM", "1:45pm"] and canon_tech in ["s3", "s4"])
+                        bool(time_keys.intersection({"1:45 PM", "1:45", "01:45 PM", "1:45pm"})) and canon_tech in ["s3", "s4"]
                     )
                             
                     existing_wos[canon_tech].append({
                         "canon_customer": canon_customer,
                         "canon_strings": canon_strings,
                         "canon_combined": canon_combined,
-                        "time_key": time_key,
+                        "time_key": time_key or naive_time_key,
+                        "time_keys": time_keys,
                         "time_obj": time_obj,
                         "is_service_needed": is_sn,
                         "is_out_of_service": is_oos,
@@ -708,12 +739,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         return board_date_str, existing_wos
 
     async def fetch_board_data_for_date(self, target_date_str: str, board_req: dict):
-        if not board_req or not board_req.get("url"):
+        req_to_use = board_req or getattr(self, 'board_req', {})
+        if not req_to_use or not req_to_use.get("url"):
             print(f"  ⚠️ Cannot dynamically fetch board data for {target_date_str}: board_req template missing.")
             return None, {}
 
         try:
-            payload = json.loads(board_req["post_data"])
+            payload = json.loads(req_to_use.get("post_data") or "{}")
             payload["Date"] = target_date_str + "T00:00:00"
             for k in list(payload.keys()):
                 if "date" in k.lower():
@@ -722,19 +754,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     else:
                         payload[k] = target_date_str + "T00:00:00"
 
-            headers = board_req.get("headers", {})
+            headers = dict(req_to_use.get("headers", {}))
+            cleaned_headers = {}
+            forbidden = {'host', 'content-length', 'connection', 'origin', 'referer', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'}
+            for hk, hv in headers.items():
+                if hk.lower() not in forbidden and not hk.startswith(':'):
+                    cleaned_headers[hk] = hv
+            cleaned_headers['Content-Type'] = 'application/json'
+
             fetch_js = f"""
             async () => {{
                 try {{
-                    const resp = await fetch("{board_req['url']}", {{
+                    const resp = await fetch("{req_to_use['url']}", {{
                         method: 'POST',
-                        headers: {{
-                            'Content-Type': 'application/json',
-                            'Authorization': '{headers.get('authorization', '')}',
-                            'FE-CSRF-TOKEN': '{headers.get('fe-csrf-token', '')}'
-                        }},
+                        credentials: 'include',
+                        headers: {json.dumps(cleaned_headers)},
                         body: JSON.stringify({json.dumps(payload)})
                     }});
+                    if (!resp.ok) {{
+                        return {{ error: 'HTTP ' + resp.status, status: resp.status }};
+                    }}
                     return await resp.json();
                 }} catch(e) {{
                     return {{ error: e.toString() }};
@@ -742,17 +781,66 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             }}
             """
             new_data = await self.page.evaluate(fetch_js)
-            if new_data and "Board" in new_data:
+            if new_data and isinstance(new_data, dict) and "Board" in new_data:
+                self.intercepted_board_by_date[target_date_str] = new_data
                 b_date, e_wos = self.extract_existing_wos(new_data, target_date_key=target_date_str)
-                print(f"📡 Dynamically fetched board date: '{b_date}' | Found {len(e_wos)} tech groups.")
+                total_wos = sum(len(w_l) for w_l in e_wos.values())
+                print(f"📡 Dynamically fetched board date: '{b_date}' | Found {len(e_wos)} tech groups, {total_wos} existing work orders.")
                 return b_date, e_wos
             else:
-                print(f"⚠️ Dynamic board fetch returned invalid response for {target_date_str}: {new_data}")
+                err_msg = new_data.get("error") if isinstance(new_data, dict) else str(new_data)
+                print(f"⚠️ Dynamic board fetch returned invalid response for {target_date_str}: {err_msg}")
         except Exception as e:
             print(f"⚠️ Exception fetching board data for {target_date_str}: {e}")
         return None, {}
 
-    async def navigate_to_board_date(self, target_date_obj: datetime) -> bool:
+    async def get_or_fetch_board_data_for_date(self, target_date_obj: datetime, max_retries: int = 2) -> Tuple[Optional[str], Optional[Dict]]:
+        target_date_key = target_date_obj.strftime("%Y-%m-%d")
+
+        # 1. First check if we already intercepted board data for this date
+        if target_date_key in self.intercepted_board_by_date:
+            b_data = self.intercepted_board_by_date[target_date_key]
+            b_date, e_wos = self.extract_existing_wos(b_data, target_date_key=target_date_key)
+            total_items = sum(len(w_list) for w_list in e_wos.values())
+            print(f"📡 Verified FieldEdge API board data from cache for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
+            return b_date, e_wos
+
+        # 2. Navigate to the date on the Dispatch Board
+        nav_ok = await self.navigate_to_board_date(target_date_obj, wait_for_api=True)
+        if target_date_key in self.intercepted_board_by_date:
+            b_data = self.intercepted_board_by_date[target_date_key]
+            b_date, e_wos = self.extract_existing_wos(b_data, target_date_key=target_date_key)
+            total_items = sum(len(w_list) for w_list in e_wos.values())
+            print(f"📡 Verified FieldEdge API board data after navigation for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
+            return b_date, e_wos
+
+        # 3. Dynamic fetch via page.evaluate
+        if self.board_req and self.board_req.get("url"):
+            print(f"🔄 Waiting for API interception timed out; attempting dynamic fetch for target date {target_date_key}...")
+            b_date, e_wos = await self.fetch_board_data_for_date(target_date_key, self.board_req)
+            if b_date == target_date_key and e_wos:
+                total_items = sum(len(w_list) for w_list in e_wos.values())
+                print(f"📡 Verified FieldEdge API board data via fetch for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
+                return b_date, e_wos
+
+        # 4. If navigation didn't trigger API response, try a fresh reload once more
+        if max_retries > 0:
+            print(f"🔁 Retrying FieldEdge API board check for {target_date_key}...")
+            await self.page.reload(wait_until='domcontentloaded', timeout=30000)
+            await self.page.wait_for_timeout(2000)
+            if target_date_key in self.intercepted_board_by_date:
+                b_data = self.intercepted_board_by_date[target_date_key]
+                b_date, e_wos = self.extract_existing_wos(b_data, target_date_key=target_date_key)
+                total_items = sum(len(w_list) for w_list in e_wos.values())
+                print(f"📡 Verified FieldEdge API board data on retry for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
+                return b_date, e_wos
+
+        # 5. If STILL not verified, do NOT guess or default to empty dict! Return None to indicate failure!
+        print(f"⛔ CRITICAL SAFETY GUARD: Could NOT verify FieldEdge Dispatch Board API for date {target_date_key}!")
+        return None, None
+
+    async def navigate_to_board_date(self, target_date_obj: datetime, wait_for_api: bool = True) -> bool:
+        target_date_key = target_date_obj.strftime("%Y-%m-%d")
         try:
             date_url_str = target_date_obj.strftime("%m-%d-%Y")
             target_url = f"https://login.fieldedge.com/#/DispatchBoard/{date_url_str}"
@@ -766,7 +854,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await spinners.first.wait_for(state="hidden", timeout=4000)
             except Exception:
                 pass
-            await self.page.wait_for_timeout(1500)
+
+            if wait_for_api:
+                for _ in range(25):  # up to 5 seconds
+                    if target_date_key in self.intercepted_board_by_date:
+                        return True
+                    await self.page.wait_for_timeout(200)
+
+            await self.page.wait_for_timeout(1000)
             return True
         except Exception as e:
             print(f"⚠️ Could not navigate to board date via URL {target_url}: {e}")
@@ -2360,48 +2455,68 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         else:
             await self.initialize()
             
-            board_data = None
-            board_req = {}
+            self.intercepted_board_by_date.clear()
+            self.board_req.clear()
             
             async def handle_request(request):
-                nonlocal board_req
                 if "GetDispatchBoardData" in request.url and request.method == "POST":
-                    board_req["url"] = request.url
-                    board_req["headers"] = request.headers
-                    board_req["post_data"] = request.post_data
+                    self.board_req["url"] = request.url
+                    self.board_req["headers"] = request.headers
+                    self.board_req["post_data"] = request.post_data
                     
             self.page.on("request", handle_request)
             
             async def handle_response(response):
-                nonlocal board_data
                 if "GetDispatchBoardData" in response.url:
                     if response.status != 200 or response.request.method != "POST":
                         return
                     try:
                         text = await response.text()
                         if text:
-                            board_data = json.loads(text)
-                            print("📡 Intercepted Dispatch Board API data successfully.")
-                            try:
-                                from automation.tech_checkin_service import evaluate_dispatch_board_data, ENABLE_QUO_LIVE_SMS
-                                evaluate_dispatch_board_data(board_data, dry_run=not ENABLE_QUO_LIVE_SMS)
-                            except (ImportError, ModuleNotFoundError):
-                                api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
-                                if api_url:
+                            data = json.loads(text)
+                            if data and "Board" in data:
+                                req_date = None
+                                try:
+                                    post_d = json.loads(response.request.post_data)
+                                    if "Date" in post_d:
+                                        req_date = str(post_d["Date"]).replace("T", " ").split(" ")[0]
+                                except Exception:
+                                    pass
+                                
+                                if not req_date and data["Board"].get("Headers"):
                                     try:
-                                        import urllib.request
-                                        endpoint = f"{api_url}/automation/tech-checkin/evaluate/" if api_url.endswith('/api') else f"{api_url}/api/automation/tech-checkin/evaluate/"
-                                        headers = {"User-Agent": "SterlingAutomations/1.0", "Content-Type": "application/json"}
-                                        headers.update(self._get_api_auth_headers())
-                                        payload = json.dumps({"board_data": board_data}).encode("utf-8")
-                                        req = urllib.request.Request(endpoint, data=payload, headers=headers)
-                                        with urllib.request.urlopen(req, timeout=10) as resp:
-                                            if resp.status == 200:
-                                                print("✅ Forwarded intercepted board data to Tech Check-in API successfully.")
-                                    except Exception as _fwd_err:
-                                        print(f"⚠️ Forwarding intercepted board data error: {_fwd_err}")
-                            except Exception as _eval_err:
-                                print(f"⚠️ Tech Check-in evaluation on intercepted board data error: {_eval_err}")
+                                        hdr_dt = data["Board"]["Headers"][0].get("HeaderDateTime")
+                                        if hdr_dt:
+                                            req_date = str(hdr_dt).replace("T", " ").split(" ")[0]
+                                    except Exception:
+                                        pass
+                                
+                                if req_date:
+                                    self.intercepted_board_by_date[req_date] = data
+                                    print(f"📡 Intercepted Dispatch Board API data for date '{req_date}' successfully.")
+                                else:
+                                    print("📡 Intercepted Dispatch Board API data successfully.")
+                            
+                                try:
+                                    from automation.tech_checkin_service import evaluate_dispatch_board_data, ENABLE_QUO_LIVE_SMS
+                                    evaluate_dispatch_board_data(data, dry_run=not ENABLE_QUO_LIVE_SMS)
+                                except (ImportError, ModuleNotFoundError):
+                                    api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+                                    if api_url:
+                                        try:
+                                            import urllib.request
+                                            endpoint = f"{api_url}/automation/tech-checkin/evaluate/" if api_url.endswith('/api') else f"{api_url}/api/automation/tech-checkin/evaluate/"
+                                            headers = {"User-Agent": "SterlingAutomations/1.0", "Content-Type": "application/json"}
+                                            headers.update(self._get_api_auth_headers())
+                                            payload = json.dumps({"board_data": data}).encode("utf-8")
+                                            req = urllib.request.Request(endpoint, data=payload, headers=headers)
+                                            with urllib.request.urlopen(req, timeout=10) as resp:
+                                                if resp.status == 200:
+                                                    print("✅ Forwarded intercepted board data to Tech Check-in API successfully.")
+                                        except Exception as _fwd_err:
+                                            print(f"⚠️ Forwarding intercepted board data error: {_fwd_err}")
+                                except Exception as _eval_err:
+                                    print(f"⚠️ Tech Check-in evaluation on intercepted board data error: {_eval_err}")
                     except Exception as e:
                         if "getResponseBody" not in str(e):
                             print(f"⚠️ Failed to parse intercepted board data: {e}")
@@ -2427,18 +2542,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             
             print("⏳ Waiting for Dispatch Board JSON API data to intercept...")
             for _ in range(50):
-                if board_data is not None:
+                if self.board_req.get("url"):
                     break
                 await self.page.wait_for_timeout(200)
 
-            board_date_str, existing_wos = self.extract_existing_wos(board_data)
-            initial_target_key = start_dt.strftime("%Y-%m-%d")
-            if board_date_str and board_date_str != initial_target_key:
-                print(f"🗓️ Initial board date ('{board_date_str}') does not match requested start date ('{initial_target_key}'). Navigating UI date picker...")
-                await self.navigate_to_board_date(start_dt)
-                fetched_date, fetched_wos = await self.fetch_board_data_for_date(initial_target_key, board_req)
-                if fetched_date == initial_target_key:
-                    board_date_str, existing_wos = fetched_date, fetched_wos
+            board_date_str = None
+            existing_wos = {}
 
         created_history = self._load_history()
         print(f"📚 Loaded {len(created_history)} recorded entries from Central Dashboard API.")
@@ -2503,21 +2612,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if not skip_stage1:
 
                     if not dry_run:
-                        if board_date_str != db_date_key or "DispatchBoard" not in (self.page.url or ""):
-                            print(f"🗓️ Navigating UI date picker to {db_date_key}...")
-                            nav_ok = await self.navigate_to_board_date(current_date)
-                            print(f"🔄 Fetching board data for target date {db_date_key}...")
-                            fetched_date, fetched_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
-                            if fetched_date == db_date_key:
-                                board_date_str = fetched_date
-                                existing_wos = fetched_wos
-                            elif nav_ok:
-                                board_date_str = db_date_key
-                                existing_wos = fetched_wos or {}
-                            else:
-                                print(f"⛔ Board date '{board_date_str}' does NOT match target date '{db_date_key}' and dynamic fetch could not confirm board state.")
-                                print(f"⛔ Skipping creation for date {db_date_key} to prevent duplicate work orders.")
-                                continue
+                        b_date, e_wos = await self.get_or_fetch_board_data_for_date(current_date)
+                        if e_wos is None:
+                            print(f"⛔ [SAFETY GUARD] FieldEdge Dispatch Board API data could NOT be verified for {db_date_key} ({date_str})!")
+                            print(f"⛔ Skipping creation for date {db_date_key} to PREVENT DUPLICATE WORK ORDERS!")
+                            continue
+                        board_date_str = b_date or db_date_key
+                        existing_wos = e_wos
 
                     for header in static_headers:
                         name = header.get("name")
@@ -2628,16 +2729,27 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                 canon_h_tech in DUMMY_HEADER_TECHS or
                                                 any(canon_h_tech.startswith(dt) for dt in DUMMY_HEADER_TECHS)
                                             )
-                                            check_time = None if is_dummy_tech else time_key
                                             if self.check_item_match(
                                                 wo,
                                                 canon_target,
-                                                check_time,
+                                                time_key,
                                                 is_service_wo=is_service_wo,
                                                 is_oos_wo=is_oos_wo,
                                                 match_any_status=(is_service_wo or is_oos_wo or is_dummy_tech)
                                             ):
                                                 board_count += 1
+                                            elif is_dummy_tech and not is_service_wo and not is_oos_wo:
+                                                # If this item name is unique on this technician column (only 1 occurrence in template),
+                                                # count it even if scheduled time was slightly adjusted on the board
+                                                if sum(1 for h in static_headers if self.canonical_str(h.get("tech_name", "")) == canon_h_tech and self.canonical_str(h.get("name", "")) == canon_target) == 1:
+                                                    if self.check_item_match(
+                                                        wo,
+                                                        canon_target,
+                                                        time_key=None,
+                                                        require_customer_match=True,
+                                                        match_any_status=True
+                                                    ):
+                                                        board_count += 1
                                         else:
                                             appt_matched = False
                                             if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
@@ -2710,7 +2822,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     existing_wos[canon_h_tech] = []
                                 existing_wos[canon_h_tech].append(opt_wo)
 
-                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, self.board_req)
                                 if f_date == db_date_key and f_wos:
                                     for t_key, w_list in existing_wos.items():
                                         if t_key not in f_wos:
@@ -2827,10 +2939,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                              if not wo.get("is_appointment"):
                                                  c_cust = wo.get("canon_customer", "")
                                                  w_time = wo.get("time_key", "")
-                                                 name_match = c_cust == canon_target
+                                                 wo_time_keys = wo.get("time_keys") or ({self.normalize_time_key(w_time)} if w_time else set())
+                                                 name_match = c_cust == canon_target or canon_target in wo.get("canon_strings", [])
                                                  norm_target = self.normalize_time_key(time_key)
                                                  norm_wo = self.normalize_time_key(w_time)
-                                                 time_match = not norm_target or not norm_wo or norm_target == norm_wo
+                                                 time_match = not norm_target or not norm_wo or norm_target == norm_wo or (norm_target in wo_time_keys)
                                                  if name_match and time_match:
                                                      board_count += 1
                                              else:
@@ -2883,7 +2996,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                         existing_wos[canon_h_tech] = []
                                     existing_wos[canon_h_tech].append(opt_wo)
 
-                                    f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                                    f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, self.board_req)
                                     if f_date == db_date_key and f_wos:
                                         for t_key, w_list in existing_wos.items():
                                             if t_key not in f_wos:
@@ -2955,10 +3068,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                          if not wo.get("is_appointment"):
                                              c_cust = wo.get("canon_customer", "")
                                              w_time = wo.get("time_key", "")
-                                             name_match = c_cust == canon_target
+                                             wo_time_keys = wo.get("time_keys") or ({self.normalize_time_key(w_time)} if w_time else set())
+                                             name_match = c_cust == canon_target or canon_target in wo.get("canon_strings", [])
                                              norm_target = self.normalize_time_key(time_key)
                                              norm_wo = self.normalize_time_key(w_time)
-                                             time_match = not norm_target or not norm_wo or norm_target == norm_wo
+                                             time_match = not norm_target or not norm_wo or norm_target == norm_wo or (norm_target in wo_time_keys)
                                              if name_match and time_match:
                                                  board_count += 1
                                          else:
@@ -3012,7 +3126,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     existing_wos[canon_t_tech] = []
                                 existing_wos[canon_t_tech].append(opt_wo)
 
-                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, self.board_req)
                                 if f_date == db_date_key and f_wos:
                                     for t_key, w_list in existing_wos.items():
                                         if t_key not in f_wos:
@@ -3125,7 +3239,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     existing_wos[canon_t_assignment] = []
                                 existing_wos[canon_t_assignment].append(opt_wo)
 
-                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, board_req)
+                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, self.board_req)
                                 if f_date == db_date_key and f_wos:
                                     for t_key, w_list in existing_wos.items():
                                         if t_key not in f_wos:
