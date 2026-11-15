@@ -1732,6 +1732,59 @@ class AssetAssignmentScraper(BaseScraper):
 
         return False
 
+    async def scroll_sidepanel_to_work_order(self):
+        """Scroll the sidepanel container down to make Work Order and its details chevron visible."""
+        try:
+            # 1. JS scroll: Find every scrollable container and scroll to bottom
+            await self.page.evaluate("""() => {
+                const scrollables = Array.from(document.querySelectorAll('*')).filter(el => {
+                    const style = window.getComputedStyle(el);
+                    const overflowY = style.overflowY || '';
+                    const isScrollable = (overflowY === 'auto' || overflowY === 'scroll');
+                    return isScrollable && el.scrollHeight > el.clientHeight;
+                });
+                for (const el of scrollables) {
+                    el.scrollTop = el.scrollHeight;
+                }
+                const wo = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"]') ||
+                           document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz') ||
+                           document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)');
+                if (wo) {
+                    wo.scrollIntoView({ behavior: 'instant', block: 'center' });
+                }
+                const chevron = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .details-icon_lgpCm, .details-icon_lgpCm');
+                if (chevron) {
+                    chevron.scrollIntoView({ behavior: 'instant', block: 'center' });
+                }
+            }""")
+            await self.page.wait_for_timeout(100)
+
+            # 2. Playwright mouse wheel down on sidepanel
+            try:
+                panel = self.page.locator('.custom-scrollbar.container__Gkig, [class*="sidepanel"], .container__Gkig').first
+                if await panel.count() > 0:
+                    box = await panel.bounding_box()
+                    if box:
+                        await self.page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                        await self.page.mouse.wheel(0, 500)
+                        await self.page.wait_for_timeout(100)
+            except Exception:
+                pass
+
+            # 3. Playwright scroll into view for WorkOrder card and Chevron
+            wo_loc = self.page.locator(
+                "[data-edb-sidepanel-card*='WorkOrder'], "
+                ".card_ngkhz:has(.workorder-summary-card_mv9VQ), "
+                ".details-icon_lgpCm"
+            ).first
+            if await wo_loc.count() > 0:
+                try:
+                    await wo_loc.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     async def update_service_needed_work_order(
         self,
         work_order_number: str,
@@ -1895,34 +1948,8 @@ class AssetAssignmentScraper(BaseScraper):
                 print(f"  📝 [Step 1/2] Updating Work Order details (Need priority: {need_priority_change}, Need note: {need_note_change})...")
 
                 print("  📜 Scrolling sidepanel down to Work Order section...")
-                await self.page.evaluate("""() => {
-                    const containers = Array.from(document.querySelectorAll('.custom-scrollbar, .container__Gkig, [class*="sidepanel"] .container, [class*="sidepanel"] [class*="scrollbar"], .sidepanel-content'));
-                    for (const cont of containers) {
-                        cont.scrollTop = cont.scrollHeight;
-                    }
-                    const wo = document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
-                               document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz') ||
-                               Array.from(document.querySelectorAll('.card_ngkhz')).find(c => {
-                                   const pt = c.querySelector('.panel-title, .field-title');
-                                   const txt = (pt ? pt.textContent : c.textContent || '').trim();
-                                   return txt.includes('Work Order') && !txt.toUpperCase().includes('CUSTOMER');
-                               });
-                    if (wo) {
-                        wo.scrollIntoView({ behavior: 'instant', block: 'center' });
-                    }
-                }""")
+                await self.scroll_sidepanel_to_work_order()
                 await self.page.wait_for_timeout(200)
-
-                wo_card_loc = self.page.locator(
-                    ".card_ngkhz:has(.workorder-summary-card_mv9VQ), .card_ngkhz:has(.panel-title:has-text('Work Order'))"
-                ).first
-
-                try:
-                    if await wo_card_loc.count() > 0:
-                        await wo_card_loc.scroll_into_view_if_needed()
-                except Exception:
-                    pass
-                await self.page.wait_for_timeout(150)
 
                 print("  👉 Clicking Work Order Details arrow button...")
                 details_opened = False
@@ -1940,12 +1967,15 @@ class AssetAssignmentScraper(BaseScraper):
                         print(f"  👉 Work Order details view opened successfully (Attempt {open_attempt + 1})!")
                         break
 
+                    # Scroll down again on every attempt!
+                    await self.scroll_sidepanel_to_work_order()
+
                     clicked = False
                     try:
                         chevron_loc = self.page.locator(
                             "[data-edb-sidepanel-card*='WorkOrder'] .details-icon_lgpCm, "
                             ".card_ngkhz:has(.workorder-summary-card_mv9VQ) .details-icon_lgpCm, "
-                            ".card_ngkhz:has(.panel-title:has-text('Work Order')) .details-icon_lgpCm, "
+                            ".header_Ce6MY .details-icon_lgpCm, "
                             ".details-icon_lgpCm"
                         ).first
                         if await chevron_loc.count() > 0 and await chevron_loc.is_visible():
@@ -1960,15 +1990,10 @@ class AssetAssignmentScraper(BaseScraper):
                         await self.page.evaluate("""() => {
                             const wo = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"]') ||
                                        document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
-                                       document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz') ||
-                                       Array.from(document.querySelectorAll('.card_ngkhz')).find(c => {
-                                           const pt = c.querySelector('.panel-title, .field-title');
-                                           const txt = (pt ? pt.textContent : c.textContent || '').trim();
-                                           return txt.includes('Work Order') && !txt.toUpperCase().includes('CUSTOMER');
-                                       });
+                                       document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz');
                             if (!wo) return;
                             const icon = wo.querySelector('.details-icon_lgpCm') || wo.querySelector('.details-icon_lgpCm svg');
-                            const target = icon || wo.querySelector('.header_Ce6MY');
+                            const target = icon || wo.querySelector('.header_Ce6MY') || wo.querySelector('.panel-title');
                             if (target) {
                                 target.scrollIntoView({ behavior: 'instant', block: 'center' });
                                 target.click();
