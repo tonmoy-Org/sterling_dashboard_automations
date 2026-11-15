@@ -1926,18 +1926,21 @@ class AssetAssignmentScraper(BaseScraper):
 
                 print("  👉 Clicking Work Order Details arrow button...")
                 details_opened = False
-                for open_attempt in range(6):
+                for open_attempt in range(5):
                     is_details_open = await self.page.evaluate("""() => {
                         return !!(document.querySelector('.edit-icon_vG0FU') || 
                                   document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
                                   document.querySelector('[data-edb-sidepanel-card*="Details"]') ||
-                                  document.querySelector('.workorder-details-card_kiboz'));
+                                  document.querySelector('.workorder-details-card_kiboz') ||
+                                  document.querySelector('.back_EKQLl') ||
+                                  document.querySelector('[class*="back-icon"]'));
                     }""")
                     if is_details_open:
                         details_opened = True
                         print(f"  👉 Work Order details view opened successfully (Attempt {open_attempt + 1})!")
                         break
 
+                    clicked = False
                     try:
                         chevron_loc = self.page.locator(
                             "[data-edb-sidepanel-card*='WorkOrder'] .details-icon_lgpCm, "
@@ -1945,54 +1948,42 @@ class AssetAssignmentScraper(BaseScraper):
                             ".card_ngkhz:has(.panel-title:has-text('Work Order')) .details-icon_lgpCm, "
                             ".details-icon_lgpCm"
                         ).first
-                        if await chevron_loc.count() > 0:
+                        if await chevron_loc.count() > 0 and await chevron_loc.is_visible():
                             await chevron_loc.scroll_into_view_if_needed()
-                            await self.page.wait_for_timeout(150)
-                            await chevron_loc.click()
-                        elif await wo_card_loc.count() > 0:
-                            c_sub = wo_card_loc.locator(".details-icon_lgpCm, svg").first
-                            if await c_sub.count() > 0:
-                                await c_sub.click()
+                            await self.page.wait_for_timeout(100)
+                            await chevron_loc.click(force=True)
+                            clicked = True
                     except Exception as c_err:
                         print(f"  ⚠️ Playwright chevron click note: {c_err}")
 
-                    await self.page.evaluate("""() => {
-                        const wo = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"]') ||
-                                   document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
-                                   document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz') ||
-                                   Array.from(document.querySelectorAll('.card_ngkhz')).find(c => {
-                                       const pt = c.querySelector('.panel-title, .field-title');
-                                       const txt = (pt ? pt.textContent : c.textContent || '').trim();
-                                       return txt.includes('Work Order') && !txt.toUpperCase().includes('CUSTOMER');
-                                   });
-                        if (!wo) return;
-                        const icon = wo.querySelector('.details-icon_lgpCm') || wo.querySelector('.details-icon_lgpCm svg');
-                        const header = wo.querySelector('.header_Ce6MY') || wo.querySelector('.header-content_GyDl_');
-                        const target = icon || header;
-                        if (target) {
-                            target.scrollIntoView({ behavior: 'instant', block: 'center' });
-                            target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                            target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                            target.click();
-                        }
-                    }""")
-
-                    if open_attempt >= 1:
-                        try:
-                            if await wo_card_loc.count() > 0:
-                                hdr_loc = wo_card_loc.locator(".header_Ce6MY, .panel-title").first
-                                if await hdr_loc.count() > 0:
-                                    await hdr_loc.click()
-                        except Exception:
-                            pass
+                    if not clicked:
+                        await self.page.evaluate("""() => {
+                            const wo = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"]') ||
+                                       document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
+                                       document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz') ||
+                                       Array.from(document.querySelectorAll('.card_ngkhz')).find(c => {
+                                           const pt = c.querySelector('.panel-title, .field-title');
+                                           const txt = (pt ? pt.textContent : c.textContent || '').trim();
+                                           return txt.includes('Work Order') && !txt.toUpperCase().includes('CUSTOMER');
+                                       });
+                            if (!wo) return;
+                            const icon = wo.querySelector('.details-icon_lgpCm') || wo.querySelector('.details-icon_lgpCm svg');
+                            const target = icon || wo.querySelector('.header_Ce6MY');
+                            if (target) {
+                                target.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                target.click();
+                            }
+                        }""")
 
                     for _ in range(6):
-                        await self.page.wait_for_timeout(150)
+                        await self.page.wait_for_timeout(200)
                         is_details_open = await self.page.evaluate("""() => {
                             return !!(document.querySelector('.edit-icon_vG0FU') || 
                                       document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
                                       document.querySelector('[data-edb-sidepanel-card*="Details"]') ||
-                                      document.querySelector('.workorder-details-card_kiboz'));
+                                      document.querySelector('.workorder-details-card_kiboz') ||
+                                      document.querySelector('.back_EKQLl') ||
+                                      document.querySelector('[class*="back-icon"]'));
                         }""")
                         if is_details_open:
                             details_opened = True
