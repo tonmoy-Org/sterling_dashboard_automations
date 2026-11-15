@@ -2062,7 +2062,14 @@ class AssetAssignmentScraper(BaseScraper):
                 edit_wo_clicked = False
                 for _ in range(5):
                     is_in_edit = await self.page.evaluate("""() => {
-                        return !!(document.querySelector('.workorder-details-card_kiboz input.vs__search, [data-edb-sidepanel-card*="WorkOrder"] input.vs__search, [data-edb-sidepanel-card*="WorkOrder"] textarea, .summary-note-container_f6fBE textarea, textarea.summary-note_Dk8T7'));
+                        return !!(
+                            document.querySelector('.workorder-details-card_kiboz .v-select') ||
+                            document.querySelector('.v-select') ||
+                            document.querySelector('.workorder-details-card_kiboz input.vs__search') ||
+                            document.querySelector('input.vs__search') ||
+                            document.querySelector('textarea') ||
+                            document.querySelector('button.confirm_I8LeR')
+                        );
                     }""")
                     if is_in_edit:
                         edit_wo_clicked = True
@@ -2070,6 +2077,9 @@ class AssetAssignmentScraper(BaseScraper):
 
                     try:
                         pw_edit = self.page.locator(
+                            '.workorder-details-card_kiboz .edit-icon_vG0FU, '
+                            '.flex-container__lYVi .edit-icon_vG0FU, '
+                            '.card_ngkhz.no-bottom-padding_XvTa4 .edit-icon_vG0FU, '
                             '.base-icon.edit.edit-icon_vG0FU, '
                             '.edit-icon_vG0FU, '
                             '[class*="edit-icon_vG0FU"], '
@@ -2085,7 +2095,9 @@ class AssetAssignmentScraper(BaseScraper):
                         pass
 
                     edit_wo_clicked = await self.page.evaluate("""() => {
-                        const btn = document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
+                        const btn = document.querySelector('.workorder-details-card_kiboz .edit-icon_vG0FU') ||
+                                    document.querySelector('.flex-container__lYVi .edit-icon_vG0FU') ||
+                                    document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
                                     document.querySelector('.edit-icon_vG0FU') ||
                                     document.querySelector('[class*="edit-icon_vG0FU"]') ||
                                     document.querySelector('.workorder-details-card_kiboz .base-icon.edit') ||
@@ -2105,7 +2117,13 @@ class AssetAssignmentScraper(BaseScraper):
 
                     for _ in range(6):
                         await self.page.wait_for_timeout(150)
-                        if await self.page.evaluate("""() => !!(document.querySelector('.workorder-details-card_kiboz input.vs__search, [data-edb-sidepanel-card*="WorkOrder"] input.vs__search, [data-edb-sidepanel-card*="WorkOrder"] textarea, .summary-note-container_f6fBE textarea, textarea.summary-note_Dk8T7'))"""):
+                        if await self.page.evaluate("""() => !!(
+                            document.querySelector('.workorder-details-card_kiboz .v-select') ||
+                            document.querySelector('.v-select') ||
+                            document.querySelector('input.vs__search') ||
+                            document.querySelector('textarea') ||
+                            document.querySelector('button.confirm_I8LeR')
+                        )"""):
                             edit_wo_clicked = True
                             break
                     if edit_wo_clicked:
