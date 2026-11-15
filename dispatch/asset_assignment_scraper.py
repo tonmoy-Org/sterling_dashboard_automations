@@ -2183,13 +2183,15 @@ class AssetAssignmentScraper(BaseScraper):
                         }""")
                         await self.page.wait_for_timeout(250)
 
-                    # 3. Type search query into priority search input
-                    search_term = "7.12" if ("SERVICE NEEDED" in target_priority.upper() or "7.12" in target_priority) else (
-                        "DO NOT DISPATCH" if "DO NOT DISPATCH" in target_priority.upper() else target_priority
-                    )
+                    # 3. Type full priority string into priority search input
+                    search_term = target_priority.strip()
+                    print(f"  ⌨️ Typing full Priority search query: '{search_term}'...")
                     try:
                         prio_inp = self.page.locator('.priority-select input.vs__search, .cell:has(.field-title:has-text("Priority")) input.vs__search').first
                         if await prio_inp.count() > 0:
+                            await prio_inp.click()
+                            await prio_inp.fill("")
+                            await self.page.wait_for_timeout(50)
                             await prio_inp.fill(search_term)
                             await self.page.wait_for_timeout(250)
                     except Exception:
@@ -2203,13 +2205,14 @@ class AssetAssignmentScraper(BaseScraper):
                             inp.focus();
                             inp.value = term;
                             inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
                         }
                     }""", search_term)
                     await self.page.wait_for_timeout(250)
 
-                    # 4. Click option from dropdown menu
+                    # 4. Click option from dropdown menu or press Enter
                     try:
-                        opt_pat = re.compile(r'7\.12|service\s*needed', re.I) if ("SERVICE NEEDED" in target_priority.upper() or "7.12" in target_priority) else re.compile(re.escape(target_priority), re.I)
+                        opt_pat = re.compile(re.escape(search_term), re.I)
                         opt_loc = self.page.locator('.priority-select .vs__dropdown-menu li, ul[role="listbox"] li, .vs__dropdown-menu li, li.vs__dropdown-option').filter(has_text=opt_pat).first
                         if await opt_loc.count() > 0:
                             await opt_loc.click(force=True)
@@ -2220,12 +2223,13 @@ class AssetAssignmentScraper(BaseScraper):
                     if not prio_clicked:
                         prio_clicked = await self.page.evaluate("""(target) => {
                             const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const cTarget = norm(target);
                             const isSn = target.toUpperCase().includes('SERVICE NEEDED') || target.includes('7.12');
                             const items = Array.from(document.querySelectorAll('.priority-select ul li, .vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li'));
                             for (const item of items) {
                                 const txt = (item.textContent || '').trim();
                                 const cTxt = norm(txt);
-                                if (isSn && (txt.includes('7.12') || txt.toUpperCase().includes('SERVICE NEEDED') || cTxt.includes('serviceneeded'))) {
+                                if (cTxt === cTarget || (isSn && (txt.includes('7.12') || txt.toUpperCase().includes('SERVICE NEEDED') || cTxt.includes('serviceneeded')))) {
                                     item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                                     item.click();
                                     item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -2240,15 +2244,23 @@ class AssetAssignmentScraper(BaseScraper):
                             return false;
                         }""", target_priority)
 
-                    # 5. Check if selection succeeded
                     if not prio_clicked:
-                        prio_clicked = await self.page.evaluate("""() => {
-                            const vs = document.querySelector('.priority-select') || 
-                                       Array.from(document.querySelectorAll('.cell')).find(c => (c.textContent || '').includes('Priority'))?.querySelector('.v-select');
-                            const sel = vs ? vs.querySelector('.vs__selected') : null;
-                            const txt = (sel ? sel.textContent : '').toLowerCase();
-                            return txt.includes('7.12') || txt.includes('service needed');
-                        }""")
+                        try:
+                            prio_inp = self.page.locator('.priority-select input.vs__search').first
+                            if await prio_inp.count() > 0:
+                                await prio_inp.press("Enter")
+                                await self.page.wait_for_timeout(200)
+                        except Exception:
+                            pass
+
+                    # 5. Check if selection succeeded
+                    prio_clicked = await self.page.evaluate("""() => {
+                        const vs = document.querySelector('.priority-select') || 
+                                   Array.from(document.querySelectorAll('.cell')).find(c => (c.textContent || '').includes('Priority'))?.querySelector('.v-select');
+                        const sel = vs ? vs.querySelector('.vs__selected') : null;
+                        const txt = (sel ? sel.textContent : '').toLowerCase();
+                        return txt.includes('7.12') || txt.includes('service needed');
+                    }""")
 
                     print(f"  -> Priority option selected: {'Success' if prio_clicked else 'Option not found'}")
                     await self.page.wait_for_timeout(200)
