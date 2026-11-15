@@ -261,7 +261,7 @@ class AssetAssignmentScraper(BaseScraper):
                         await loc.evaluate("el => el.click()")
 
                     print(f"Selected status '{status_name}' using selector: {selector}")
-                    await self.page.wait_for_timeout(1000)
+                    await self.page.wait_for_timeout(250)
                     return True
 
                 except Exception:
@@ -298,7 +298,7 @@ class AssetAssignmentScraper(BaseScraper):
             for d_loc in date_filter_locators:
                 try:
                     loc = self.page.locator(d_loc).first
-                    await loc.wait_for(state="attached", timeout=3000)
+                    await loc.wait_for(state="attached", timeout=2500)
                     try:
                         await loc.click()
                     except Exception:
@@ -306,7 +306,7 @@ class AssetAssignmentScraper(BaseScraper):
                     print(f"Opened date filter dropdown using: {d_loc}")
                     opened = True
                     date_dropdown_el = loc
-                    await self.page.wait_for_timeout(2000)
+                    await self.page.wait_for_timeout(300)
                     break
                 except Exception:
                     continue
@@ -330,12 +330,12 @@ class AssetAssignmentScraper(BaseScraper):
             for s_loc in start_locators:
                 try:
                     inp = self.page.locator(s_loc).first
-                    await inp.wait_for(state="attached", timeout=2500)
+                    await inp.wait_for(state="attached", timeout=2000)
                     await inp.click()
-                    await self.page.wait_for_timeout(300)
+                    await self.page.wait_for_timeout(100)
                     await inp.press("Control+A")
                     await inp.press("Backspace")
-                    await inp.type(start_date, delay=50)
+                    await inp.type(start_date, delay=20)
                     await inp.evaluate(
                         "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
                         start_date
@@ -343,7 +343,7 @@ class AssetAssignmentScraper(BaseScraper):
                     await inp.press("Enter")
                     print(f"Filled start date '{start_date}' using: {s_loc}")
                     start_filled = True
-                    await self.page.wait_for_timeout(500)
+                    await self.page.wait_for_timeout(200)
                     break
                 except Exception:
                     continue
@@ -356,7 +356,7 @@ class AssetAssignmentScraper(BaseScraper):
                         await inp.click()
                         await inp.press("Control+A")
                         await inp.press("Backspace")
-                        await inp.type(start_date, delay=50)
+                        await inp.type(start_date, delay=20)
                         await inp.evaluate(
                             "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
                             start_date
@@ -381,12 +381,12 @@ class AssetAssignmentScraper(BaseScraper):
             for e_loc in end_locators:
                 try:
                     inp = self.page.locator(e_loc).first
-                    await inp.wait_for(state="attached", timeout=2500)
+                    await inp.wait_for(state="attached", timeout=2000)
                     await inp.click()
-                    await self.page.wait_for_timeout(300)
+                    await self.page.wait_for_timeout(100)
                     await inp.press("Control+A")
                     await inp.press("Backspace")
-                    await inp.type(end_date, delay=50)
+                    await inp.type(end_date, delay=20)
                     await inp.evaluate(
                         "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
                         end_date
@@ -394,7 +394,7 @@ class AssetAssignmentScraper(BaseScraper):
                     await inp.press("Enter")
                     print(f"Filled end date '{end_date}' using: {e_loc}")
                     end_filled = True
-                    await self.page.wait_for_timeout(500)
+                    await self.page.wait_for_timeout(200)
                     break
                 except Exception:
                     continue
@@ -407,7 +407,7 @@ class AssetAssignmentScraper(BaseScraper):
                         await inp.click()
                         await inp.press("Control+A")
                         await inp.press("Backspace")
-                        await inp.type(end_date, delay=50)
+                        await inp.type(end_date, delay=20)
                         await inp.evaluate(
                             "(el, val) => { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }",
                             end_date
@@ -429,13 +429,13 @@ class AssetAssignmentScraper(BaseScraper):
             for sel_loc in select_locators:
                 try:
                     select_btn = self.page.locator(sel_loc).first
-                    await select_btn.wait_for(state="attached", timeout=2500)
+                    await select_btn.wait_for(state="attached", timeout=2000)
                     try:
                         await select_btn.click()
                     except Exception:
                         await select_btn.evaluate("el => el.click()")
                     print(f"Clicked Select button in date filter using: {sel_loc}")
-                    await self.page.wait_for_timeout(2000)
+                    await self.page.wait_for_timeout(400)
                     break
                 except Exception:
                     continue
@@ -443,7 +443,7 @@ class AssetAssignmentScraper(BaseScraper):
             if opened and date_dropdown_el:
                 try:
                     await date_dropdown_el.click()
-                    await self.page.wait_for_timeout(1000)
+                    await self.page.wait_for_timeout(200)
                 except Exception:
                     pass
 
@@ -487,8 +487,8 @@ class AssetAssignmentScraper(BaseScraper):
                     try:
                         is_disabled = await btn.get_attribute("disabled")
                         if is_disabled is not None:
-                            print("Apply button is currently disabled; waiting 2s for filter changes...")
-                            await self.page.wait_for_timeout(2000)
+                            print("Apply button is currently disabled; waiting briefly for filter changes...")
+                            await self.page.wait_for_timeout(500)
                             await btn.evaluate("el => el.removeAttribute('disabled')")
                     except Exception:
                         pass
@@ -499,7 +499,15 @@ class AssetAssignmentScraper(BaseScraper):
                         await btn.evaluate("el => el.click()")
 
                     print(f"✅ Filters applied using locator: {app_loc}")
-                    await self.page.wait_for_timeout(4000)
+                    try:
+                        await self.page.wait_for_selector(
+                            "tbody.p-datatable-tbody tr, tr.p-selectable-row, .p-datatable-table",
+                            state="attached",
+                            timeout=6000
+                        )
+                    except Exception:
+                        pass
+                    await self.page.wait_for_timeout(400)
                     return True
                 except Exception:
                     continue
@@ -513,16 +521,13 @@ class AssetAssignmentScraper(BaseScraper):
 
     async def _scroll_table_fully(self) -> None:
         selectors = [
-            "tbody.fixed-body",
-            ".fixed-body-container",
-            ".kgViewport",
-            ".grid-viewport",
-            ".ui-grid-viewport",
-            ".list-table-scroll-container",
-            ".scroll-container",
             ".p-datatable-wrapper",
             ".p-datatable-scrollable-body",
+            ".scroll-container",
+            "tbody.fixed-body",
+            ".list-table-scroll-container",
         ]
+        scrolled_any = False
         for sel in selectors:
             try:
                 count = await self.page.evaluate(f"() => document.querySelectorAll('{sel}').length")
@@ -533,31 +538,31 @@ class AssetAssignmentScraper(BaseScraper):
                     is_scrollable = await self.page.evaluate(
                         f"() => {{"
                         f"  const el = document.querySelectorAll('{sel}')[{idx}];"
-                        f"  return el && el.scrollHeight > el.clientHeight;"
+                        f"  return el && el.offsetParent !== null && (el.scrollHeight - el.clientHeight > 20);"
                         f"}}"
                     )
                     if not is_scrollable:
                         continue
                         
-                    print(f"DEBUG: Slowly scrolling '{sel}' (index {idx}) to load all data...")
+                    print(f"DEBUG: Fast scrolling '{sel}' (index {idx}) to load all data...")
                     prev_scroll = -1
                     stuck_count = 0
-                    for _ in range(1000):
+                    for _ in range(250):
                         scroll_top = await self.page.evaluate(
                             f"() => {{"
                             f"  const el = document.querySelectorAll('{sel}')[{idx}];"
                             f"  if (el) {{"
-                            f"    el.scrollTop += 400;"
+                            f"    el.scrollTop += 600;"
                             f"    el.dispatchEvent(new Event('scroll'));"
                             f"    return el.scrollTop;"
                             f"  }}"
                             f"  return -1;"
                             f"}}"
                         )
-                        await self.page.wait_for_timeout(2000)
+                        await self.page.wait_for_timeout(200)
                         if scroll_top == prev_scroll:
                             stuck_count += 1
-                            if stuck_count >= 15:
+                            if stuck_count >= 3:
                                 break
                         else:
                             stuck_count = 0
@@ -572,8 +577,11 @@ class AssetAssignmentScraper(BaseScraper):
                         f"  }}"
                         f"}}"
                     )
-                    await self.page.wait_for_timeout(2000)
+                    await self.page.wait_for_timeout(250)
                     print(f"DEBUG: Scrolled '{sel}' (index {idx}) fully.")
+                    scrolled_any = True
+                if scrolled_any:
+                    break
             except Exception as exc:
                 print(f"DEBUG: Scroll error '{sel}': {exc}")
 
@@ -585,7 +593,7 @@ class AssetAssignmentScraper(BaseScraper):
                 state="attached",
                 timeout=15000
             )
-            await self.page.wait_for_timeout(2000)
+            await self.page.wait_for_timeout(350)
         except Exception as e:
             print(f"⚠️ Timeout waiting for table rows: {e}")
             return {"rows": [], "count": 0}
@@ -1033,9 +1041,14 @@ class AssetAssignmentScraper(BaseScraper):
                 const btn = document.querySelector('.panel-close_VNOfG .close-icon') ||
                             document.querySelector('.panel-close_VNOfG') ||
                             document.querySelector('.base-icon.close-icon') ||
-                            document.querySelector('button.close');
+                            document.querySelector('.panel-header-container_EYC6s button') ||
+                            document.querySelector('.header_Ce6MY button.close') ||
+                            document.querySelector('.container__Gkig button.close') ||
+                            document.querySelector('button.close') ||
+                            document.querySelector('button[aria-label="Close"]');
                 if (btn) {
                     btn.click();
+                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                     return true;
                 }
                 return false;
@@ -1048,14 +1061,14 @@ class AssetAssignmentScraper(BaseScraper):
             except Exception:
                 pass
         for _ in range(8):
-            await self.page.wait_for_timeout(150)
+            await self.page.wait_for_timeout(100)
             is_closed = await self.page.evaluate("""() => {
                 const p = document.querySelector('.container__Gkig, .panel-header-container_EYC6s');
                 return !p || p.offsetParent === null;
             }""")
             if is_closed:
                 break
-        await self.page.wait_for_timeout(200)
+        await self.page.wait_for_timeout(100)
 
     async def select_dropdown_option(self, dropdown_locator_candidates: Any, option_text: str) -> bool:
         if not option_text:
@@ -1286,12 +1299,12 @@ class AssetAssignmentScraper(BaseScraper):
             tech_str = f" on tech '{tech_name}'" if tech_name else ""
             print(f"👉 Clicked WO #{work_order_number}{tech_str}, waiting for Assignment sidepanel...")
             try:
-                await self.page.wait_for_selector('.container__Gkig, .custom-scrollbar', state='attached', timeout=8000)
+                await self.page.wait_for_selector('.container__Gkig, .custom-scrollbar, [data-edb-sidepanel-card]', state='attached', timeout=6000)
             except Exception:
-                await self.page.wait_for_timeout(1500)
+                await self.page.wait_for_timeout(400)
 
             verified = False
-            for _ in range(10):
+            for _ in range(12):
                 panel_text = await self.page.evaluate("""() => {
                     const p = document.querySelector('.container__Gkig, .panel-header-container_EYC6s');
                     return p ? (p.textContent || '') : '';
@@ -1299,7 +1312,7 @@ class AssetAssignmentScraper(BaseScraper):
                 if clean_target_wo in re.sub(r'[^0-9]', '', panel_text):
                     verified = True
                     break
-                await self.page.wait_for_timeout(150)
+                await self.page.wait_for_timeout(100)
 
             if not verified:
                 print(f"  ⚠️ Warning: Sidepanel text did not confirm WO #{clean_target_wo}! Verifying before action...")
@@ -1331,7 +1344,7 @@ class AssetAssignmentScraper(BaseScraper):
             if not await self.click_and_open_sidepanel(work_order_number):
                 return False
 
-            for _ in range(16):
+            for _ in range(12):
                 has_tech = await self.page.evaluate("""() => {
                     const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
                                  document.querySelector('[data-edb-sidepanel-card*="Assignment"]');
@@ -1344,7 +1357,7 @@ class AssetAssignmentScraper(BaseScraper):
                 }""")
                 if has_tech:
                     break
-                await self.page.wait_for_timeout(200)
+                await self.page.wait_for_timeout(100)
 
             await self.page.evaluate("""() => {
                 const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
@@ -1360,7 +1373,7 @@ class AssetAssignmentScraper(BaseScraper):
                     container.scrollTop = container.scrollHeight * 0.45;
                 }
             }""")
-            await self.page.wait_for_timeout(250)
+            await self.page.wait_for_timeout(120)
 
             current_tech = await self.page.evaluate("""() => {
                 const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
@@ -1516,14 +1529,14 @@ class AssetAssignmentScraper(BaseScraper):
             if saved:
                 print(f"  💾 Clicked Save button for WO #{work_order_number}.")
                 for _ in range(10):
-                    await self.page.wait_for_timeout(150)
+                    await self.page.wait_for_timeout(100)
                     edit_card_gone = await self.page.evaluate("""() => {
                         const c = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v');
                         return !c;
                     }""")
                     if edit_card_gone:
                         break
-                await self.page.wait_for_timeout(300)
+                await self.page.wait_for_timeout(150)
             else:
                 print(f"  ⚠️ Save button not triggered for WO #{work_order_number}.")
 
@@ -2027,7 +2040,7 @@ class AssetAssignmentScraper(BaseScraper):
                         }""")
 
                     for _ in range(8):
-                        await self.page.wait_for_timeout(250)
+                        await self.page.wait_for_timeout(150)
                         is_details_open = await self.page.evaluate("""() => {
                             const custDetails = document.querySelector('[data-edb-sidepanel-card*="Customer"][data-edb-sidepanel-card*="Details"]');
                             if (custDetails) return false;
@@ -2362,7 +2375,7 @@ class AssetAssignmentScraper(BaseScraper):
                     await self.page.wait_for_timeout(400)
 
                 for _ in range(10):
-                    await self.page.wait_for_timeout(150)
+                    await self.page.wait_for_timeout(100)
                     saved_done = await self.page.evaluate("""() => {
                         const btn = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] button.confirm_I8LeR') ||
                                     document.querySelector('.workorder-details-card_kiboz button.confirm_I8LeR');
@@ -2370,7 +2383,7 @@ class AssetAssignmentScraper(BaseScraper):
                     }""")
                     if saved_done:
                         break
-                await self.page.wait_for_timeout(300)
+                await self.page.wait_for_timeout(150)
                 print(f"  🎉 Work Order save finished (Result: {'Saved' if wo_saved else 'Attempted'}).")
 
                 print("  🔙 Clicking Back button (.back_EKQLl) to return to main sidepanel...")
@@ -2407,17 +2420,17 @@ class AssetAssignmentScraper(BaseScraper):
                     }""")
                     if back_clicked:
                         break
-                    await self.page.wait_for_timeout(300)
+                    await self.page.wait_for_timeout(150)
 
                 for _ in range(10):
-                    await self.page.wait_for_timeout(150)
+                    await self.page.wait_for_timeout(100)
                     on_main = await self.page.evaluate("""() => {
                         return !!(document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
                                   document.querySelector('.workorder-summary-card_mv9VQ'));
                     }""")
                     if on_main:
                         break
-                await self.page.wait_for_timeout(300)
+                await self.page.wait_for_timeout(150)
                 print(f"  🔙 Back button clicked: {'Success' if back_clicked else 'Not found / already on main'}")
             else:
                 print(f"  ⏭️ Work Order details already set (Priority: '{prio_to_check}'). Skipping Work Order details edit.")
@@ -2630,13 +2643,13 @@ class AssetAssignmentScraper(BaseScraper):
             print(f"  🔍 [Cancel WO #{wo_str}] Waiting for search input...")
             search_input = new_page.locator("input#search, .custom-search input.search").first
             await search_input.wait_for(state="visible", timeout=30000)
-            await new_page.wait_for_timeout(1000)
+            await new_page.wait_for_timeout(300)
 
             clear_btn = new_page.locator("button.clear-search:visible")
             if await clear_btn.count() > 0:
                 try:
                     await clear_btn.first.click()
-                    await new_page.wait_for_timeout(500)
+                    await new_page.wait_for_timeout(200)
                 except Exception:
                     pass
 
@@ -2645,7 +2658,7 @@ class AssetAssignmentScraper(BaseScraper):
             await search_input.fill(wo_str)
             await search_input.press("Enter")
             print(f"  🔍 [Cancel WO #{wo_str}] Entered '{wo_str}' into search and pressed Enter. Waiting for results...")
-            await new_page.wait_for_timeout(2500)
+            await new_page.wait_for_timeout(800)
 
             target_row = None
             target_status = ""
@@ -2663,7 +2676,7 @@ class AssetAssignmentScraper(BaseScraper):
                         break
                 if target_row:
                     break
-                await new_page.wait_for_timeout(1000)
+                await new_page.wait_for_timeout(400)
 
             if not target_row:
                 print(f"  ⚠️ [Cancel WO #{wo_str}] No table row found matching WO #{wo_str} in search results.")
@@ -2682,11 +2695,11 @@ class AssetAssignmentScraper(BaseScraper):
             print(f"  🖱️ [Cancel WO #{wo_str}] Opening work order details...")
             try:
                 await wo_span.click()
-                await new_page.wait_for_timeout(2000)
+                await new_page.wait_for_timeout(800)
             except Exception as e1:
                 print(f"  ℹ️ Direct click failed ({e1}). Trying double-click on row...")
                 await target_row.dblclick()
-                await new_page.wait_for_timeout(2000)
+                await new_page.wait_for_timeout(800)
 
             save_btn_selector = self.rules.get(
                 "unassigned_save_btn_selector",
@@ -2695,8 +2708,8 @@ class AssetAssignmentScraper(BaseScraper):
             try:
                 await wo_page.wait_for_selector(save_btn_selector, state="visible", timeout=20000)
             except Exception:
-                print(f"  ⚠️ Save button not immediately visible for WO #{wo_str}, waiting 3s...")
-                await wo_page.wait_for_timeout(3000)
+                print(f"  ⚠️ Save button not immediately visible for WO #{wo_str}, waiting 1.5s...")
+                await wo_page.wait_for_timeout(1500)
 
             save_btn = wo_page.locator(save_btn_selector).first
             if await save_btn.count() == 0:
@@ -2706,7 +2719,7 @@ class AssetAssignmentScraper(BaseScraper):
             print(f"  💾 Clicking Save button on WO #{wo_str}...")
             await save_btn.click()
             print("  ⏳ Waiting for Save / Dispatch Summary modal to appear...")
-            await wo_page.wait_for_timeout(2000)
+            await wo_page.wait_for_timeout(600)
 
             radio_btn = self.rules.get("unassigned_canceled_radio_selector", ".field-radio-container:has-text('Canceled') .field-radio")
             notes_sel = self.rules.get("unassigned_notes_textarea_selector", "textarea[name='CancellationNotes']")
@@ -2726,7 +2739,7 @@ class AssetAssignmentScraper(BaseScraper):
                 except Exception:
                     await wo_page.locator("text='Canceled'").first.click()
 
-            await wo_page.wait_for_timeout(1000)
+            await wo_page.wait_for_timeout(300)
 
             print(f"  📝 Entering cancellation reason: '{cancel_reason_text}'...")
             filled = False
@@ -2748,7 +2761,7 @@ class AssetAssignmentScraper(BaseScraper):
                 except Exception as note_e:
                     print(f"  ❌ Could not fill cancellation notes: {note_e}")
 
-            await wo_page.wait_for_timeout(1000)
+            await wo_page.wait_for_timeout(300)
 
             print(f"  ✅ Confirming cancellation for WO #{wo_str}...")
             try:
@@ -2758,7 +2771,7 @@ class AssetAssignmentScraper(BaseScraper):
                 print("  -> Fallback confirm button click...")
                 await wo_page.locator(f"{confirm_btn_sel} >> visible=true").first.click(timeout=10000)
 
-            await wo_page.wait_for_timeout(4000)
+            await wo_page.wait_for_timeout(1500)
             print(f"  🎉 Successfully canceled WO #{wo_str}!")
             return True
 
@@ -2824,13 +2837,13 @@ class AssetAssignmentScraper(BaseScraper):
             if "Dispatch" not in cur_url or "#/DispatchBoard" in cur_url or "DispatchBoard" in cur_url:
                 print(f"Navigating to Asset Assignment URL: {target_url}")
                 await self.page.goto(target_url, wait_until='domcontentloaded')
-                await self.page.wait_for_timeout(3000)
+                await self.page.wait_for_timeout(1200)
 
             if "Login" in (self.page.url or ""):
                 await self.login_fieldedge()
                 if target_url and "Login" not in self.page.url:
                     await self.page.goto(target_url, wait_until='domcontentloaded')
-                    await self.page.wait_for_timeout(3000)
+                    await self.page.wait_for_timeout(1200)
 
             target_status = status_name or self.rules.get('status_name', 'Assigned')
             await self.select_status(target_status)
@@ -3409,7 +3422,7 @@ class AssetAssignmentScraper(BaseScraper):
                 if target_url and "Login" not in self.page.url:
                     print(f"Post-login navigating to target URL: {target_url}")
                     await self.page.goto(target_url, wait_until='domcontentloaded')
-                    await self.page.wait_for_timeout(4000)
+                    await self.page.wait_for_timeout(1500)
 
             ui_wait_candidates = [
                 self.rules.get('status_assigned_xpath'),
@@ -3439,10 +3452,10 @@ class AssetAssignmentScraper(BaseScraper):
                     continue
 
             if not ui_found:
-                print("⚠️ Primary UI selector not caught in initial wait, giving extra 3s buffer for SPA rendering...")
-                await self.page.wait_for_timeout(3000)
+                print("⚠️ Primary UI selector not caught in initial wait, giving extra 1.5s buffer for SPA rendering...")
+                await self.page.wait_for_timeout(1500)
             else:
-                await self.page.wait_for_timeout(2000)
+                await self.page.wait_for_timeout(400)
 
             target_status = status_name or self.rules.get('status_name', 'Assigned')
             print(f"Selecting Status filter: {target_status}")
