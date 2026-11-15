@@ -1783,7 +1783,7 @@ class AssetAssignmentScraper(BaseScraper):
             wo_loc = self.page.locator(
                 "[data-edb-sidepanel-card*='WorkOrder'] .details-icon_lgpCm, "
                 ".card_ngkhz:has(.workorder-summary-card_mv9VQ) .details-icon_lgpCm, "
-                "//div[contains(@class,'card_ngkhz') and .//div[contains(@class,'panel-title') and normalize-space()='Work Order']]//div[contains(@class,'details-icon_lgpCm')]"
+                ".card_ngkhz:has(.panel-title:has-text('Work Order')) .details-icon_lgpCm"
             ).first
             if await wo_loc.count() > 0:
                 try:
@@ -1992,8 +1992,8 @@ class AssetAssignmentScraper(BaseScraper):
                         chevron_loc = self.page.locator(
                             "[data-edb-sidepanel-card*='WorkOrder'] .details-icon_lgpCm, "
                             ".card_ngkhz:has(.workorder-summary-card_mv9VQ) .details-icon_lgpCm, "
-                            "//div[contains(@class,'card_ngkhz') and .//div[contains(@class,'panel-title') and contains(text(),'Work Order')]]//div[contains(@class,'details-icon_lgpCm')], "
-                            "//div[contains(@class,'card_ngkhz') and .//div[contains(text(),'Work Order') and not(contains(text(),'Customer'))]]//div[contains(@class,'details-icon_lgpCm')]"
+                            ".card_ngkhz:has(.panel-title:has-text('Work Order')) .details-icon_lgpCm, "
+                            ".card_ngkhz:has(.field-title:has-text('Work Order')) .details-icon_lgpCm"
                         ).first
                         if await chevron_loc.count() > 0:
                             await chevron_loc.scroll_into_view_if_needed(timeout=1500)
@@ -2141,187 +2141,110 @@ class AssetAssignmentScraper(BaseScraper):
                     print(f"  🏷️ Selecting Priority: '{target_priority}'...")
                     prio_clicked = False
 
+                    # 1. Target Priority dropdown (.priority-select)
                     try:
-                        prio_vs_loc = self.page.locator(
-                            "[data-edb-sidepanel-card*='WorkOrder'] .cell:has(.field-title:has-text('Priority')) .v-select, "
-                            "//div[contains(@class,'field-title') and contains(translate(., 'PRIORITY', 'priority'),'priority')]/following::div[contains(@class,'v-select')][1], "
-                            ".workorder-details-card_kiboz .v-select"
+                        prio_loc = self.page.locator(
+                            '.priority-select .vs__dropdown-toggle, '
+                            '.priority-select input.vs__search, '
+                            '.cell:has(.field-title:has-text("Priority")) .v-select .vs__dropdown-toggle, '
+                            '.cell:has(.field-title:has-text("Priority")) .v-select'
                         ).first
-                        if await prio_vs_loc.count() > 0 and await prio_vs_loc.is_visible():
-                            await prio_vs_loc.scroll_into_view_if_needed()
-                            await prio_vs_loc.click()
+                        if await prio_loc.count() > 0:
+                            await prio_loc.scroll_into_view_if_needed(timeout=1500)
+                            await self.page.wait_for_timeout(100)
+                            await prio_loc.click()
+                            await self.page.wait_for_timeout(250)
+                    except Exception as pt_err:
+                        print(f"  ⚠️ Priority dropdown click note: {pt_err}")
+
+                    # 2. Check if dropdown is expanded; if not, open via single click on input
+                    is_prio_open = await self.page.evaluate("""() => {
+                        const vs = document.querySelector('.priority-select') ||
+                                   document.querySelector('.cell:has(.field-title:has-text("Priority")) .v-select') ||
+                                   document.querySelector('.v-select.priority-select');
+                        if (!vs) return false;
+                        const cb = vs.querySelector('[role="combobox"]');
+                        if (cb && cb.getAttribute('aria-expanded') === 'true') return true;
+                        const ul = vs.querySelector('ul[role="listbox"]') || document.querySelector('.vs__dropdown-menu');
+                        if (ul && ul.offsetParent !== null && ul.style.display !== 'none') return true;
+                        return false;
+                    }""")
+
+                    if not is_prio_open:
+                        await self.page.evaluate("""() => {
+                            const vs = document.querySelector('.priority-select') ||
+                                       document.querySelector('.cell:has(.field-title:has-text("Priority")) .v-select');
+                            if (vs) {
+                                const inp = vs.querySelector('input.vs__search') || vs.querySelector('.vs__dropdown-toggle');
+                                if (inp) inp.click();
+                            }
+                        }""")
+                        await self.page.wait_for_timeout(250)
+
+                    # 3. Type search query into priority search input
+                    search_term = "7.12" if ("SERVICE NEEDED" in target_priority.upper() or "7.12" in target_priority) else (
+                        "DO NOT DISPATCH" if "DO NOT DISPATCH" in target_priority.upper() else target_priority
+                    )
+                    try:
+                        prio_inp = self.page.locator('.priority-select input.vs__search, .cell:has(.field-title:has-text("Priority")) input.vs__search').first
+                        if await prio_inp.count() > 0:
+                            await prio_inp.fill(search_term)
+                            await self.page.wait_for_timeout(250)
                     except Exception:
                         pass
 
-                    await self.page.evaluate("""() => {
-                        const allTitles = Array.from(document.querySelectorAll('.field-title, .title, .label, div'));
-                        const pTitle = allTitles.find(t => (t.textContent || '').trim().toLowerCase() === 'priority');
-                        let vs = null;
-                        if (pTitle) {
-                            const container = pTitle.closest('.cell') || pTitle.closest('.grid') || pTitle.parentElement;
-                            if (container) vs = container.querySelector('.v-select');
+                    await self.page.evaluate("""(term) => {
+                        const vs = document.querySelector('.priority-select') || document.querySelector('.cell:has(.field-title:has-text("Priority")) .v-select');
+                        const inp = (vs ? vs.querySelector('input.vs__search') : null) || document.querySelector('input.vs__search:focus');
+                        if (inp) {
+                            inp.focus();
+                            inp.value = term;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
                         }
-                        if (!vs) {
-                            vs = document.querySelector('.workorder-details-card_kiboz .v-select') ||
-                                 document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .v-select');
-                        }
-                        if (vs) {
-                            vs.scrollIntoView({ behavior: 'instant', block: 'center' });
-                            const toggle = vs.querySelector('.vs__dropdown-toggle') || vs.querySelector('input.vs__search') || vs.querySelector('input') || vs;
-                            toggle.click();
-                            toggle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                            toggle.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                        }
-                    }""")
+                    }""", search_term)
                     await self.page.wait_for_timeout(250)
 
-                    prio_clicked = await self.page.evaluate("""(target) => {
-                        const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
-                        const cTarget = norm(target);
-                        const isDnd = target.toUpperCase().includes('DO NOT DISPATCH');
-                        const isSn = target.toUpperCase().includes('SERVICE NEEDED') || target.includes('7.12');
-                        const isExc = target.toUpperCase().includes('EXC') || (target.includes('[5]') && target.toUpperCase().includes('EXC'));
-                        const isSerTr = target.toUpperCase().includes('SER TR') || target.toUpperCase().includes('SER');
-                        const isPt = target.toUpperCase().includes('PT') || (target.includes('[5]') && !isExc && !isSerTr);
-                        const isRoutine = target.toUpperCase().includes('ROUTINE') || target.includes('[1]');
-
-                        const items = Array.from(document.querySelectorAll('.vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li, .vs__dropdown-menu .vs__dropdown-option'));
-                        for (const item of items) {
-                            const txt = (item.textContent || '').trim();
-                            const cTxt = norm(txt);
-
-                            const exactMatch = cTxt === cTarget;
-                            const subMatch = cTarget && (cTxt.includes(cTarget) || cTarget.includes(cTxt));
-                            const dndMatch = isDnd && txt.toUpperCase().includes('DO NOT DISPATCH');
-                            const snMatch = isSn && (txt.toUpperCase().includes('SERVICE NEEDED') || txt.includes('7.12'));
-                            const excMatch = isExc && (txt.toUpperCase().includes('EXC') || (txt.includes('[5]') && txt.toUpperCase().includes('EXC')));
-                            const serTrMatch = isSerTr && (txt.toUpperCase().includes('SER TR') || txt.toUpperCase().includes('SER'));
-                            const ptMatch = isPt && (txt.toUpperCase().includes('PT') || (txt.includes('[5]') && !txt.toUpperCase().includes('EXC') && !txt.toUpperCase().includes('SER')));
-                            const routineMatch = isRoutine && (txt.toUpperCase().includes('ROUTINE') || txt.includes('[1]'));
-
-                            if (exactMatch || subMatch || dndMatch || snMatch || excMatch || serTrMatch || ptMatch || routineMatch) {
-                                item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
-                                item.click();
-                                item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                return true;
-                            }
-                        }
-                        return false;
-                    }""", target_priority)
+                    # 4. Click option from dropdown menu
+                    try:
+                        opt_pat = re.compile(r'7\.12|service\s*needed', re.I) if ("SERVICE NEEDED" in target_priority.upper() or "7.12" in target_priority) else re.compile(re.escape(target_priority), re.I)
+                        opt_loc = self.page.locator('.priority-select .vs__dropdown-menu li, ul[role="listbox"] li, .vs__dropdown-menu li, li.vs__dropdown-option').filter(has_text=opt_pat).first
+                        if await opt_loc.count() > 0:
+                            await opt_loc.click(force=True)
+                            prio_clicked = True
+                    except Exception:
+                        pass
 
                     if not prio_clicked:
-                        if "DO NOT DISPATCH" in target_priority.upper():
-                            search_term = "DO NOT DISPATCH"
-                            pat = r'do\s*not\s*dispatch'
-                        elif "SERVICE NEEDED" in target_priority.upper() or "7.12" in target_priority:
-                            search_term = "SERVICE NEEDED"
-                            pat = r'service\s*needed|7\.12'
-                        elif "EXC" in target_priority.upper():
-                            search_term = "EXC"
-                            pat = r'exc|\[5\]\s*exc'
-                        elif "SER TR" in target_priority.upper() or "SER" in target_priority.upper():
-                            search_term = "SER TR"
-                            pat = r'ser\s*tr|\[5\]\s*ser'
-                        elif "PT" in target_priority.upper() or "[5]" in target_priority:
-                            search_term = "PT"
-                            pat = r'\[5\]\s*pt|pt\s*\('
-                        else:
-                            search_term = target_priority
-                            pat = re.escape(target_priority)
-
-                        try:
-                            prio_inp = self.page.locator('input.vs__search:visible, input[type="search"]:visible').first
-                            if await prio_inp.count() > 0 and await prio_inp.is_visible():
-                                await prio_inp.fill(search_term)
-                        except Exception:
-                            pass
-
-                        await self.page.evaluate("""(term) => {
-                            const inps = Array.from(document.querySelectorAll('input.vs__search, input[type="search"]'));
-                            for (const inp of inps) {
-                                if (inp.offsetParent !== null) {
-                                    inp.focus();
-                                    inp.value = term;
-                                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                                    break;
-                                }
-                            }
-                        }""", search_term)
-                        await self.page.wait_for_timeout(250)
-
                         prio_clicked = await self.page.evaluate("""(target) => {
                             const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
-                            const cTarget = norm(target);
-                            const isDnd = target.toUpperCase().includes('DO NOT DISPATCH');
                             const isSn = target.toUpperCase().includes('SERVICE NEEDED') || target.includes('7.12');
-                            const isExc = target.toUpperCase().includes('EXC') || (target.includes('[5]') && target.toUpperCase().includes('EXC'));
-                            const isSerTr = target.toUpperCase().includes('SER TR') || target.toUpperCase().includes('SER');
-                            const isPt = target.toUpperCase().includes('PT') || (target.includes('[5]') && !isExc && !isSerTr);
-                            const isRoutine = target.toUpperCase().includes('ROUTINE') || target.includes('[1]');
-
-                            const items = Array.from(document.querySelectorAll('.vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li, .vs__dropdown-menu .vs__dropdown-option'));
+                            const items = Array.from(document.querySelectorAll('.priority-select ul li, .vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li'));
                             for (const item of items) {
                                 const txt = (item.textContent || '').trim();
                                 const cTxt = norm(txt);
-
-                                const exactMatch = cTxt === cTarget;
-                                const subMatch = cTarget && (cTxt.includes(cTarget) || cTarget.includes(cTxt));
-                                const dndMatch = isDnd && txt.toUpperCase().includes('DO NOT DISPATCH');
-                                const snMatch = isSn && (txt.toUpperCase().includes('SERVICE NEEDED') || txt.includes('7.12'));
-                                const excMatch = isExc && (txt.toUpperCase().includes('EXC') || (txt.includes('[5]') && txt.toUpperCase().includes('EXC')));
-                                const serTrMatch = isSerTr && (txt.toUpperCase().includes('SER TR') || txt.toUpperCase().includes('SER'));
-                                const ptMatch = isPt && (txt.toUpperCase().includes('PT') || (txt.includes('[5]') && !txt.toUpperCase().includes('EXC') && !txt.toUpperCase().includes('SER')));
-                                const routineMatch = isRoutine && (txt.toUpperCase().includes('ROUTINE') || txt.includes('[1]'));
-
-                                if (exactMatch || subMatch || dndMatch || snMatch || excMatch || serTrMatch || ptMatch || routineMatch) {
+                                if (isSn && (txt.includes('7.12') || txt.toUpperCase().includes('SERVICE NEEDED') || cTxt.includes('serviceneeded'))) {
                                     item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                                     item.click();
                                     item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                     return true;
                                 }
                             }
-                            return false;
-                        }""", target_priority)
-
-                    if not prio_clicked:
-                        try:
-                            opt_loc = self.page.locator('.vs__dropdown-menu li, ul[role="listbox"] li, li.vs__dropdown-option').filter(has_text=re.compile(pat, re.I)).first
-                            if await opt_loc.count() > 0 and await opt_loc.is_visible():
-                                await opt_loc.click(force=True)
-                                prio_clicked = True
-                        except Exception as p_err:
-                            print(f"  ⚠️ Priority locator click fallback note: {p_err}")
-
-                    if not prio_clicked:
-                        try:
-                            if 'prio_inp' in locals() and prio_inp and await prio_inp.count() > 0:
-                                await prio_inp.fill("")
-                                await self.page.wait_for_timeout(200)
-                        except Exception:
-                            pass
-                        prio_clicked = await self.page.evaluate("""(target) => {
-                            const isDnd = target.toUpperCase().includes('DO NOT DISPATCH');
-                            const isSn = target.toUpperCase().includes('SERVICE NEEDED') || target.includes('7.12');
-                            const isExc = target.toUpperCase().includes('EXC') || (target.includes('[5]') && target.toUpperCase().includes('EXC'));
-                            const isSerTr = target.toUpperCase().includes('SER TR') || target.toUpperCase().includes('SER');
-                            const isPt = target.toUpperCase().includes('PT') || (target.includes('[5]') && !isExc && !isSerTr);
-                            const items = Array.from(document.querySelectorAll('.vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li, .vs__dropdown-menu .vs__dropdown-option'));
-                            for (const item of items) {
-                                const txt = (item.textContent || '').trim();
-                                const dndMatch = isDnd && txt.toUpperCase().includes('DO NOT DISPATCH');
-                                const snMatch = isSn && (txt.toUpperCase().includes('SERVICE NEEDED') || txt.includes('7.12'));
-                                const excMatch = isExc && (txt.toUpperCase().includes('EXC') || (txt.includes('[5]') && txt.toUpperCase().includes('EXC')));
-                                const serTrMatch = isSerTr && (txt.toUpperCase().includes('SER TR') || txt.toUpperCase().includes('SER'));
-                                const ptMatch = isPt && (txt.toUpperCase().includes('PT') || (txt.includes('[5]') && !txt.toUpperCase().includes('EXC') && !txt.toUpperCase().includes('SER')));
-                                if (dndMatch || snMatch || excMatch || serTrMatch || ptMatch) {
-                                    item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
-                                    item.click();
-                                    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                    return true;
-                                }
+                            if (items.length > 0) {
+                                items[0].click();
+                                items[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                return true;
                             }
                             return false;
                         }""", target_priority)
+
+                    # 5. Check if selection succeeded
+                    if not prio_clicked:
+                        prio_clicked = await self.page.evaluate("""() => {
+                            const vs = document.querySelector('.priority-select') || document.querySelector('.cell:has(.field-title:has-text("Priority")) .v-select');
+                            const sel = vs ? vs.querySelector('.vs__selected') : null;
+                            const txt = (sel ? sel.textContent : '').toLowerCase();
+                            return txt.includes('7.12') || txt.includes('service needed');
+                        }""")
 
                     print(f"  -> Priority option selected: {'Success' if prio_clicked else 'Option not found'}")
                     await self.page.wait_for_timeout(200)
