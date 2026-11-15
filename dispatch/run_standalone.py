@@ -615,28 +615,65 @@ async def get_health():
 
 @app.post("/api/trigger")
 @app.post("/dispatch/api/trigger")
-async def trigger_run(background_tasks: BackgroundTasks):
+async def trigger_run(request: Request, background_tasks: BackgroundTasks):
     """Trigger an immediate manual automation run."""
     args = getattr(app.state, "args", None) or DefaultArgs()
     if STATUS_DATA["last_status"] == "running":
         return JSONResponse(status_code=409, content={"message": "Automation is already currently running!"})
-    
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    target_days = int(body.get("days", getattr(args, "days", 31)))
+    target_start_date = body.get("start_date", getattr(args, "start_date", None))
+    # Manual triggers default to force=True to ensure updates apply immediately
+    target_force = bool(body.get("force", True))
+    target_skip_asset = bool(body.get("skip_asset", getattr(args, "skip_asset", False)))
+
+    # Clear central completion record via API if force is requested
+    if target_force:
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if api_url:
+            try:
+                import urllib.request
+                endpoint = f"{api_url}/automation/dispatch-history/?target=date_processing_complete" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/?target=date_processing_complete"
+                del_req = urllib.request.Request(endpoint, method="DELETE", headers={"User-Agent": "SterlingAutomations/1.0"})
+                with urllib.request.urlopen(del_req, timeout=4) as resp:
+                    pass
+            except Exception:
+                pass
+
     # Run in background
     async def _manual_run():
         scraper = DispatchBoardDisplayAutomationScraper()
+        now_pst = get_pst_now().strftime("%Y-%m-%d %I:%M:%S %p PST")
+        STATUS_DATA["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        STATUS_DATA["last_run_pst"] = now_pst
         STATUS_DATA["last_status"] = "running"
-        await scraper.run(
-            days=args.days,
-            dry_run=not args.live,
-            start_date_str=args.start_date,
-            on_progress=on_progress_update,
-            skip_asset=getattr(args, "skip_asset", False),
-            force=getattr(args, "force", False)
-        )
-        STATUS_DATA["last_status"] = "success"
+        try:
+            await scraper.run(
+                days=target_days,
+                dry_run=not args.live,
+                start_date_str=target_start_date,
+                on_progress=on_progress_update,
+                skip_asset=target_skip_asset,
+                force=target_force
+            )
+            STATUS_DATA["last_status"] = "success"
+        except Exception as e:
+            STATUS_DATA["last_status"] = f"error: {str(e)}"
 
     background_tasks.add_task(_manual_run)
-    return {"message": "Manual run initiated successfully in background!"}
+    return {
+        "message": "Manual run initiated successfully in background!",
+        "days": target_days,
+        "start_date": target_start_date,
+        "force": target_force,
+        "skip_asset": target_skip_asset
+    }
 
 
 @app.get("/assets/{filename}")

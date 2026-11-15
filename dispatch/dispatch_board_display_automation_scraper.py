@@ -21,7 +21,14 @@ _dispatch_dir = os.path.dirname(os.path.abspath(__file__))
 if _dispatch_dir not in sys.path:
     sys.path.insert(0, _dispatch_dir)
 
-from base_scraper import BaseScraper
+try:
+    from base_scraper import BaseScraper
+except ImportError:
+    try:
+        from automation.scrapers.base_scraper import BaseScraper  # type: ignore
+    except ImportError:
+        from dispatch.base_scraper import BaseScraper  # type: ignore
+
 
 class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
@@ -939,11 +946,44 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         except Exception:
             return False
 
+    @staticmethod
+    def extract_name_variants(text: str) -> List[str]:
+        """
+        Extracts all useful search & match variants for a name (with and without emojis/pipes).
+        e.g. '👥 | GENE' -> ['👥 | GENE', '| GENE', 'GENE']
+             '🛻 | 04'   -> ['🛻 | 04', '| 04', '04']
+             ' GENE'     -> [' GENE', 'GENE']
+        """
+        variants = []
+        if not text:
+            return variants
+        raw = str(text).strip()
+        variants.append(raw)
+
+        # 1. Strip emojis and astral unicode symbols
+        no_emoji = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f\u200d]', '', raw).strip()
+        if no_emoji and no_emoji != raw:
+            variants.append(no_emoji)
+
+        # 2. Strip leading/trailing pipes, symbols, whitespace, em-spaces
+        clean_core = re.sub(r'^[|#\-_\s\u2000-\u200f]+|[|#\-_\s\u2000-\u200f]+$', '', no_emoji).strip()
+        if clean_core and clean_core not in variants:
+            variants.append(clean_core)
+
+        # 3. Extract after pipe if present
+        if "|" in raw:
+            right_side = raw.split("|")[-1].strip()
+            right_clean = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f\u200d\u2000-\u200f]', '', right_side).strip()
+            if right_clean and right_clean not in variants:
+                variants.append(right_clean)
+
+        return variants
+
     _BANNER_EMOJI_REGEX = re.compile(
         r'['
-        r'\u203C-\u3299'
-        r'\U0001F000-\U0001F9FF'
-        r'\U0001FA00-\U0001FAFF'
+        r'\u203C-\u3299'         # Miscellaneous symbols, Dingbats, geometric shapes
+        r'\U0001F000-\U0001F9FF' # Emoticons, transport, supplemental symbols
+        r'\U0001FA00-\U0001FAFF' # Symbols and pictographs extended-A
         r']+'
     )
 
@@ -951,35 +991,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
     def has_banner_prefix(cls, t: str) -> bool:
         if not t:
             return False
-        return ('|' in str(t)) or bool(cls._BANNER_EMOJI_REGEX.search(str(t)))
+        return ('|' in t) or bool(cls._BANNER_EMOJI_REGEX.search(str(t)))
 
-    @staticmethod
-    def _has_qualifier_conflict(s1: str, s2: str) -> bool:
-        t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', str(s1).lower()))
-        o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', str(s2).lower()))
-        return (('am' in t_words) != ('am' in o_words)) or (('pm' in t_words) != ('pm' in o_words))
-
-    @staticmethod
-    def extract_name_variants(text: str) -> List[str]:
-        variants = []
-        if not text:
-            return variants
-        raw = str(text).strip()
-        variants.append(raw)
-        no_emoji = re.sub(r'[\u203C-\u3299\U0001F000-\U0001FAFF\ufe0f\u200d]', '', raw).strip()
-        if no_emoji and no_emoji != raw:
-            variants.append(no_emoji)
-        clean_core = re.sub(r'^[|#\-_\s\u2000-\u200f]+|[|#\-_\s\u2000-\u200f]+$', '', no_emoji).strip()
-        if clean_core and clean_core not in variants:
-            variants.append(clean_core)
-        if "|" in raw:
-            right_side = raw.split("|")[-1].strip()
-            right_clean = re.sub(r'[\u203C-\u3299\U0001F000-\U0001FAFF\ufe0f\u200d\u2000-\u200f]', '', right_side).strip()
-            if right_clean and right_clean not in variants:
-                variants.append(right_clean)
-        return variants
-
-    async def select_dropdown_option(self, dropdown_selector: str, option_text: str, press_enter: bool = True, allow_fuzzy: bool = True) -> bool:
+    async def select_dropdown_option(self, dropdown_selector: str, option_text: str, press_enter: bool = True) -> bool:
         if not option_text:
             return True
 
@@ -1009,6 +1023,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             name_variants = self.extract_name_variants(option_text)
             target_canons = set(self.canonical_str(v) for v in name_variants if self.canonical_str(v))
             target_norms = set(unicodedata.normalize('NFKD', v).strip().lower() for v in name_variants if v)
+            is_time_target = bool(re.search(r'\b\d{1,2}:\d{2}\b', option_text)) or any(w in ('am', 'pm') for w in re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
 
             clean_search = unicodedata.normalize('NFKD', option_text).strip()
             clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
@@ -1026,17 +1041,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     sel_text = (await selected_check.text_content() or "").strip()
                     c_sel = self.canonical_str(sel_text)
                     c_target = self.canonical_str(option_text)
-                    qualifier_conflict = self._has_qualifier_conflict(option_text, sel_text)
+                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
+                    s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', sel_text.lower()))
+                    qualifier_conflict = is_time_target and ((('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words)))
                     sel_has_banner = self.has_banner_prefix(sel_text)
                     banner_conflict = (target_has_banner != sel_has_banner)
-                    exact_match = (
-                        sel_text == option_text or
-                        sel_text.strip().lower() == option_text.strip().lower() or
-                        c_sel == c_target or
-                        c_sel in target_canons
-                    )
-                    fuzzy_ok = allow_fuzzy and self.is_tech_match(sel_text, option_text)
-                    if not qualifier_conflict and not banner_conflict and (exact_match or fuzzy_ok):
+
+                    if not qualifier_conflict and not banner_conflict and (c_sel in target_canons or c_sel == c_target or self.is_tech_match(sel_text, option_text)):
                         print(f"  -> Selected '{sel_text}' via Enter directly.")
                         return True
                     else:
@@ -1048,14 +1059,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         else:
                             await search_input.click(force=True)
                         await self.page.wait_for_timeout(200)
-                        try:
-                            cur_val = (await search_input.input_value() or "").strip()
-                            if not cur_val:
-                                await search_input.focus()
-                                await search_input.fill(type_text)
-                                await self.page.wait_for_timeout(450)
-                        except Exception:
-                            pass
 
                 try:
                     dyn_opts = self.page.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
@@ -1081,11 +1084,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     except Exception:
                         pass
 
+                # Fallback: If searching with full name (or emoji) yielded 0 options, retry with clean emoji-free variants
                 if (await options.count()) == 0 and len(name_variants) > 1:
                     for fallback_var in name_variants[1:]:
                         if (await options.count()) > 0:
                             break
-                        print(f"  -> No options found for '{clean_search}'. Retrying search without emoji using '{fallback_var}'...")
+                        print(f"  -> No options found for '{clean_search}'. Retrying customer search without emoji using '{fallback_var}'...")
                         try:
                             await search_input.focus()
                             await search_input.fill("")
@@ -1172,60 +1176,68 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             raw_target = option_text.strip()
             target_norm = clean_search.lower()
             target_canon = self.canonical_str(option_text)
+            m_core = re.sub(r'^[a-z0-9]\s*', '', target_norm)
+            core_name = m_core if len(m_core) >= 3 else target_norm
 
-            async def _get_option_text(opt_el):
-                try:
-                    raw_inner = await opt_el.inner_text()
-                except Exception:
-                    raw_inner = ""
-                raw_text = raw_inner if (raw_inner and raw_inner.strip()) else (await opt_el.text_content() or "")
-                if not raw_text:
-                    return "", ""
-                s_raw = raw_text.strip()
-                lines = [l.strip() for l in s_raw.splitlines() if l.strip()]
-                first_line = lines[0] if lines else ""
-                return s_raw, first_line
-
-            async def _exact_match_option(opt_el) -> bool:
+            async def _exact_match_option(opt_el, strict_banner: bool = True) -> bool:
                 if not await opt_el.is_visible():
                     return False
-                s_raw, first_line = await _get_option_text(opt_el)
-                if not s_raw or not first_line:
+                raw_text = await opt_el.text_content()
+                if not raw_text:
                     return False
+                s_raw = raw_text.strip()
+                first_line = [l.strip() for l in s_raw.splitlines() if l.strip()][0] if s_raw else ""
                 norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
                 c_first = self.canonical_str(first_line)
-                if self._has_qualifier_conflict(raw_target, first_line):
+                c_raw = self.canonical_str(s_raw)
+
+                if is_time_target:
+                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
+                    o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', s_raw.lower()))
+                    if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
+                        return False
+
+                if strict_banner and (self.has_banner_prefix(s_raw) != target_has_banner):
                     return False
-                if self.has_banner_prefix(first_line) != target_has_banner:
-                    return False
+
                 if (
                     s_raw == raw_target or
-                    first_line == raw_target or
                     first_line in name_variants or
+                    s_raw in name_variants or
                     norm_first == target_norm or
                     norm_first in target_norms or
                     c_first == target_canon or
-                    c_first in target_canons
+                    c_raw == target_canon or
+                    c_first in target_canons or
+                    c_raw in target_canons
                 ):
                     await opt_el.scroll_into_view_if_needed()
                     await opt_el.click(force=True)
                     return True
                 return False
 
-            async def _fuzzy_match_option(opt_el) -> bool:
-                if not allow_fuzzy or not await opt_el.is_visible():
+            async def _fuzzy_match_option(opt_el, strict_banner: bool = True) -> bool:
+                if not await opt_el.is_visible():
                     return False
-                s_raw, first_line = await _get_option_text(opt_el)
-                if not s_raw or not first_line or s_raw == raw_target:
+                raw_text = await opt_el.text_content()
+                if not raw_text:
                     return False
+                s_raw = raw_text.strip()
+                if s_raw == raw_target:
+                    return False
+                first_line = [l.strip() for l in s_raw.splitlines() if l.strip()][0] if s_raw else ""
                 norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
                 norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
                 c_raw = self.canonical_str(s_raw)
                 c_first = self.canonical_str(first_line)
 
-                if self._has_qualifier_conflict(raw_target, first_line):
-                    return False
-                if self.has_banner_prefix(first_line) != target_has_banner:
+                if is_time_target:
+                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
+                    o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', s_raw.lower()))
+                    if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
+                        return False
+
+                if strict_banner and (self.has_banner_prefix(s_raw) != target_has_banner):
                     return False
 
                 if norm_raw == target_norm or norm_raw == clean_core.lower() or norm_first in target_norms:
@@ -1287,9 +1299,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         return True
                 return False
 
-            clicked = await _scan_options(_exact_match_option, count)
-            if not clicked and allow_fuzzy:
-                clicked = await _scan_options(_fuzzy_match_option, count)
+            # Strict banner/emoji matching (exact, then fuzzy). Lenient fallback is strictly disabled to prevent emoji/plain mismatch.
+            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count)
+            if not clicked:
+                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count)
 
             if not clicked and count > 0:
                 try:
@@ -1299,9 +1312,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
                             await self.page.wait_for_timeout(150)
                             count_now = await options.count()
-                            clicked = await _scan_options(_exact_match_option, count_now)
-                            if not clicked and allow_fuzzy:
-                                clicked = await _scan_options(_fuzzy_match_option, count_now)
+                            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count_now)
+                            if not clicked:
+                                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count_now)
                             if clicked:
                                 break
                 except Exception:
@@ -1313,23 +1326,24 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     if await selected_check.count() > 0 and await selected_check.is_visible():
                         sel_val = (await selected_check.text_content() or "").strip()
                         c_sel = self.canonical_str(sel_val)
+                        t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
+                        s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', sel_val.lower()))
                         banner_ok = (self.has_banner_prefix(sel_val) == target_has_banner)
-                        qual_ok = not self._has_qualifier_conflict(raw_target, sel_val)
-                        val_ok = (
-                            c_sel == target_canon or
-                            c_sel in target_canons or
-                            sel_val.strip().lower() == raw_target.lower() or
-                            (allow_fuzzy and self.is_tech_match(sel_val, option_text))
-                        )
-                        if banner_ok and qual_ok and val_ok:
+                        if banner_ok and (('am' in t_words) == ('am' in s_words) and ('pm' in t_words) == ('pm' in s_words)) and (c_sel == target_canon or self.is_tech_match(sel_val, option_text)):
                             return True
                     if await options.count() > 0:
                         for idx_opt in range(await options.count()):
                             opt_cand = options.nth(idx_opt)
-                            if await _exact_match_option(opt_cand):
-                                return True
-                            if allow_fuzzy and await _fuzzy_match_option(opt_cand):
-                                return True
+                            if await opt_cand.is_visible():
+                                f_raw = (await opt_cand.text_content() or "").strip()
+                                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
+                                f_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', f_raw.lower()))
+                                time_ok = not is_time_target or ((('am' in t_words) == ('am' in f_words)) and (('pm' in t_words) == ('pm' in f_words)))
+                                banner_ok = (self.has_banner_prefix(f_raw) == target_has_banner)
+                                c_f = self.canonical_str(f_raw)
+                                if time_ok and banner_ok and (c_f in target_canons or c_f == target_canon or self.is_tech_match(f_raw, option_text)):
+                                    await opt_cand.click(force=True)
+                                    return True
                     print(f"  -> Press-Enter fallback: No valid option was selected for '{option_text}'. Aborting to prevent misassignment.")
                     return False
                 else:
@@ -1347,19 +1361,20 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     selected_val = (await selected_el.text_content() or "").strip()
                     clean_sel = self.canonical_str(selected_val)
                     clean_opt = self.canonical_str(option_text)
-                    qualifier_conflict = self._has_qualifier_conflict(option_text, selected_val)
+                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
+                    s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', selected_val.lower()))
+                    qualifier_conflict = is_time_target and ((('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words)))
                     sel_has_banner = self.has_banner_prefix(selected_val)
                     banner_conflict = (target_has_banner != sel_has_banner)
-                    exact_or_canon = (
+                    if not qualifier_conflict and not banner_conflict and (
                         selected_val == option_text or
                         clean_sel == clean_opt or
                         clean_sel in target_canons or
                         selected_val.strip() in name_variants or
                         any(v.lower() == selected_val.strip().lower() for v in name_variants) or
-                        selected_val.strip().lower() == option_text.strip().lower()
-                    )
-                    fuzzy_ok = allow_fuzzy and self.is_tech_match(selected_val, option_text)
-                    if not qualifier_conflict and not banner_conflict and (exact_or_canon or fuzzy_ok):
+                        selected_val.strip().lower() == option_text.strip().lower() or
+                        self.is_tech_match(selected_val, option_text)
+                    ):
                         is_verified = True
                         break
                 await self.page.wait_for_timeout(150)
@@ -1401,7 +1416,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             print(f"  [1/7] Customer: '{customer_name}'")
             customer_xpath = self.rules.get('dispatch_board_customer_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]")
-            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True, allow_fuzzy=False)
+            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True)
             if not success:
                 print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
                 return False
@@ -1663,30 +1678,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception:
                 pass
 
-            try:
-                final_cust = (await self.page.locator(customer_xpath).locator(".vs__selected").text_content() or "").strip()
-                if final_cust:
-                    cust_variants = self.extract_name_variants(customer_name)
-                    cust_canons = set(self.canonical_str(v) for v in cust_variants if self.canonical_str(v))
-                    c_fc = self.canonical_str(final_cust)
-                    c_tc = self.canonical_str(customer_name)
-                    cust_ok = (
-                        not self._has_qualifier_conflict(customer_name, final_cust) and
-                        (self.has_banner_prefix(final_cust) == self.has_banner_prefix(customer_name)) and
-                        (
-                            final_cust == customer_name or
-                            final_cust.lower() == customer_name.strip().lower() or
-                            c_fc == c_tc or
-                            c_fc in cust_canons
-                        )
-                    )
-                    if not cust_ok:
-                        print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Customer '{final_cust}' != expected '{customer_name}'. Aborting save.")
-                        await self.close_create_wo_modal()
-                        return False
-            except Exception:
-                pass
-
             if tech_name:
                 final_tech = (await self.page.locator(tech_xpath).locator(".vs__selected").text_content() or "").strip()
                 clean_f = self.canonical_str(final_tech)
@@ -1702,6 +1693,39 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Primary Tech '{final_tech}' != expected '{tech_name}'. Aborting save.")
                     await self.close_create_wo_modal()
                     return False
+
+            # --- FINAL PRE-SAVE GUARD: CUSTOMER NAME & BANNER/EMOJI VERIFICATION ---
+            final_cust = (await self.page.locator(customer_xpath).locator(".vs__selected, .selected-tag").first.text_content() or "").strip()
+            clean_cust = self.canonical_str(final_cust)
+            clean_target = self.canonical_str(customer_name)
+            cust_name_variants = self.extract_name_variants(customer_name)
+            cust_target_canons = set(self.canonical_str(v) for v in cust_name_variants if self.canonical_str(v))
+
+            target_has_banner = self.has_banner_prefix(customer_name)
+            sel_has_banner = self.has_banner_prefix(final_cust)
+            banner_conflict = (target_has_banner != sel_has_banner)
+
+            is_time_cust = bool(re.search(r'\b\d{1,2}:\d{2}\b', customer_name)) or any(w in ('am', 'pm') for w in re.findall(r'\b[a-zA-Z0-9]+\b', customer_name.lower()))
+            qualifier_conflict = False
+            if is_time_cust:
+                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', customer_name.lower()))
+                s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', final_cust.lower()))
+                qualifier_conflict = ((('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words)))
+
+            name_matched = (
+                final_cust == customer_name or
+                clean_cust == clean_target or
+                clean_cust in cust_target_canons or
+                final_cust in cust_name_variants or
+                any(v.lower() == final_cust.lower() for v in cust_name_variants) or
+                self.is_tech_match(final_cust, customer_name)
+            )
+
+            if banner_conflict or qualifier_conflict or not name_matched:
+                reason = "banner/emoji mismatch" if banner_conflict else ("time qualifier conflict" if qualifier_conflict else "name mismatch")
+                print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Customer '{final_cust}' ({reason}) != expected '{customer_name}' (target_banner={target_has_banner}, sel_banner={sel_has_banner}). Aborting save to prevent invalid work order.")
+                await self.close_create_wo_modal()
+                return False
 
             save_btn = None
             for save_sel in [
@@ -2155,6 +2179,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         truck_assign_headers = [
             h for h in self.template_data.get("truck_assign_headers", [])
             if h.get("active", True)
+            and (h.get("tech_name") or "").strip()
+            and (h.get("tech_name") or "").strip().lower() not in ("unassigned", "none", "clear")
         ]
 
         out_of_service_headers = []
@@ -2209,6 +2235,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             print(f"🚫 Exempted {len(oos_canonical_names)} Out of Service vehicle(s) from standard categories: {', '.join([s['name'] for s in out_of_service_headers])}")
 
         service_needed_headers = []
+        sn_canonical_names = set()
+        sn_asset_numbers = set()
+        sn_map = {}
+
         for sn in self.template_data.get("service_needed_assets", []):
             if not sn.get("active", True):
                 continue
@@ -2217,24 +2247,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 continue
             if self.canonical_str(sn_name) in oos_canonical_names:
                 continue
-            matched_truck = next((
-                t for t in self.template_data.get("truck_assign_headers", [])
-                if (self.canonical_str(t.get("name", "")) == self.canonical_str(sn_name) or
-                    (re.findall(r'\d+', t.get("name", "")) and re.findall(r'\d+', sn_name) and
-                     int(re.findall(r'\d+', t.get("name", ""))[0]) == int(re.findall(r'\d+', sn_name)[0])))
-            ), None)
-            is_assigned_to_tech = bool(
-                matched_truck and
-                matched_truck.get("active", True) and
-                matched_truck.get("tech_name") and
-                matched_truck.get("tech_name").strip().lower() not in ("", "s4", "s3")
-            )
-            if is_assigned_to_tech:
-                continue
-            sn_time = matched_truck.get("start_time") if (matched_truck and matched_truck.get("start_time")) else (sn.get("start_time") or "06:00 AM")
+
+            c_n = self.canonical_str(sn_name)
+            sn_canonical_names.add(c_n)
+            sn_map[c_n] = sn
+            after_pipe = sn_name.split("|")[-1].strip() if "|" in sn_name else sn_name.strip()
+            if re.match(r'^\d{2,4}$', after_pipe):
+                sn_asset_numbers.add(after_pipe)
+                sn_map[after_pipe] = sn
+
             service_needed_headers.append({
                 "name": sn_name,
-                "start_time": sn_time,
+                "start_time": sn.get("start_time") or "3:30 PM",
                 "duration": sn.get("duration") or "1:00",
                 "priority": sn.get("priority") or "[7] 7.12 SERVICE NEEDED",
                 "tech_name": "s4",
@@ -2243,19 +2267,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "active": True,
                 "task": sn.get("task", task),
             })
-
-        sn_canonical_names = set()
-        sn_asset_numbers = set()
-        for sn in self.template_data.get("service_needed_assets", []):
-            if not sn.get("active", True):
-                continue
-            sn_a_name = (sn.get("asset_name") or "").strip()
-            c_n = self.canonical_str(sn_a_name)
-            if c_n:
-                sn_canonical_names.add(c_n)
-            after_pipe = sn_a_name.split("|")[-1].strip() if "|" in sn_a_name else sn_a_name
-            if re.match(r'^\d{2,4}$', after_pipe):
-                sn_asset_numbers.add(after_pipe)
 
         def _is_sn_asset(header_item):
             h_name = header_item.get("name", "")
@@ -2272,26 +2283,32 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         return True
             return False
 
-        if sn_canonical_names:
-            static_headers = [h for h in static_headers if not _is_sn_asset(h)]
-        assigned_truck_names = {
-            self.canonical_str(t.get("name", "")) for t in truck_assign_headers
-            if t.get("active", True) and t.get("tech_name") and t.get("tech_name").strip().lower() not in ("", "s4", "s3")
-        }
-        if assigned_truck_names:
-            static_headers = [
-                h for h in static_headers
-                if not (
-                    self.canonical_str(h.get("name", "")) in assigned_truck_names and
-                    h.get("tech_name", "").lower() in ("s4", "s3", "")
-                )
-            ]
-        if service_needed_headers:
-            print(f"🔧 Configured {len(service_needed_headers)} Service Needed vehicle(s) on s4: {', '.join([s['name'] for s in service_needed_headers])}")
+        # Match truck_assign_headers with service_needed_assets
+        # If a truck is assigned to a technician AND has Service Needed:
+        # Keep it on the technician at their scheduled time, attach note,
+        # AND ALSO create the Service Needed card under '🔧 SERVICE NEEDED' at 3:30 PM!
+        for h in truck_assign_headers:
+            h_name = h.get("name", "")
+            c_h = self.canonical_str(h_name)
+            after_p = h_name.split("|")[-1].strip() if "|" in h_name else h_name.strip()
+            sn_obj = sn_map.get(c_h) or (sn_map.get(after_p) if re.match(r'^\d{2,4}$', after_p) else None)
 
-        special_headers = out_of_service_headers + service_needed_headers
-        if special_headers:
-            static_headers = special_headers + static_headers
+            h_tech = (h.get("tech_name") or "").strip()
+            is_assigned = h.get("active", True) and h_tech and h_tech.lower() not in ("unassigned", "none", "clear")
+
+            if sn_obj and is_assigned:
+                h["service_note"] = sn_obj.get("service_note") or ""
+                h["summary_note"] = sn_obj.get("service_note") or ""
+                h["is_service_needed"] = True
+                print(f"🔧 Truck '{h_name}' on tech '{h_tech}' marked with Service Needed note at {h.get('start_time')}.")
+
+        # Service Needed assets MUST ALWAYS be included under '🔧 SERVICE NEEDED' at 3:30 PM,
+        # whether assigned to a technician or unassigned in static headers!
+        # Do NOT remove regular static headers (e.g. 5:00 AM under PUMP TRUCKS) because
+        # Service Needed assets can still be operated and remain part of the fleet.
+        if service_needed_headers:
+            static_headers = static_headers + service_needed_headers
+            print(f"🔧 Added {len(service_needed_headers)} Service Needed header(s) under 3:30 PM.")
         tech_defaults = self.template_data.get("technician_display_defaults", {})
         tech_jobs = self.template_data.get("tech_jobs", [])
 
@@ -2369,6 +2386,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         if text:
                             board_data = json.loads(text)
                             print("📡 Intercepted Dispatch Board API data successfully.")
+                            try:
+                                from automation.tech_checkin_service import evaluate_dispatch_board_data, ENABLE_QUO_LIVE_SMS
+                                evaluate_dispatch_board_data(board_data, dry_run=not ENABLE_QUO_LIVE_SMS)
+                            except Exception as _eval_err:
+                                print(f"⚠️ Tech Check-in evaluation on intercepted board data error: {_eval_err}")
                     except Exception as e:
                         if "getResponseBody" not in str(e):
                             print(f"⚠️ Failed to parse intercepted board data: {e}")
@@ -2529,13 +2551,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 continue
 
                             if is_service_wo:
-                                sn_already_on_s4 = False
-                                for w in existing_wos.get(canon_h_tech, []):
-                                    if not w.get("is_appointment") and self.check_item_match(w, canon_target, require_customer_match=True, is_service_wo=True):
-                                        sn_already_on_s4 = True
+                                sn_existing_found = False
+                                for c_tk, w_list in existing_wos.items():
+                                    for w in w_list:
+                                        if not w.get("is_appointment") and self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
+                                            w_time = self.normalize_time_key(w.get("time_key", ""))
+                                            norm_target_time = self.normalize_time_key(time_key)
+                                            is_sn_slot = bool(norm_target_time and w_time == norm_target_time)
+                                            if w.get("is_service_needed") or is_sn_slot:
+                                                sn_existing_found = True
+                                                break
+                                    if sn_existing_found:
                                         break
-                                if sn_already_on_s4:
-                                    print(f"⏭️ Service Needed asset '{name}' ALREADY exists on tech '{h_tech}' for {date_str}. Skipping duplicate creation.")
+                                
+                                if sn_existing_found:
+                                    print(f"⏭️ Service Needed card for asset '{name}' ALREADY exists at {time_key} on the board for {date_str}. Skipping 2nd creation.")
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
@@ -2555,18 +2585,17 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     continue
 
                             if not is_service_wo and not is_oos_wo:
-                                asset_already_sn_or_oos = False
+                                asset_already_oos = False
                                 for c_tk, w_list in existing_wos.items():
                                     for w in w_list:
                                         if not w.get("is_appointment") and self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
-                                            if w.get("is_service_needed") or w.get("is_out_of_service"):
-                                                asset_already_sn_or_oos = True
+                                            if w.get("is_out_of_service") and canon_target in oos_canonical_names:
+                                                asset_already_oos = True
                                                 break
-                                    if asset_already_sn_or_oos:
+                                    if asset_already_oos:
                                         break
-                                if asset_already_sn_or_oos:
-                                    print(f"⏭️ Asset '{name}' is ALREADY on the board as Service Needed / Out of Service for {date_str}. Skipping standard static header creation.")
-                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                if asset_already_oos:
+                                    print(f"⏭️ Asset '{name}' is OUT OF SERVICE for {date_str}. Skipping standard static header creation.")
                                     continue
 
                             board_count = 0
@@ -2658,24 +2687,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             start_time = header.get("start_time")
                             duration = header.get("duration")
                             priority = header.get("priority")
-                            h_tech = header.get("tech_name")
+                            h_tech = (header.get("tech_name") or "").strip()
                             h_task = header.get("task", task)
-                            canon_target = self.canonical_str(name)
-                            matched_sn = next((
-                                s for s in self.template_data.get("service_needed_assets", [])
-                                if s.get("active", True) and (
-                                    self.canonical_str(s.get("asset_name", "")) == canon_target or
-                                    (re.findall(r'\d+', s.get("asset_name", "")) and re.findall(r'\d+', name) and
-                                     int(re.findall(r'\d+', s.get("asset_name", ""))[0]) == int(re.findall(r'\d+', name)[0]))
-                                )
-                            ), None)
-                            if matched_sn:
-                                priority = matched_sn.get("priority") or "[7] 7.12 SERVICE NEEDED"
-                                summary_note = matched_sn.get("service_note") or header.get("service_note")
-                            else:
-                                summary_note = header.get("service_note")
+
+                            # Guard: skip if unassigned or no valid technician
+                            if not h_tech or h_tech.lower() in ("unassigned", "none", "clear") or not header.get("active", True):
+                                print(f"⏭️ Skipping unassigned truck '{name}' (no technician assigned) from creation.")
+                                continue
 
                             if not dry_run:
+                                canon_target = self.canonical_str(name)
                                 try:
                                     t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
                                     time_key = t_dt.strftime("%I:%M %p")
@@ -2705,18 +2726,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     for s in self.template_data.get("out_of_service_assets", [])
                                     if s.get("active", True)
                                 )
-                                truck_on_s4_oos = False
                                 if is_oos_asset:
-                                    truck_on_s4_oos = True
-                                else:
-                                    for wo in existing_wos.get("s4", []):
-                                        if not wo.get("is_appointment") and self.check_item_match(wo, canon_target, require_customer_match=True, match_any_status=True):
-                                            if wo.get("is_out_of_service"):
-                                                truck_on_s4_oos = True
-                                                break
-                                if truck_on_s4_oos:
-                                    print(f"⏭️ Truck '{name}' is on 's4' as Out of Service for {date_str}. Skipping creating truck assign header on tech '{h_tech}'.")
-                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
+                                    print(f"⏭️ Truck '{name}' is Out of Service for {date_str}. Skipping creating truck assign header on tech '{h_tech}'.")
                                     continue
 
                                 truck_on_board = False
@@ -2752,7 +2763,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                             break
                                     if tech_already_has_truck:
                                         print(f"⚠️ Tech '{h_tech}' already has a truck assigned on {date_str}. Skipping creating '{name}' to prevent multiple trucks on one technician.")
-                                        self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                         continue
 
                                 board_count = 0
@@ -2807,7 +2817,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     duration=duration,
                                     tech_name=h_tech,
                                     immediate_action=immediate_action,
-                                    summary_note=summary_note
+                                    summary_note=header.get("service_note")
                                 )
                                 if res:
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
@@ -3029,7 +3039,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 pass
                         try:
                             if not hasattr(self, 'asset_scraper') or self.asset_scraper is None:
-                                from asset_assignment_scraper import AssetAssignmentScraper
+                                try:
+                                    from asset_assignment_scraper import AssetAssignmentScraper
+                                except ImportError:
+                                    try:
+                                        from automation.scrapers.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
+                                    except ImportError:
+                                        from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
                                 self.asset_scraper = AssetAssignmentScraper(template_path=self.template_path)
 
                             self.asset_scraper.playwright = self.playwright

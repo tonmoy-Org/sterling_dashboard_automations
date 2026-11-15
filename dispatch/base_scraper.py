@@ -190,34 +190,48 @@ class BaseScraper:
             password_xpath = self.rules.get('password_xpath', '//input[@name="Password" or @name="password" or @id="Password"]')
             login_button_xpath = self.rules.get('login_button_xpath', '//button[@type="submit" or contains(normalize-space(), "Sign In") or contains(normalize-space(), "Login")]')
 
-            current_url = page.url
-            if FIELDEDGE_LOGIN_URL not in current_url:
-                print(f"Navigating to FieldEdge login page: {FIELDEDGE_LOGIN_URL}")
-                await page.goto(FIELDEDGE_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    current_url = page.url
+                    if FIELDEDGE_LOGIN_URL not in current_url or attempt > 0:
+                        print(f"Navigating to FieldEdge login page: {FIELDEDGE_LOGIN_URL} (Attempt {attempt + 1})")
+                        await page.goto(FIELDEDGE_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
 
-            await page.wait_for_selector(username_xpath, state="visible", timeout=30000)
-            await page.fill(username_xpath, self.fieldedge_email)
-            await page.fill(password_xpath, self.fieldedge_password)
+                    await page.wait_for_selector(username_xpath, state="visible", timeout=30000)
+                    await page.fill(username_xpath, self.fieldedge_email)
+                    await page.fill(password_xpath, self.fieldedge_password)
 
-            try:
-                await page.press(password_xpath, "Enter")
-            except Exception as e:
-                print(f"Failed to press Enter to login: {e}")
-                await page.evaluate('''([xpath]) => {
-                    const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-                    if (result.singleNodeValue) result.singleNodeValue.click();
-                }''', [login_button_xpath])
+                    try:
+                        await page.press(password_xpath, "Enter")
+                    except Exception as e:
+                        print(f"Failed to press Enter to login: {e}")
+                        await page.evaluate('''([xpath]) => {
+                            const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                            if (result.singleNodeValue) result.singleNodeValue.click();
+                        }''', [login_button_xpath])
 
-            try:
-                await page.wait_for_url(
-                    lambda url: FIELDEDGE_LOGIN_URL not in url,
-                    timeout=30000
-                )
-            except Exception:
-                await page.wait_for_load_state("domcontentloaded", timeout=30000)
+                    try:
+                        await page.wait_for_url(
+                            lambda url: FIELDEDGE_LOGIN_URL not in url,
+                            timeout=30000
+                        )
+                    except Exception:
+                        await page.wait_for_load_state("domcontentloaded", timeout=30000)
 
-            print("FieldEdge login successful.")
-            _update_fe_status("Connected / Active Session")
+                    print("✅ FieldEdge login successful.")
+                    _update_fe_status("Connected / Active Session")
+                    return
+
+                except Exception as attempt_err:
+                    print(f"⚠️ FieldEdge login attempt {attempt + 1} failed: {attempt_err}")
+                    if attempt < max_retries - 1:
+                        print("🔄 Retrying FieldEdge login in 5 seconds...")
+                        await asyncio.sleep(5)
+                    else:
+                        print("❌ All FieldEdge login attempts failed.")
+                        _update_fe_status(f"Login Failed ({attempt_err})")
+                        raise attempt_err
 
         except Exception as e:
             print(f"FieldEdge login failed: {e}")
