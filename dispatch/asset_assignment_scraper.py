@@ -1735,47 +1735,55 @@ class AssetAssignmentScraper(BaseScraper):
     async def scroll_sidepanel_to_work_order(self):
         """Scroll the sidepanel container down to make Work Order and its details chevron visible."""
         try:
-            # 1. JS scroll: Find every scrollable container and scroll to bottom
+            # 1. First, check if Customer details view is open by mistake; if so, click Back
+            is_cust_open = await self.page.evaluate("""() => {
+                const back = document.querySelector('.back_EKQLl, [class*="back-icon"]');
+                const custCard = document.querySelector('[data-edb-sidepanel-card*="Customer"][data-edb-sidepanel-card*="Details"]');
+                const title = (document.querySelector('.panel-title, .field-title')?.textContent || '').toLowerCase();
+                return !!(back && (custCard || title.includes('customer')));
+            }""")
+            if is_cust_open:
+                back_loc = self.page.locator('.back_EKQLl, [class*="back-icon"]').first
+                if await back_loc.count() > 0 and await back_loc.is_visible():
+                    print("  🔙 Customer details view was open! Clicking Back button to return to main sidepanel...")
+                    await back_loc.click()
+                    await self.page.wait_for_timeout(300)
+
+            # 2. JS scroll: Find Work Order card specifically and scroll it into view
             await self.page.evaluate("""() => {
-                const scrollables = Array.from(document.querySelectorAll('*')).filter(el => {
-                    const style = window.getComputedStyle(el);
-                    const overflowY = style.overflowY || '';
-                    const isScrollable = (overflowY === 'auto' || overflowY === 'scroll');
-                    return isScrollable && el.scrollHeight > el.clientHeight;
-                });
-                for (const el of scrollables) {
-                    el.scrollTop = el.scrollHeight;
-                }
                 const wo = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"]') ||
                            document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz') ||
-                           document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)');
+                           Array.from(document.querySelectorAll('.card_ngkhz')).find(c => {
+                               const title = c.querySelector('.panel-title, .field-title');
+                               const txt = (title ? title.textContent : '').trim().toLowerCase();
+                               return txt === 'work order' && !txt.includes('customer');
+                           });
+
                 if (wo) {
                     wo.scrollIntoView({ behavior: 'instant', block: 'center' });
-                }
-                const chevron = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .details-icon_lgpCm, .details-icon_lgpCm');
-                if (chevron) {
-                    chevron.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    const chevron = wo.querySelector('.details-icon_lgpCm');
+                    if (chevron) {
+                        chevron.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    }
+                } else {
+                    const scrollables = Array.from(document.querySelectorAll('*')).filter(el => {
+                        const style = window.getComputedStyle(el);
+                        const overflowY = style.overflowY || '';
+                        const isScrollable = (overflowY === 'auto' || overflowY === 'scroll');
+                        return isScrollable && el.scrollHeight > el.clientHeight;
+                    });
+                    for (const el of scrollables) {
+                        el.scrollTop = el.scrollHeight;
+                    }
                 }
             }""")
             await self.page.wait_for_timeout(100)
 
-            # 2. Playwright mouse wheel down on sidepanel
-            try:
-                panel = self.page.locator('.custom-scrollbar.container__Gkig, [class*="sidepanel"], .container__Gkig').first
-                if await panel.count() > 0:
-                    box = await panel.bounding_box()
-                    if box:
-                        await self.page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                        await self.page.mouse.wheel(0, 500)
-                        await self.page.wait_for_timeout(100)
-            except Exception:
-                pass
-
-            # 3. Playwright scroll into view for WorkOrder card and Chevron
+            # 3. Playwright scroll strictly for Work Order card and its chevron
             wo_loc = self.page.locator(
-                "[data-edb-sidepanel-card*='WorkOrder'], "
-                ".card_ngkhz:has(.workorder-summary-card_mv9VQ), "
-                ".details-icon_lgpCm"
+                "[data-edb-sidepanel-card*='WorkOrder'] .details-icon_lgpCm, "
+                ".card_ngkhz:has(.workorder-summary-card_mv9VQ) .details-icon_lgpCm, "
+                "//div[contains(@class,'card_ngkhz') and .//div[contains(@class,'panel-title') and normalize-space()='Work Order']]//div[contains(@class,'details-icon_lgpCm')]"
             ).first
             if await wo_loc.count() > 0:
                 try:
@@ -1954,32 +1962,41 @@ class AssetAssignmentScraper(BaseScraper):
                 print("  👉 Clicking Work Order Details arrow button...")
                 details_opened = False
                 for open_attempt in range(5):
+                    # Check if Work Order details view is ALREADY open (strictly ensure it is NOT Customer details)
                     is_details_open = await self.page.evaluate("""() => {
-                        return !!(document.querySelector('.edit-icon_vG0FU') || 
-                                  document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
-                                  document.querySelector('[data-edb-sidepanel-card*="Details"]') ||
-                                  document.querySelector('.workorder-details-card_kiboz') ||
-                                  document.querySelector('.back_EKQLl') ||
-                                  document.querySelector('[class*="back-icon"]'));
+                        const custDetails = document.querySelector('[data-edb-sidepanel-card*="Customer"][data-edb-sidepanel-card*="Details"]');
+                        if (custDetails) return false;
+
+                        const woDetails = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"][data-edb-sidepanel-card*="Details"]') ||
+                                          document.querySelector('.workorder-details-card_kiboz') ||
+                                          document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .edit-icon_vG0FU') ||
+                                          document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .base-icon.edit');
+                        if (woDetails) return true;
+
+                        const editIcon = document.querySelector('.edit-icon_vG0FU, .base-icon.edit.edit-icon_vG0FU');
+                        if (editIcon && editIcon.offsetParent !== null) return true;
+
+                        return false;
                     }""")
                     if is_details_open:
                         details_opened = True
                         print(f"  👉 Work Order details view opened successfully (Attempt {open_attempt + 1})!")
                         break
 
-                    # Scroll down again on every attempt!
+                    # Scroll down to Work Order section again on every attempt!
                     await self.scroll_sidepanel_to_work_order()
 
                     clicked = False
                     try:
+                        # Strictly target the chevron inside Work Order card (NEVER Customer!)
                         chevron_loc = self.page.locator(
                             "[data-edb-sidepanel-card*='WorkOrder'] .details-icon_lgpCm, "
                             ".card_ngkhz:has(.workorder-summary-card_mv9VQ) .details-icon_lgpCm, "
-                            ".header_Ce6MY .details-icon_lgpCm, "
-                            ".details-icon_lgpCm"
+                            "//div[contains(@class,'card_ngkhz') and .//div[contains(@class,'panel-title') and contains(text(),'Work Order')]]//div[contains(@class,'details-icon_lgpCm')], "
+                            "//div[contains(@class,'card_ngkhz') and .//div[contains(text(),'Work Order') and not(contains(text(),'Customer'))]]//div[contains(@class,'details-icon_lgpCm')]"
                         ).first
-                        if await chevron_loc.count() > 0 and await chevron_loc.is_visible():
-                            await chevron_loc.scroll_into_view_if_needed()
+                        if await chevron_loc.count() > 0:
+                            await chevron_loc.scroll_into_view_if_needed(timeout=1500)
                             await self.page.wait_for_timeout(100)
                             await chevron_loc.click(force=True)
                             clicked = True
@@ -1987,28 +2004,44 @@ class AssetAssignmentScraper(BaseScraper):
                         print(f"  ⚠️ Playwright chevron click note: {c_err}")
 
                     if not clicked:
-                        await self.page.evaluate("""() => {
+                        clicked = await self.page.evaluate("""() => {
                             const wo = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"]') ||
-                                       document.querySelector('.card_ngkhz:has(.workorder-summary-card_mv9VQ)') ||
-                                       document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz');
-                            if (!wo) return;
+                                       document.querySelector('.workorder-summary-card_mv9VQ')?.closest('.card_ngkhz') ||
+                                       Array.from(document.querySelectorAll('.card_ngkhz')).find(c => {
+                                           const pt = c.querySelector('.panel-title, .field-title');
+                                           const txt = (pt ? pt.textContent : '').trim().toLowerCase();
+                                           return txt === 'work order' && !txt.includes('customer');
+                                       });
+                            if (!wo) return false;
                             const icon = wo.querySelector('.details-icon_lgpCm') || wo.querySelector('.details-icon_lgpCm svg');
-                            const target = icon || wo.querySelector('.header_Ce6MY') || wo.querySelector('.panel-title');
+                            const target = icon || wo.querySelector('.header_Ce6MY');
                             if (target) {
                                 target.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                                target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                                target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                                 target.click();
+                                return true;
                             }
+                            return false;
                         }""")
 
-                    for _ in range(6):
-                        await self.page.wait_for_timeout(200)
+                    for _ in range(8):
+                        await self.page.wait_for_timeout(250)
                         is_details_open = await self.page.evaluate("""() => {
-                            return !!(document.querySelector('.edit-icon_vG0FU') || 
-                                      document.querySelector('.base-icon.edit.edit-icon_vG0FU') ||
-                                      document.querySelector('[data-edb-sidepanel-card*="Details"]') ||
-                                      document.querySelector('.workorder-details-card_kiboz') ||
-                                      document.querySelector('.back_EKQLl') ||
-                                      document.querySelector('[class*="back-icon"]'));
+                            const custDetails = document.querySelector('[data-edb-sidepanel-card*="Customer"][data-edb-sidepanel-card*="Details"]');
+                            if (custDetails) return false;
+
+                            const woDetails = document.querySelector('[data-edb-sidepanel-card*="WorkOrder"][data-edb-sidepanel-card*="Details"]') ||
+                                              document.querySelector('.workorder-details-card_kiboz') ||
+                                              document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .edit-icon_vG0FU') ||
+                                              document.querySelector('[data-edb-sidepanel-card*="WorkOrder"] .base-icon.edit');
+                            if (woDetails) return true;
+
+                            const editIcon = document.querySelector('.edit-icon_vG0FU, .base-icon.edit.edit-icon_vG0FU');
+                            if (editIcon && editIcon.offsetParent !== null) return true;
+
+                            return false;
                         }""")
                         if is_details_open:
                             details_opened = True
