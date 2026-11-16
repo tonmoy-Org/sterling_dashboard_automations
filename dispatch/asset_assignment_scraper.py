@@ -2445,11 +2445,14 @@ class AssetAssignmentScraper(BaseScraper):
                             const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
                             const cTarget = norm(target);
                             const isSn = target.toUpperCase().includes('SERVICE NEEDED') || target.includes('7.12');
+                            const isExc = target.toUpperCase().includes('EXC');
                             const items = Array.from(document.querySelectorAll('.priority-select ul li, .vs__dropdown-menu li, li.vs__dropdown-option, ul[role="listbox"] li'));
                             for (const item of items) {
                                 const txt = (item.textContent || '').trim();
                                 const cTxt = norm(txt);
-                                if (cTxt === cTarget || (isSn && (txt.includes('7.12') || txt.toUpperCase().includes('SERVICE NEEDED') || cTxt.includes('serviceneeded')))) {
+                                if (cTxt === cTarget || 
+                                    (isSn && (txt.includes('7.12') || txt.toUpperCase().includes('SERVICE NEEDED') || cTxt.includes('serviceneeded'))) ||
+                                    (isExc && (txt.includes('EXC') || cTxt.includes('exc')))) {
                                     item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                                     item.click();
                                     item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -2474,13 +2477,27 @@ class AssetAssignmentScraper(BaseScraper):
                             pass
 
                     # 5. Check if selection succeeded
-                    prio_clicked = await self.page.evaluate("""() => {
+                    prio_clicked = await self.page.evaluate("""(target) => {
                         const vs = document.querySelector('.priority-select') || 
                                    Array.from(document.querySelectorAll('.cell')).find(c => (c.textContent || '').includes('Priority'))?.querySelector('.v-select');
                         const sel = vs ? vs.querySelector('.vs__selected') : null;
-                        const txt = (sel ? sel.textContent : '').toLowerCase();
-                        return txt.includes('7.12') || txt.includes('service needed');
-                    }""")
+                        if (!sel || !sel.textContent.trim()) return false;
+                        const txt = sel.textContent.trim().toLowerCase();
+                        const tNorm = (target || '').toLowerCase();
+                        if (tNorm.includes('7.12') || tNorm.includes('service needed')) {
+                            return txt.includes('7.12') || txt.includes('service needed');
+                        }
+                        if (tNorm.includes('exc')) {
+                            return txt.includes('exc');
+                        }
+                        if (tNorm.includes('ser tr')) {
+                            return txt.includes('ser tr');
+                        }
+                        if (tNorm.includes('pt')) {
+                            return txt.includes('pt');
+                        }
+                        return txt.length > 0;
+                    }""", target_priority)
 
                     print(f"  -> Priority option selected: {'Success' if prio_clicked else 'Option not found'}")
                     await self.page.wait_for_timeout(200)
@@ -3197,6 +3214,91 @@ class AssetAssignmentScraper(BaseScraper):
                             total_reconciled += 1
                     else:
                         print(f"  ⚠️ Could not find card for service-needed asset '{asset_name}' on {normalized_date}.")
+
+            # Static Equipment & Inventory Asset Reconciliation (Excavators, Trailers, Inventory Trucks on s4)
+            static_inventory_items = []
+            for sh in self.template_data.get("static_headers", []):
+                if sh.get("active") is False:
+                    continue
+                sh_name = (sh.get("name") or "").strip()
+                sh_prio = (sh.get("priority") or "").strip()
+                sh_tech = (sh.get("tech_name") or "s4").strip()
+
+                if sh_tech.lower() != "s4":
+                    continue
+                if "[5]" not in sh_prio:
+                    continue
+                if "👥" in sh_name or "laborer" in sh_prio.lower():
+                    continue
+
+                c_sh = self.canonical_str(sh_name)
+                # Skip if asset is currently Out of Service or Service Needed (already handled in Stage 0 or 1)
+                if c_sh in out_of_service_names or any(c_name in c_sh for c_name in out_of_service_names if c_name):
+                    continue
+                if c_sh in service_needed_names or any(c_name in c_sh for c_name in service_needed_names if c_name):
+                    continue
+
+                static_inventory_items.append(sh)
+
+            if static_inventory_items and click_wos:
+                print(f"\n🚜 [Stage 2/3] Checking {len(static_inventory_items)} static equipment/inventory assets on {normalized_date}...")
+                for item_cfg in static_inventory_items:
+                    asset_name = item_cfg.get("name", "")
+                    target_tech = item_cfg.get("tech_name", "s4")
+                    target_time = item_cfg.get("start_time", "")
+                    target_priority = item_cfg.get("priority", "")
+
+                    matching_row = self.find_asset_row(
+                        asset_name,
+                        all_rows,
+                        target_priority=target_priority,
+                        target_time=target_time,
+                        target_tech=target_tech,
+                        is_service_needed=False,
+                        is_out_of_service=False
+                    )
+
+                    if matching_row:
+                        wo_num = matching_row.get("work_order_number", "")
+                        curr_tech = matching_row.get("tech_name", "")
+                        curr_sched = matching_row.get("scheduled_date", "")
+                        curr_prio = matching_row.get("priority_name", "")
+
+                        is_tech_set = not target_tech or self.is_tech_match(curr_tech, target_tech) or (self.canonical_str(curr_tech) == self.canonical_str(target_tech))
+                        is_time_set = not target_time or self.is_time_matching(target_time, curr_sched)
+                        is_prio_set = not target_priority or self.is_priority_match(curr_prio, target_priority)
+
+                        if is_tech_set and is_time_set and is_prio_set:
+                            print(f"  ⏭️ Static asset '{asset_name}' (WO #{wo_num}) matches JSON template (Tech: '{curr_tech}', Time: '{curr_sched}', Priority: '{curr_prio}'). Skipping sidepanel.")
+                            continue
+
+                        reasons = []
+                        if not is_tech_set:
+                            reasons.append(f"tech is '{curr_tech}' (expected '{target_tech}')")
+                        if not is_time_set:
+                            reasons.append(f"time is '{curr_sched}' (expected '{target_time}')")
+                        if not is_prio_set:
+                            reasons.append(f"priority is '{curr_prio}' (expected '{target_priority}')")
+                        reason_str = " & ".join(reasons)
+
+                        print(f"\n  ⚠️ Static asset '{asset_name}' (WO #{wo_num}) mismatch: {reason_str}. Reconciling to JSON template...")
+                        total_checked += 1
+                        updated = await self.update_service_needed_work_order(
+                            work_order_number=wo_num,
+                            asset_name=asset_name,
+                            target_time=target_time,
+                            target_priority=target_priority,
+                            service_note="",
+                            target_tech=target_tech,
+                            current_tech=curr_tech,
+                            current_sched=curr_sched,
+                            current_priority=curr_prio,
+                            stage_label="Static Asset Reconciliation"
+                        )
+                        if updated:
+                            total_reconciled += 1
+                    else:
+                        print(f"  ⚠️ Could not find card for static asset '{asset_name}' on {normalized_date}.")
 
             if truck_headers:
                 print(f"\n🚛 [Stage 2/2] Standard Truck Reconciliation: Found {len(truck_headers)} truck_assign_headers on {normalized_date}:")
