@@ -918,8 +918,10 @@ class AssetAssignmentScraper(BaseScraper):
         if not tech1 or not tech2:
             return False
         import unicodedata, re
-        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech1))).lower()
-        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech2))).lower()
+        t1 = re.sub(r'[\u00d7xX]$', '', str(tech1)).strip()
+        t2 = re.sub(r'[\u00d7xX]$', '', str(tech2)).strip()
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t1)).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t2)).lower()
         if not c1 or not c2:
             return False
         if c1 == c2:
@@ -930,8 +932,8 @@ class AssetAssignmentScraper(BaseScraper):
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
             return True
         # Core technician name matching (strips leading code like 'p6 ', 'b ', 'f2 ', 'p2 '):
-        core1 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', str(tech1)).strip().lower())
-        core2 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', str(tech2)).strip().lower())
+        core1 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', t1).strip().lower())
+        core2 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', t2).strip().lower())
         c_core1 = re.sub(r'[^a-z0-9]', '', core1)
         c_core2 = re.sub(r'[^a-z0-9]', '', core2)
         if c_core1 and c_core2 and c_core1 == c_core2:
