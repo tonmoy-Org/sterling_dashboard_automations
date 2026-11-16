@@ -910,43 +910,78 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         await self.ensure_clean_dispatch_board()
 
-        try:
-            buttons = self.page.locator(xpath)
-            await buttons.first.wait_for(state="attached", timeout=30000)
-            
-            count = await buttons.count()
-            clicked = False
-            for i in range(count):
-                btn = buttons.nth(i)
-                if await btn.is_visible():
-                    await btn.scroll_into_view_if_needed()
-                    await btn.click(force=True)
-                    try:
-                        await self.page.evaluate("(el) => el.click()", await btn.element_handle())
-                    except Exception:
-                        pass
-                    clicked = True
-                    break
-            
-            if not clicked:
-                raise Exception("No visible Create Work Order button found.")
-                
-            customer_xpath = self.rules.get(
+        customer_modal_selectors = [
+            self.rules.get(
                 'dispatch_board_customer_xpath',
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]"
-            )
-            import time
+            ),
+            "#vscreate-wo-customer-select",
+            "#vscreate-wo-customer-select__combobox",
+            "div[id*='vscreate-wo-customer-select']",
+            ".customer-select",
+            ".customer-search-container"
+        ]
+
+        # 1. Quick check: is the Create Work Order modal ALREADY open from a previous step?
+        for cand in customer_modal_selectors:
+            try:
+                m_loc = self.page.locator(cand).first
+                if await m_loc.count() > 0 and await m_loc.is_visible():
+                    return True
+            except Exception:
+                pass
+
+        # 2. Wait for any loading spinners or overlays to clear first
+        try:
+            spinners = self.page.locator(".loading, .spinner, .v-spinner, div[class*='loading']:visible")
+            if await spinners.count() > 0:
+                await spinners.first.wait_for(state="hidden", timeout=5000)
+        except Exception:
+            pass
+
+        btn_candidates = [
+            xpath,
+            "//button[contains(normalize-space(), 'Create Work Order') or contains(normalize-space(), 'Work Order')]",
+            "button:has-text('Create Work Order')",
+            "button:has-text('Work Order')",
+            "button[data-automation-id*='create-wo']",
+            "button[class*='create-wo']"
+        ]
+
+        # 3. Robust polling loop: give FieldEdge up to 10 seconds to finish rendering and make button visible
+        import time
+        start_t = time.time()
+        clicked = False
+
+        while time.time() - start_t < 10:
+            for cand in btn_candidates:
+                try:
+                    btns = self.page.locator(cand)
+                    c = await btns.count()
+                    for i in range(c):
+                        btn = btns.nth(i)
+                        if await btn.is_visible():
+                            await btn.scroll_into_view_if_needed()
+                            try:
+                                await btn.click(timeout=1500)
+                            except Exception:
+                                await self.page.evaluate("(el) => el.click()", await btn.element_handle())
+                            clicked = True
+                            break
+                    if clicked:
+                        break
+                except Exception:
+                    pass
+            if clicked:
+                break
+            await self.page.wait_for_timeout(300)
+
+        # 4. Wait for modal to appear
+        if clicked:
             _modal_start = time.time()
             modal_visible = False
-            while time.time() - _modal_start < 30:
-                for cand in [
-                    customer_xpath,
-                    "#vscreate-wo-customer-select",
-                    "#vscreate-wo-customer-select__combobox",
-                    "div[id*='vscreate-wo-customer-select']",
-                    ".customer-select",
-                    ".customer-search-container"
-                ]:
+            while time.time() - _modal_start < 10:
+                for cand in customer_modal_selectors:
                     try:
                         loc = self.page.locator(cand).first
                         if await loc.count() > 0 and await loc.is_visible():
@@ -958,47 +993,73 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     break
                 await self.page.wait_for_timeout(150)
 
-            if not modal_visible:
-                print("  -> Customer modal element not detected after initial click, attempting JS re-click...")
-                for i in range(count):
-                    btn = buttons.nth(i)
-                    if await btn.is_visible():
-                        try:
-                            await self.page.evaluate("(el) => el.click()", await btn.element_handle())
-                        except Exception:
-                            pass
-                await self.page.wait_for_timeout(1000)
-            return True
-        except Exception as e:
-            print(f"⚠️ Could not locate or click Create Work Order button: {e}. Retrying with fresh dispatch board reload...")
-            try:
-                await self.ensure_clean_dispatch_board(force_reload=True)
-                
-                buttons = self.page.locator(xpath)
-                await buttons.first.wait_for(state="attached", timeout=30000)
-                
-                count = await buttons.count()
-                clicked = False
-                for i in range(count):
-                    btn = buttons.nth(i)
-                    if await btn.is_visible():
-                        await btn.scroll_into_view_if_needed()
-                        await btn.click(force=True)
-                        try:
-                            await self.page.evaluate("(el) => el.click()", await btn.element_handle())
-                        except Exception:
-                            pass
-                        clicked = True
-                        break
-                
-                if not clicked:
-                    raise Exception("No visible Create Work Order button found on retry.")
-                    
-                await self.page.wait_for_timeout(1000)
+            if modal_visible:
                 return True
-            except Exception as retry_err:
-                print(f"❌ Retry also failed: {retry_err}")
+
+            print("  -> Customer modal element not detected after initial click, attempting JS re-click...")
+            for cand in btn_candidates:
+                try:
+                    btns = self.page.locator(cand)
+                    c = await btns.count()
+                    for i in range(c):
+                        btn = btns.nth(i)
+                        if await btn.is_visible():
+                            try:
+                                await self.page.evaluate("(el) => el.click()", await btn.element_handle())
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            await self.page.wait_for_timeout(1000)
+
+            for cand in customer_modal_selectors:
+                try:
+                    loc = self.page.locator(cand).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        return True
+                except Exception:
+                    pass
+
+        # 5. Fallback reload retry if initial attempts failed
+        print("⚠️ Could not locate or open Create Work Order modal within 10s. Retrying with fresh dispatch board reload...")
+        try:
+            await self.ensure_clean_dispatch_board(force_reload=True)
+            await self.page.wait_for_timeout(1000)
+
+            retry_clicked = False
+            retry_start = time.time()
+            while time.time() - retry_start < 10:
+                for cand in btn_candidates:
+                    try:
+                        btns = self.page.locator(cand)
+                        c = await btns.count()
+                        for i in range(c):
+                            btn = btns.nth(i)
+                            if await btn.is_visible():
+                                await btn.scroll_into_view_if_needed()
+                                try:
+                                    await btn.click(timeout=1500)
+                                except Exception:
+                                    await self.page.evaluate("(el) => el.click()", await btn.element_handle())
+                                retry_clicked = True
+                                break
+                        if retry_clicked:
+                            break
+                    except Exception:
+                        pass
+                if retry_clicked:
+                    break
+                await self.page.wait_for_timeout(300)
+
+            if not retry_clicked:
+                print("❌ Retry also failed: No visible Create Work Order button found.")
                 return False
+
+            await self.page.wait_for_timeout(1000)
+            return True
+        except Exception as retry_err:
+            print(f"❌ Retry also failed: {retry_err}")
+            return False
 
     async def close_create_wo_modal(self):
         try:

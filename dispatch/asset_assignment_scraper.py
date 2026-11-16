@@ -784,8 +784,27 @@ class AssetAssignmentScraper(BaseScraper):
             tech = r.get("tech_name", "").strip()
             wo_num = r.get("work_order_number", "").strip()
 
+            c_cust = self.canonical_str(cust)
+
             if tech.lower() in ["s4", "s3", ""]:
-                continue
+                # Only include rows on s4/s3 if they match an active truck in truck_assign_headers that expects a real technician
+                is_assigned_truck = False
+                matched_expected = expected_truck_map.get(c_cust)
+                if not matched_expected and "|" in cust:
+                    after_pipe = cust.split("|")[1].strip()
+                    pipe_nums = re.findall(r'\d+', after_pipe)
+                    if pipe_nums:
+                        for pn in (pipe_nums[0], str(int(pipe_nums[0]))):
+                            if pn in expected_truck_map:
+                                matched_expected = expected_truck_map[pn]
+                                break
+                if matched_expected:
+                    exp_tech = (matched_expected.get("tech_name") or "").strip()
+                    if exp_tech and exp_tech.lower() not in ("s4", "s3", "unassigned", "none", "clear", ""):
+                        is_assigned_truck = True
+
+                if not is_assigned_truck:
+                    continue
 
             if "👥" in cust or "laborer" in cust.lower() or "helper" in cust.lower() or "crew" in cust.lower():
                 continue
@@ -1680,15 +1699,12 @@ class AssetAssignmentScraper(BaseScraper):
                 score += 50
             if tech_match:
                 score += 25
-            else:
-                if is_service_needed or is_out_of_service:
-                    score -= 500
 
             scored.append((score, r))
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        if (is_service_needed or is_out_of_service) and scored[0][0] < 0:
+        if (is_service_needed or is_out_of_service) and scored[0][0] == 0:
             return None
 
         return scored[0][1]
@@ -1709,10 +1725,22 @@ class AssetAssignmentScraper(BaseScraper):
             else:
                 th_24 = th
 
-            times_in_sched = re.findall(r'(\d{1,2}):(\d{2})\s*(am|pm)?', sched_str, re.IGNORECASE)
-            for sh_s, sm, sp in times_in_sched:
+            # If there's a time range like "6:00 AM - 7:00 AM", extract the START time (before the dash)
+            range_parts = sched_str.split('-')
+            start_str = range_parts[0] if range_parts else sched_str
+            times_in_sched = re.findall(r'(\d{1,2}):(\d{2})\s*(am|pm)?', start_str, re.IGNORECASE)
+
+            # If start_str did not have AM/PM (e.g. "6:00 - 7:00 AM"), check if the second part had AM/PM
+            end_p = ''
+            if len(range_parts) > 1:
+                m_end_p = re.search(r'(am|pm)', range_parts[1], re.IGNORECASE)
+                if m_end_p:
+                    end_p = m_end_p.group(1).lower()
+
+            if times_in_sched:
+                sh_s, sm, sp = times_in_sched[0]
                 sh = int(sh_s)
-                sp = (sp or '').lower()
+                sp = (sp or end_p or tp or '').lower()
                 if sp == 'pm' and sh < 12:
                     sh_24 = sh + 12
                 elif sp == 'am' and sh == 12:
@@ -1723,8 +1751,10 @@ class AssetAssignmentScraper(BaseScraper):
                 if tp and sp:
                     if sh == th and sm == tm and sp == tp:
                         return True
+                    return False
                 if sh_24 == th_24 and sm == tm:
                     return True
+                return False
 
         norm_target = re.sub(r'[^0-9a-z]', '', target_time.lower())
         norm_sched = re.sub(r'[^0-9a-z]', '', sched_str.lower())
@@ -3435,7 +3465,7 @@ class AssetAssignmentScraper(BaseScraper):
 
                         if wo_num:
                             curr_sched_table = r.get("scheduled_date", "")
-                            tech_matches = bool(curr_tech_table and expected_tech and self.is_tech_match(curr_tech_table, expected_tech))
+                            tech_matches = bool(curr_tech_table and expected_tech and (self.is_tech_match(curr_tech_table, expected_tech) or self.canonical_str(curr_tech_table) == self.canonical_str(expected_tech)))
 
                             # Check if truck has Service Needed in Dashboard
                             sn_match = None
@@ -3449,73 +3479,77 @@ class AssetAssignmentScraper(BaseScraper):
                             if sn_match:
                                 expected_prio = sn_match.get("priority", "[7] 7.12 SERVICE NEEDED")
                                 expected_note = sn_match.get("service_note", "")
+                                expected_time = sn_match.get("start_time", "3:30 PM")
+                                expected_tech_for_sn = sn_match.get("tech_name")
+                                if expected_tech_for_sn:
+                                    expected_tech = expected_tech_for_sn
                             else:
                                 hdr = self.get_expected_header_for_truck(truck_name)
                                 expected_prio = (hdr.get("priority") if hdr else None) or r.get("priority") or "[5] PT (Asset Assignment)"
                                 expected_note = ""
+                                expected_time = (hdr.get("start_time") if hdr else None) or "06:00 AM"
 
                             curr_prio_table = r.get("priority") or r.get("priority_name", "")
                             prio_matches = self.is_priority_match(curr_prio_table, expected_prio)
+                            time_matches = self.is_time_matching(expected_time, curr_sched_table)
 
-                            if tech_matches:
-                                if prio_matches:
-                                    print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' with matching priority '{curr_prio_table}' at morning slot ({curr_sched_table}). Skipping sidepanel.")
-                                    continue
-                                else:
-                                    print(f"\n[{idx}/{len(truck_headers)}] ⚠️ Truck '{truck_name}' (WO #{wo_num}) is assigned to '{curr_tech_table}' at morning slot ({curr_sched_table}) but priority is '{curr_prio_table}' (expected '{expected_prio}'). Updating Priority & Note...")
-                                    if click_wos:
-                                        total_checked += 1
-                                        updated = await self.update_service_needed_work_order(
-                                            work_order_number=wo_num,
-                                            asset_name=truck_name,
-                                            target_time=r.get("start_time", "06:00 AM"),
-                                            target_priority=expected_prio,
-                                            service_note=expected_note,
-                                            target_tech=expected_tech,
-                                            current_tech=curr_tech_table,
-                                            current_sched=r.get("scheduled_date", ""),
-                                            current_priority=curr_prio_table,
-                                            stage_label="Assigned Truck Priority Reconciliation"
+                            if tech_matches and prio_matches and time_matches:
+                                print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) matches config (Tech: '{curr_tech_table}', Time: '{curr_sched_table}', Priority: '{curr_prio_table}'). Skipping sidepanel.")
+                                continue
+
+                            if not tech_matches:
+                                expected_tech_already_has_it = False
+                                for other_r in truck_headers:
+                                    if other_r.get("work_order_number") != wo_num:
+                                        other_truck = self.canonical_str(other_r.get("name", ""))
+                                        other_tech = other_r.get("tech_name", "")
+                                        if other_truck == self.canonical_str(truck_name) and (self.is_tech_match(other_tech, expected_tech) or self.canonical_str(other_tech) == self.canonical_str(expected_tech)):
+                                            expected_tech_already_has_it = True
+                                            break
+
+                                if expected_tech_already_has_it:
+                                    print(f"[{idx}/{len(truck_headers)}] ℹ️ Truck '{truck_name}' (WO #{wo_num}) is on '{curr_tech_table}', but expected tech '{expected_tech}' ALREADY has '{truck_name}'. Initiating cancellation of duplicate WO...")
+                                    if click_wos and wo_num:
+                                        success = await self.cancel_work_order_via_list(
+                                            wo_number=wo_num,
+                                            reason=f"Duplicate truck '{truck_name}' on '{curr_tech_table}' (expected tech '{expected_tech}' already has it)."
                                         )
-                                        if updated:
+                                        if success:
+                                            print(f"[{idx}/{len(truck_headers)}] 🗑️ Cancelled duplicate truck WO #{wo_num} ({truck_name}) on '{curr_tech_table}'.")
                                             total_reconciled += 1
-                                    continue
-
-                            expected_tech_already_has_it = False
-                            for other_r in truck_headers:
-                                if other_r.get("work_order_number") != wo_num:
-                                    other_truck = self.canonical_str(other_r.get("name", ""))
-                                    other_tech = other_r.get("tech_name", "")
-                                    if other_truck == self.canonical_str(truck_name) and self.is_tech_match(other_tech, expected_tech):
-                                        expected_tech_already_has_it = True
-                                        break
-
-                            if expected_tech_already_has_it:
-                                print(f"[{idx}/{len(truck_headers)}] ℹ️ Truck '{truck_name}' (WO #{wo_num}) is on '{curr_tech_table}', but expected tech '{expected_tech}' ALREADY has '{truck_name}'. Initiating cancellation of duplicate WO...")
-                                if click_wos and wo_num:
-                                    success = await self.cancel_work_order_via_list(
-                                        wo_number=wo_num,
-                                        reason=f"Duplicate truck '{truck_name}' on '{curr_tech_table}' (expected tech '{expected_tech}' already has it)."
-                                    )
-                                    if success:
-                                        print(f"[{idx}/{len(truck_headers)}] 🗑️ Cancelled duplicate truck WO #{wo_num} ({truck_name}) on '{curr_tech_table}'.")
-                                        total_reconciled += 1
-                                        continue
+                                            continue
+                                        else:
+                                            print(f"[{idx}/{len(truck_headers)}] ⚠️ Could not cancel duplicate WO #{wo_num}. Preserving.")
+                                            continue
                                     else:
-                                        print(f"[{idx}/{len(truck_headers)}] ⚠️ Could not cancel duplicate WO #{wo_num}. Preserving.")
                                         continue
-                                else:
-                                    continue
 
-                            total_checked += 1
-                            print(f"\n[{idx}/{len(truck_headers)}] Checking WO #{wo_num} ({truck_name}) on {normalized_date} (Reassigning from '{curr_tech_table}' to expected '{expected_tech}')...")
-                            updated = await self.click_and_reconcile_work_order(
-                                work_order_number=wo_num,
-                                truck_name=truck_name,
-                                expected_tech=expected_tech
-                            )
-                            if updated:
-                                total_reconciled += 1
+                            reasons = []
+                            if not tech_matches:
+                                reasons.append(f"tech '{curr_tech_table}' -> '{expected_tech}'")
+                            if not time_matches:
+                                reasons.append(f"time '{curr_sched_table}' -> '{expected_time}'")
+                            if not prio_matches:
+                                reasons.append(f"priority '{curr_prio_table}' -> '{expected_prio}'")
+                            reason_str = " & ".join(reasons)
+
+                            print(f"\n[{idx}/{len(truck_headers)}] ⚠️ Truck '{truck_name}' (WO #{wo_num}) mismatch: {reason_str}. Reconciling to Dashboard config...")
+                            if click_wos:
+                                total_checked += 1
+                                updated = await self.update_service_needed_work_order(
+                                    work_order_number=wo_num,
+                                    asset_name=truck_name,
+                                    target_time=expected_time,
+                                    target_priority=expected_prio,
+                                    service_note=expected_note,
+                                    target_tech=expected_tech,
+                                    current_tech=curr_tech_table,
+                                    current_sched=curr_sched_table,
+                                    current_priority=curr_prio_table,
+                                    stage_label="Assigned Truck Reconciliation"
+                                )
+                                if updated:
+                                    total_reconciled += 1
             else:
                 print(f"⚠️ No truck_assign_headers found on {normalized_date}.")
 
