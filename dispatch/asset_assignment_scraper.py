@@ -906,7 +906,9 @@ class AssetAssignmentScraper(BaseScraper):
 
     def get_expected_tech_for_truck(self, truck_name: str) -> Optional[str]:
         c_target = self.canonical_str(truck_name)
-        nums_target = re.findall(r'\d+', truck_name) if truck_name else []
+        ident_target = truck_name.split("|")[-1].strip() if "|" in truck_name else truck_name.strip()
+        c_ident_target = self.canonical_str(ident_target)
+
         for h in self.template_data.get("truck_assign_headers", []):
             if not h.get("active", True):
                 continue
@@ -915,16 +917,20 @@ class AssetAssignmentScraper(BaseScraper):
                 continue
             h_name = h.get("name", "")
             c_hname = self.canonical_str(h_name)
-            if c_hname == c_target:
+            ident_h = h_name.split("|")[-1].strip() if "|" in h_name else h_name.strip()
+            c_ident_h = self.canonical_str(ident_h)
+
+            if c_hname == c_target or c_ident_h == c_ident_target:
                 return tech
-            nums_h = re.findall(r'\d+', h_name) if h_name else []
-            if nums_target and nums_h and int(nums_target[0]) == int(nums_h[0]):
+            if c_ident_target.isdigit() and c_ident_h.isdigit() and int(c_ident_target) == int(c_ident_h):
                 return tech
         return None
 
     def get_expected_header_for_truck(self, truck_name: str) -> Optional[Dict[str, Any]]:
         c_target = self.canonical_str(truck_name)
-        nums_target = re.findall(r'\d+', truck_name) if truck_name else []
+        ident_target = truck_name.split("|")[-1].strip() if "|" in truck_name else truck_name.strip()
+        c_ident_target = self.canonical_str(ident_target)
+
         for h in self.template_data.get("truck_assign_headers", []):
             if not h.get("active", True):
                 continue
@@ -933,10 +939,12 @@ class AssetAssignmentScraper(BaseScraper):
                 continue
             h_name = h.get("name", "")
             c_hname = self.canonical_str(h_name)
-            if c_hname == c_target:
+            ident_h = h_name.split("|")[-1].strip() if "|" in h_name else h_name.strip()
+            c_ident_h = self.canonical_str(ident_h)
+
+            if c_hname == c_target or c_ident_h == c_ident_target:
                 return h
-            nums_h = re.findall(r'\d+', h_name) if h_name else []
-            if nums_target and nums_h and int(nums_target[0]) == int(nums_h[0]):
+            if c_ident_target.isdigit() and c_ident_h.isdigit() and int(c_ident_target) == int(c_ident_h):
                 return h
         return None
 
@@ -953,21 +961,24 @@ class AssetAssignmentScraper(BaseScraper):
 
     def is_item_turned_off_in_dashboard(self, item_name: str, tech_name: str = "") -> bool:
         c_item = self.canonical_str(item_name)
-        nums_item = re.findall(r'\d+', item_name) if item_name else []
+        ident_item = item_name.split("|")[-1].strip() if "|" in item_name else item_name.strip()
+        c_ident_item = self.canonical_str(ident_item)
 
         for oos in self.template_data.get("out_of_service_assets", []):
             if oos.get("active", True):
                 oos_name = oos.get("asset_name", "")
                 c_oos = self.canonical_str(oos_name)
-                nums_oos = re.findall(r'\d+', oos_name) if oos_name else []
-                if c_oos == c_item or (nums_item and nums_oos and int(nums_item[0]) == int(nums_oos[0])):
+                ident_oos = oos_name.split("|")[-1].strip() if "|" in oos_name else oos_name.strip()
+                c_ident_oos = self.canonical_str(ident_oos)
+                if c_oos == c_item or c_ident_oos == c_ident_item or (c_ident_item.isdigit() and c_ident_oos.isdigit() and int(c_ident_item) == int(c_ident_oos)):
                     return True
 
         for h in self.template_data.get("truck_assign_headers", []):
             h_name = h.get("name", "")
             c_hname = self.canonical_str(h_name)
-            nums_h = re.findall(r'\d+', h_name) if h_name else []
-            matches = (c_hname == c_item) or (nums_item and nums_h and int(nums_item[0]) == int(nums_h[0]))
+            ident_h = h_name.split("|")[-1].strip() if "|" in h_name else h_name.strip()
+            c_ident_h = self.canonical_str(ident_h)
+            matches = (c_hname == c_item) or (c_ident_h == c_ident_item) or (c_ident_item.isdigit() and c_ident_h.isdigit() and int(c_ident_item) == int(c_ident_h))
             if matches:
                 h_tech = (h.get("tech_name") or "").strip()
                 if h.get("active") is False or not h_tech or h_tech.lower() in ("unassigned", "none", "clear"):
@@ -1627,19 +1638,18 @@ class AssetAssignmentScraper(BaseScraper):
 
             c_cust = self.canonical_str(cust)
 
+            # Strict exact name and vehicle identifier matching (prevent loose digit overlaps!)
             is_match = False
             if c_target and c_target == c_cust:
                 is_match = True
             else:
                 ident_cust = cust.split("|")[-1].strip() if "|" in cust else cust.strip()
                 c_ident_cust = self.canonical_str(ident_cust)
-                cust_digits = re.findall(r'\d+', ident_cust)
 
                 if c_ident_target and c_ident_target == c_ident_cust:
                     is_match = True
-                elif not is_target_exc and not ("🏗️" in cust or "exc" in cust.lower()):
-                    if cust_digits and targ_digits and int(cust_digits[-1]) == int(targ_digits[-1]):
-                        is_match = True
+                elif c_ident_target.isdigit() and c_ident_cust.isdigit() and int(c_ident_target) == int(c_ident_cust):
+                    is_match = True
 
             if is_match:
                 matched_rows.append(r)
