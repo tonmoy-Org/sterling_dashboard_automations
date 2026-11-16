@@ -461,20 +461,18 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
         if c1 == c2:
             return True
-        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p4" matching "p4jacob"):
+        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p6" matching "p6kyle"):
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c1) and c2.startswith(c1):
             return True
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
             return True
-        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
-        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
-        for w1 in words1:
-            for w2 in words2:
-                if w1 == w2 or (len(w1) >= 4 and w1 in w2) or (len(w2) >= 4 and w2 in w1):
-                    return True
-        if len(c1) >= 4 and len(c2) >= 4:
-            if c1 in c2 or c2 in c1:
-                return True
+        # Core technician name matching (strips leading code like 'p6 ', 'b ', 'f2 ', 'p2 '):
+        core1 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', str(tech1)).strip().lower())
+        core2 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', str(tech2)).strip().lower())
+        c_core1 = re.sub(r'[^a-z0-9]', '', core1)
+        c_core2 = re.sub(r'[^a-z0-9]', '', core2)
+        if c_core1 and c_core2 and c_core1 == c_core2:
+            return True
         return False
 
     @staticmethod
@@ -1182,7 +1180,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
         return ('|' in t) or bool(cls._BANNER_EMOJI_REGEX.search(str(t)))
 
-    async def select_dropdown_option(self, dropdown_selector: str, option_text: str, press_enter: bool = True) -> bool:
+    async def select_dropdown_option(
+        self,
+        dropdown_selector: str,
+        option_text: str,
+        press_enter: bool = True,
+        is_customer: bool = False,
+        is_tech: bool = False
+    ) -> bool:
         if not option_text:
             return True
 
@@ -1236,7 +1241,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     sel_has_banner = self.has_banner_prefix(sel_text)
                     banner_conflict = (target_has_banner != sel_has_banner)
 
-                    if not qualifier_conflict and not banner_conflict and (c_sel in target_canons or c_sel == c_target or self.is_tech_match(sel_text, option_text)):
+                    is_initial_match = False
+                    if not qualifier_conflict and not banner_conflict:
+                        if sel_text.strip().lower() == option_text.strip().lower() or c_sel == c_target or c_sel in target_canons:
+                            is_initial_match = True
+                        elif self.has_banner_prefix(option_text) and self.is_same_equipment(sel_text, option_text):
+                            is_initial_match = True
+                        elif is_tech and self.is_tech_match(sel_text, option_text):
+                            is_initial_match = True
+
+                    if is_initial_match:
                         print(f"  -> Selected '{sel_text}' via Enter directly.")
                         return True
                     else:
@@ -1248,6 +1262,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         else:
                             await search_input.click(force=True)
                         await self.page.wait_for_timeout(200)
+                        try:
+                            await search_input.focus()
+                            await search_input.fill("")
+                            await search_input.fill(type_text)
+                            await self.page.wait_for_timeout(250)
+                        except Exception:
+                            pass
 
                 try:
                     dyn_opts = self.page.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
@@ -1368,10 +1389,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             m_core = re.sub(r'^[a-z0-9]\s*', '', target_norm)
             core_name = m_core if len(m_core) >= 3 else target_norm
 
-            async def _exact_match_option(opt_el, strict_banner: bool = True) -> bool:
-                if not await opt_el.is_visible():
-                    return False
-                raw_text = await opt_el.text_content()
+            async def _exact_match_option(opt_el) -> bool:
+                raw_text = (await opt_el.text_content() or "").strip()
                 if not raw_text:
                     return False
                 s_raw = raw_text.strip()
@@ -1386,11 +1405,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
                         return False
 
-                if strict_banner and (self.has_banner_prefix(s_raw) != target_has_banner):
-                    return False
+                sel_has_banner = self.has_banner_prefix(s_raw) or self.has_banner_prefix(first_line)
+                if target_has_banner != sel_has_banner:
+                    if not self.is_same_equipment(raw_target, s_raw):
+                        return False
 
+                if self.is_same_equipment(raw_target, s_raw) or self.is_same_equipment(raw_target, first_line):
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
+
+                if is_tech:
+                    if self.is_tech_match(s_raw, option_text) or self.is_tech_match(first_line, option_text):
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
+
+                # Strict exact text match (on first line or full option text - NO partial match):
                 if (
-                    s_raw == raw_target or
+                    s_raw.lower() == raw_target.lower() or
+                    first_line.lower() == raw_target.lower() or
                     first_line in name_variants or
                     s_raw in name_variants or
                     norm_first == target_norm or
@@ -1398,144 +1432,85 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     c_first == target_canon or
                     c_raw == target_canon or
                     c_first in target_canons or
-                    c_raw in target_canons or
-                    self.is_tech_match(s_raw, option_text) or
-                    self.is_tech_match(first_line, option_text)
+                    c_raw in target_canons
                 ):
                     await opt_el.scroll_into_view_if_needed()
                     await opt_el.click(force=True)
                     return True
-                return False
-
-            async def _fuzzy_match_option(opt_el, strict_banner: bool = True) -> bool:
-                if not await opt_el.is_visible():
-                    return False
-                raw_text = await opt_el.text_content()
-                if not raw_text:
-                    return False
-                s_raw = raw_text.strip()
-                if s_raw == raw_target:
-                    return False
-                first_line = [l.strip() for l in s_raw.splitlines() if l.strip()][0] if s_raw else ""
-                norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
-                norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
-                c_raw = self.canonical_str(s_raw)
-                c_first = self.canonical_str(first_line)
-
-                if is_time_target:
-                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                    o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', s_raw.lower()))
-                    if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
-                        return False
-
-                if strict_banner and (self.has_banner_prefix(s_raw) != target_has_banner):
-                    return False
-
-                if norm_raw == target_norm or norm_raw == clean_core.lower() or norm_first in target_norms:
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                if (c_first and c_first in target_canons) or (c_raw and c_raw in target_canons):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                if target_canon and (target_canon == c_raw or target_canon == c_first or self.canonical_str(clean_core) in (c_raw, c_first)):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                if self.is_tech_match(s_raw, option_text) or self.is_tech_match(s_raw, clean_search) or any(self.is_tech_match(s_raw, v) for v in name_variants):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                is_target_exc = ("🏗️" in option_text or "u-40" in option_text.lower() or "u-17" in option_text.lower() or "exc" in option_text.lower())
-                is_raw_exc = ("🏗️" in s_raw or "u-40" in s_raw.lower() or "u-17" in s_raw.lower() or "exc" in s_raw.lower())
-                if is_target_exc != is_raw_exc:
-                    return False
-
-                is_target_pump = ("🚛" in option_text or "pump" in option_text.lower())
-                is_raw_serv = ("🛻" in s_raw or "service" in s_raw.lower())
-                if is_target_pump and is_raw_serv:
-                    return False
-
-                is_target_serv = ("🛻" in option_text or "service" in option_text.lower())
-                is_raw_pump = ("🚛" in s_raw or "pump" in s_raw.lower())
-                if is_target_serv and is_raw_pump:
-                    return False
-
-                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                if len(target_norm) >= 4 and len(norm_raw) >= 4 and not any(w in ('shop', 'am', 'pm') for w in t_words):
-                    if target_norm in norm_raw or norm_raw in target_norm:
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
-                        return True
-
-                if self.is_same_equipment(option_text, s_raw):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
 
                 return False
 
-            async def _scan_options(check_fn, opt_count) -> bool:
-                for i in range(opt_count):
-                    if await check_fn(options.nth(i)):
-                        return True
-                return False
+            # 1. Scan currently loaded options for exact match:
+            for idx_opt in range(count):
+                if await _exact_match_option(options.nth(idx_opt)):
+                    clicked = True
+                    break
 
-            # Strict banner/emoji matching (exact, then fuzzy). Lenient fallback is strictly disabled to prevent emoji/plain mismatch.
-            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count)
-            if not clicked:
-                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count)
-
+            # 2. If not clicked, scroll down the dropdown menu container to search all items (down to bottom):
             if not clicked and count > 0:
                 try:
                     menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
                     if await menu_container.count() > 0:
-                        for scroll_step in range(3):
-                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
-                            await self.page.wait_for_timeout(150)
+                        for scroll_step in range(6):
+                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 350; }""", await menu_container.element_handle())
+                            await self.page.wait_for_timeout(200)
                             count_now = await options.count()
-                            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count_now)
-                            if not clicked:
-                                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count_now)
+                            for idx_opt in range(count_now):
+                                if await _exact_match_option(options.nth(idx_opt)):
+                                    clicked = True
+                                    break
                             if clicked:
                                 break
                 except Exception:
                     pass
 
-            if not clicked:
-                if press_enter:
-                    selected_check = dropdown.locator(".vs__selected, .selected-tag").first
-                    if await selected_check.count() > 0 and await selected_check.is_visible():
-                        sel_val = (await selected_check.text_content() or "").strip()
-                        c_sel = self.canonical_str(sel_val)
+            # 3. For customer selection, strictly ABORT if no exact match was found (NEVER partial match another customer):
+            if not clicked and is_customer:
+                print(f"❌ Could not find exact match for Customer '{option_text}' in search results. Aborting to prevent wrong customer assignment.")
+                return False
+
+            # 4. Fallback for non-customer dropdowns only (e.g. Task, Priority):
+            if not clicked and not is_customer and not is_tech:
+                async def _fuzzy_match_option(opt_el) -> bool:
+                    raw_text = (await opt_el.text_content() or "").strip()
+                    if not raw_text:
+                        return False
+                    first_line = [l.strip() for l in raw_text.splitlines() if l.strip()][0] if raw_text else ""
+                    norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
+                    c_first = self.canonical_str(first_line)
+                    c_raw = self.canonical_str(raw_text)
+
+                    if is_time_target:
                         t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                        s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', sel_val.lower()))
-                        banner_ok = (self.has_banner_prefix(sel_val) == target_has_banner)
-                        if banner_ok and (('am' in t_words) == ('am' in s_words) and ('pm' in t_words) == ('pm' in s_words)) and (c_sel == target_canon or self.is_tech_match(sel_val, option_text)):
-                            return True
-                    if await options.count() > 0:
-                        for idx_opt in range(await options.count()):
-                            opt_cand = options.nth(idx_opt)
-                            if await opt_cand.is_visible():
-                                f_raw = (await opt_cand.text_content() or "").strip()
-                                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                                f_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', f_raw.lower()))
-                                time_ok = not is_time_target or ((('am' in t_words) == ('am' in f_words)) and (('pm' in t_words) == ('pm' in f_words)))
-                                banner_ok = (self.has_banner_prefix(f_raw) == target_has_banner)
-                                c_f = self.canonical_str(f_raw)
-                                if time_ok and banner_ok and (c_f in target_canons or c_f == target_canon or self.is_tech_match(f_raw, option_text)):
-                                    await opt_cand.click(force=True)
-                                    return True
-                    print(f"  -> Press-Enter fallback: No valid option was selected for '{option_text}'. Aborting to prevent misassignment.")
+                        o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_text.lower()))
+                        if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
+                            return False
+
+                    if (c_first and c_first in target_canons) or (c_raw and c_raw in target_canons):
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
+
+                    if target_canon and (target_canon == c_raw or target_canon == c_first):
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
+
+                    if self.is_same_equipment(option_text, raw_text):
+                        await opt_el.scroll_into_view_if_needed()
+                        await opt_el.click(force=True)
+                        return True
+
                     return False
-                else:
-                    print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
-                    return False
+
+                for idx_opt in range(await options.count()):
+                    if await _fuzzy_match_option(options.nth(idx_opt)):
+                        clicked = True
+                        break
+
+            if not clicked:
+                print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
+                return False
 
             verify_budget = 8.0 if press_enter else 2.5
             verify_start = time.time()
@@ -1553,17 +1528,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     qualifier_conflict = is_time_target and ((('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words)))
                     sel_has_banner = self.has_banner_prefix(selected_val)
                     banner_conflict = (target_has_banner != sel_has_banner)
-                    if not qualifier_conflict and not banner_conflict and (
-                        selected_val == option_text or
-                        clean_sel == clean_opt or
-                        clean_sel in target_canons or
-                        selected_val.strip() in name_variants or
-                        any(v.lower() == selected_val.strip().lower() for v in name_variants) or
-                        selected_val.strip().lower() == option_text.strip().lower() or
-                        self.is_tech_match(selected_val, option_text)
-                    ):
-                        is_verified = True
-                        break
+                    if not qualifier_conflict and not banner_conflict:
+                        if (
+                            selected_val == option_text or
+                            clean_sel == clean_opt or
+                            clean_sel in target_canons or
+                            selected_val.strip() in name_variants or
+                            any(v.lower() == selected_val.strip().lower() for v in name_variants) or
+                            selected_val.strip().lower() == option_text.strip().lower() or
+                            self.is_same_equipment(selected_val, option_text) or
+                            (is_tech and self.is_tech_match(selected_val, option_text))
+                        ):
+                            is_verified = True
+                            break
                 await self.page.wait_for_timeout(150)
 
             if not is_verified:
@@ -1603,7 +1580,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             print(f"  [1/7] Customer: '{customer_name}'")
             customer_xpath = self.rules.get('dispatch_board_customer_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]")
-            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True)
+            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True, is_customer=True)
             if not success:
                 print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
                 return False
@@ -1695,7 +1672,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     'dispatch_board_tech_name_xpath',
                     "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Primary Tech')]/following::div[contains(@class,'v-select')][1]"
                 )
-                tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True)
+                tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True, is_tech=True)
                 if not tech_selected:
                     print(f"❌ Failed to match and select expected technician '{tech_name}'. Aborting work order to prevent wrong/duplicate assignment.")
                     await self.close_create_wo_modal()
@@ -1905,7 +1882,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 clean_cust in cust_target_canons or
                 final_cust in cust_name_variants or
                 any(v.lower() == final_cust.lower() for v in cust_name_variants) or
-                self.is_tech_match(final_cust, customer_name)
+                self.is_same_equipment(final_cust, customer_name)
             )
 
             if banner_conflict or qualifier_conflict or not name_matched:

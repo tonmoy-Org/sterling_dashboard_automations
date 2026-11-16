@@ -924,23 +924,18 @@ class AssetAssignmentScraper(BaseScraper):
             return False
         if c1 == c2:
             return True
-        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p4" matching "p4jacob"):
+        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p6" matching "p6kyle"):
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c1) and c2.startswith(c1):
             return True
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
             return True
-        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
-        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
-
-        for w1 in words1:
-            for w2 in words2:
-                if w1 == w2 or (len(w1) >= 4 and w1 in w2) or (len(w2) >= 4 and w2 in w1):
-                    return True
-
-        if len(c1) >= 4 and len(c2) >= 4:
-            if c1 in c2 or c2 in c1:
-                return True
-
+        # Core technician name matching (strips leading code like 'p6 ', 'b ', 'f2 ', 'p2 '):
+        core1 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', str(tech1)).strip().lower())
+        core2 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', str(tech2)).strip().lower())
+        c_core1 = re.sub(r'[^a-z0-9]', '', core1)
+        c_core2 = re.sub(r'[^a-z0-9]', '', core2)
+        if c_core1 and c_core2 and c_core1 == c_core2:
+            return True
         return False
 
     @staticmethod
