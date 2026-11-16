@@ -475,9 +475,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return True
         return False
 
-    @staticmethod
-    def is_same_equipment(name1: str, name2: str) -> bool:
+    @classmethod
+    def is_same_equipment(cls, name1: str, name2: str) -> bool:
         if not name1 or not name2:
+            return False
+        if cls.has_banner_prefix(name1) != cls.has_banner_prefix(name2):
             return False
         import unicodedata, re
         s1 = unicodedata.normalize('NFKD', str(name1)).strip()
@@ -498,7 +500,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         cat1 = "pump" if is_pump1 else ("serv" if is_serv1 else ("exc" if is_exc1 else ("trai" if is_trai1 else ("supp" if is_supp1 else None))))
         cat2 = "pump" if is_pump2 else ("serv" if is_serv2 else ("exc" if is_exc2 else ("trai" if is_trai2 else ("supp" if is_supp2 else None))))
 
-        if cat1 and cat2 and cat1 != cat2:
+        if cat1 != cat2:
             return False
 
         c1 = re.sub(r'[^a-zA-Z0-9]', '', s1).lower()
@@ -518,7 +520,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return True
 
         if cid1.isdigit() and cid2.isdigit() and int(cid1) == int(cid2):
-            if cat1 == cat2 or (not cat1 and not cat2):
+            if cat1 == cat2 and cat1 is not None:
                 return True
 
         return False
@@ -1407,8 +1409,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 sel_has_banner = self.has_banner_prefix(s_raw) or self.has_banner_prefix(first_line)
                 if target_has_banner != sel_has_banner:
-                    if not self.is_same_equipment(raw_target, s_raw):
-                        return False
+                    return False
 
                 if self.is_same_equipment(raw_target, s_raw) or self.is_same_equipment(raw_target, first_line):
                     await opt_el.scroll_into_view_if_needed()
@@ -1451,9 +1452,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 try:
                     menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
                     if await menu_container.count() > 0:
-                        for scroll_step in range(6):
-                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 350; }""", await menu_container.element_handle())
-                            await self.page.wait_for_timeout(200)
+                        for scroll_step in range(15):
+                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
+                            await self.page.wait_for_timeout(150)
                             count_now = await options.count()
                             for idx_opt in range(count_now):
                                 if await _exact_match_option(options.nth(idx_opt)):
@@ -1463,6 +1464,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 break
                 except Exception:
                     pass
+
+                if not clicked:
+                    try:
+                        for _ in range(12):
+                            await search_input.press("PageDown")
+                            await self.page.wait_for_timeout(100)
+                            count_now = await options.count()
+                            for idx_opt in range(count_now):
+                                if await _exact_match_option(options.nth(idx_opt)):
+                                    clicked = True
+                                    break
+                            if clicked:
+                                break
+                    except Exception:
+                        pass
 
             # 3. For customer selection, strictly ABORT if no exact match was found (NEVER partial match another customer):
             if not clicked and is_customer:

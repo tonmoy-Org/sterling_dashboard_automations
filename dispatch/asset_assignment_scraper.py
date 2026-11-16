@@ -938,9 +938,25 @@ class AssetAssignmentScraper(BaseScraper):
             return True
         return False
 
-    @staticmethod
-    def is_same_equipment(name1: str, name2: str) -> bool:
+    _BANNER_EMOJI_REGEX = re.compile(
+        r'['
+        r'\u203C-\u3299'
+        r'\U0001F000-\U0001F9FF'
+        r'\U0001FA00-\U0001FAFF'
+        r']+'
+    )
+
+    @classmethod
+    def has_banner_prefix(cls, t: str) -> bool:
+        if not t:
+            return False
+        return ('|' in t) or bool(cls._BANNER_EMOJI_REGEX.search(str(t)))
+
+    @classmethod
+    def is_same_equipment(cls, name1: str, name2: str) -> bool:
         if not name1 or not name2:
+            return False
+        if cls.has_banner_prefix(name1) != cls.has_banner_prefix(name2):
             return False
         import unicodedata, re
         s1 = unicodedata.normalize('NFKD', str(name1)).strip()
@@ -961,7 +977,7 @@ class AssetAssignmentScraper(BaseScraper):
         cat1 = "pump" if is_pump1 else ("serv" if is_serv1 else ("exc" if is_exc1 else ("trai" if is_trai1 else ("supp" if is_supp1 else None))))
         cat2 = "pump" if is_pump2 else ("serv" if is_serv2 else ("exc" if is_exc2 else ("trai" if is_trai2 else ("supp" if is_supp2 else None))))
 
-        if cat1 and cat2 and cat1 != cat2:
+        if cat1 != cat2:
             return False
 
         c1 = re.sub(r'[^a-zA-Z0-9]', '', s1).lower()
@@ -981,7 +997,7 @@ class AssetAssignmentScraper(BaseScraper):
             return True
 
         if cid1.isdigit() and cid2.isdigit() and int(cid1) == int(cid2):
-            if cat1 == cat2 or (not cat1 and not cat2):
+            if cat1 == cat2 and cat1 is not None:
                 return True
 
         return False
