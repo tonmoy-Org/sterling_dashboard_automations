@@ -1832,35 +1832,59 @@ class AssetAssignmentScraper(BaseScraper):
             await self.page.wait_for_timeout(300)
 
             sidepanel_info = await self.page.evaluate("""() => {
-                const card = document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                             document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
-                             document.querySelector('.card_ngkhz');
+                const card = Array.from(document.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]')).find(c => {
+                    const pt = c.querySelector('.panel-title, .field-title');
+                    return pt && (pt.textContent || '').trim().toLowerCase() === 'assignment';
+                }) || document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                      document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
+                      document.querySelector('.card_ngkhz');
                 if (!card) return { time: '', tech: '' };
                 let time = '';
                 let tech = '';
+
+                // Extract Tech:
                 const techEl = card.querySelector('.assigned-tech_omVmC .display-name_jfslj') || 
                                card.querySelector('.assigned-tech_omVmC') ||
-                               card.querySelector('.display-name_jfslj');
+                               card.querySelector('.display-name_jfslj') ||
+                               card.querySelector('.cell-pos-2x1 .panel-content');
                 if (techEl && techEl.textContent.trim()) {
                     tech = techEl.textContent.trim();
                 }
-                const cells = Array.from(card.querySelectorAll('.cell'));
-                for (const cell of cells) {
-                    const title = cell.querySelector('.field-title');
-                    if (title) {
-                        const t = title.textContent.toLowerCase();
-                        if (t.includes('scheduled time') || t.includes('time')) {
-                            const val = cell.querySelector('.panel-content, div[name="Scheduled Time"], input, div');
-                            if (val) time = (val.value || val.textContent || '').trim();
-                        }
-                        if (!tech && t.includes('assigned tech')) {
-                            const val = cell.querySelector('.panel-content, .display-name_jfslj');
-                            if (val) tech = (val.value || val.textContent || '').trim();
+
+                // Extract Time: Look specifically at .cell-pos-3x1 (.panel-content)
+                const timeCell = card.querySelector('.cell-pos-3x1') ||
+                                 Array.from(card.querySelectorAll('.cell')).find(c => {
+                                     const t = (c.querySelector('.field-title.caps, .caps, .field-title')?.textContent || '').toLowerCase();
+                                     return t.includes('scheduled time');
+                                 });
+                if (timeCell) {
+                    const valEl = timeCell.querySelector('.panel-content') || timeCell.querySelector('input');
+                    if (valEl) {
+                        time = (valEl.value || valEl.textContent || '').trim();
+                    }
+                }
+
+                if (!time) {
+                    const cells = Array.from(card.querySelectorAll('.cell'));
+                    for (const cell of cells) {
+                        const title = cell.querySelector('.field-title.caps, .caps, .field-title');
+                        if (title) {
+                            const t = title.textContent.toLowerCase();
+                            if (t.includes('scheduled time') || t.includes('time')) {
+                                const val = cell.querySelector('.panel-content');
+                                if (val) time = (val.value || val.textContent || '').trim();
+                            }
+                            if (!tech && t.includes('assigned tech')) {
+                                const val = cell.querySelector('.panel-content, .display-name_jfslj');
+                                if (val) tech = (val.value || val.textContent || '').trim();
+                            }
                         }
                     }
                 }
-                const inp = card.querySelector('div[name="Scheduled Time"] input, .timepicker-container input');
+
+                const inp = card.querySelector('.cell-pos-3x1 input, div[name="Scheduled Time"] input, .timepicker-container input');
                 if (inp && inp.value) time = inp.value.trim();
+
                 return { time, tech };
             }""")
             sched_to_check = sidepanel_info.get("time") or current_sched
@@ -2017,10 +2041,13 @@ class AssetAssignmentScraper(BaseScraper):
                             break
                         try:
                             pw_btn = self.page.locator(
+                                '.card_ngkhz:has(.panel-title:has-text("Assignment")) .header_IVnfD .base-icon.edit, '
+                                '.card_ngkhz:has(.panel-title:has-text("Assignment")) .base-icon.edit.default, '
+                                '.card_ngkhz:has(.panel-title:has-text("Assignment")) .base-icon.edit, '
                                 '[data-edb-sidepanel-card*="AssignmentCard"] .header_IVnfD .base-icon.edit, '
                                 '[data-edb-sidepanel-card*="Assignment"] .base-icon.edit.default, '
                                 '[data-edb-sidepanel-card*="Assignment"] .header_IVnfD .base-icon.edit, '
-                                '.card_ngkhz:has(.panel-title:has-text("Assignment")) .base-icon.edit'
+                                '.card_ngkhz:has(.field-title:has-text("Assignment")) .base-icon.edit'
                             ).first
                             if await pw_btn.count() > 0 and await pw_btn.is_visible():
                                 await pw_btn.click(force=True)
@@ -2046,12 +2073,14 @@ class AssetAssignmentScraper(BaseScraper):
                 if target_time and need_time_change:
                     print(f"  ⏰ Setting scheduled time to '{target_time}'...")
                     time_input_loc = self.page.locator(
+                        '.card_ngkhz.edit-mode-style_ABe0v .cell-pos-3x1 input, '
+                        '.cell-pos-3x1 input, '
+                        '.cell:has(.field-title:has-text("scheduled time")) input, '
                         '.card_ngkhz.edit-mode-style_ABe0v div[name="Scheduled Time"] input, '
                         '[data-edb-sidepanel-card*="Assignment"] div[name="Scheduled Time"] input, '
                         '.card_ngkhz.edit-mode-style_ABe0v .timepicker-container input, '
                         '[data-edb-sidepanel-card*="Assignment"] .timepicker-container input, '
-                        '.cell:has(.field-title:has-text("scheduled time")) input, '
-                        '.cell-pos-3x1 input, input[placeholder="Time"]'
+                        'input[placeholder="Time"]'
                     ).first
 
                     if await time_input_loc.count() > 0 and await time_input_loc.is_visible():
