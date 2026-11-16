@@ -918,47 +918,34 @@ class AssetAssignmentScraper(BaseScraper):
         if not tech1 or not tech2:
             return False
         import unicodedata, re
-        t1 = re.sub(r'[\u00d7xX]$', '', str(tech1)).strip()
-        t2 = re.sub(r'[\u00d7xX]$', '', str(tech2)).strip()
-        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t1)).lower()
-        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t2)).lower()
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech1))).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech2))).lower()
         if not c1 or not c2:
             return False
         if c1 == c2:
             return True
-        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p6" matching "p6kyle"):
+        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p4" matching "p4jacob"):
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c1) and c2.startswith(c1):
             return True
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
             return True
-        # Core technician name matching (strips leading code like 'p6 ', 'b ', 'f2 ', 'p2 '):
-        core1 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', t1).strip().lower())
-        core2 = re.sub(r'^[a-z]{1,2}\d{0,2}\s+', '', unicodedata.normalize('NFKD', t2).strip().lower())
-        c_core1 = re.sub(r'[^a-z0-9]', '', core1)
-        c_core2 = re.sub(r'[^a-z0-9]', '', core2)
-        if c_core1 and c_core2 and c_core1 == c_core2:
-            return True
+        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
+        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
+
+        for w1 in words1:
+            for w2 in words2:
+                if w1 == w2 or (len(w1) >= 4 and w1 in w2) or (len(w2) >= 4 and w2 in w1):
+                    return True
+
+        if len(c1) >= 4 and len(c2) >= 4:
+            if c1 in c2 or c2 in c1:
+                return True
+
         return False
 
-    _BANNER_EMOJI_REGEX = re.compile(
-        r'['
-        r'\u203C-\u3299'
-        r'\U0001F000-\U0001F9FF'
-        r'\U0001FA00-\U0001FAFF'
-        r']+'
-    )
-
-    @classmethod
-    def has_banner_prefix(cls, t: str) -> bool:
-        if not t:
-            return False
-        return ('|' in t) or bool(cls._BANNER_EMOJI_REGEX.search(str(t)))
-
-    @classmethod
-    def is_same_equipment(cls, name1: str, name2: str) -> bool:
+    @staticmethod
+    def is_same_equipment(name1: str, name2: str) -> bool:
         if not name1 or not name2:
-            return False
-        if cls.has_banner_prefix(name1) != cls.has_banner_prefix(name2):
             return False
         import unicodedata, re
         s1 = unicodedata.normalize('NFKD', str(name1)).strip()
@@ -979,7 +966,7 @@ class AssetAssignmentScraper(BaseScraper):
         cat1 = "pump" if is_pump1 else ("serv" if is_serv1 else ("exc" if is_exc1 else ("trai" if is_trai1 else ("supp" if is_supp1 else None))))
         cat2 = "pump" if is_pump2 else ("serv" if is_serv2 else ("exc" if is_exc2 else ("trai" if is_trai2 else ("supp" if is_supp2 else None))))
 
-        if cat1 != cat2:
+        if cat1 and cat2 and cat1 != cat2:
             return False
 
         c1 = re.sub(r'[^a-zA-Z0-9]', '', s1).lower()
@@ -999,7 +986,7 @@ class AssetAssignmentScraper(BaseScraper):
             return True
 
         if cid1.isdigit() and cid2.isdigit() and int(cid1) == int(cid2):
-            if cat1 == cat2 and cat1 is not None:
+            if cat1 == cat2 or (not cat1 and not cat2):
                 return True
 
         return False
