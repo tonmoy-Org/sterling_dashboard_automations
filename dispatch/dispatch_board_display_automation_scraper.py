@@ -284,7 +284,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             "base_target": canon_target,
             "time": time_key,
             "occurrence": target_count_idx,
-            "created_at": datetime.now().isoformat(),
+            "created_at": self.get_pst_now().isoformat(),
             "status": status,
             **det
         }
@@ -461,6 +461,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
         if c1 == c2:
             return True
+        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p4" matching "p4jacob"):
+        if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c1) and c2.startswith(c1):
+            return True
+        if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
+            return True
         words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
         words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
         for w1 in words1:
@@ -470,6 +475,54 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if len(c1) >= 4 and len(c2) >= 4:
             if c1 in c2 or c2 in c1:
                 return True
+        return False
+
+    @staticmethod
+    def is_same_equipment(name1: str, name2: str) -> bool:
+        if not name1 or not name2:
+            return False
+        import unicodedata, re
+        s1 = unicodedata.normalize('NFKD', str(name1)).strip()
+        s2 = unicodedata.normalize('NFKD', str(name2)).strip()
+
+        is_pump1 = "🚛" in s1 or any(x in s1.lower() for x in ("pump", "pt (", "pt/"))
+        is_serv1 = "🛻" in s1 or any(x in s1.lower() for x in ("ser tr", "service"))
+        is_exc1 = "🏗" in s1 or any(x in s1.lower() for x in ("exc", "u-17", "u-40", "u17", "u40"))
+        is_trai1 = any(x in s1 for x in ("▭", "🔲")) or any(x in s1.lower() for x in ("trai", "tilt", "dump", "t-1", "t-2", "t-3", "t-4", "t-05", "t-6"))
+        is_supp1 = "👥" in s1 or any(x in s1.lower() for x in ("laborer", "support", "helper"))
+
+        is_pump2 = "🚛" in s2 or any(x in s2.lower() for x in ("pump", "pt (", "pt/"))
+        is_serv2 = "🛻" in s2 or any(x in s2.lower() for x in ("ser tr", "service"))
+        is_exc2 = "🏗" in s2 or any(x in s2.lower() for x in ("exc", "u-17", "u-40", "u17", "u40"))
+        is_trai2 = any(x in s2 for x in ("▭", "🔲")) or any(x in s2.lower() for x in ("trai", "tilt", "dump", "t-1", "t-2", "t-3", "t-4", "t-05", "t-6"))
+        is_supp2 = "👥" in s2 or any(x in s2.lower() for x in ("laborer", "support", "helper"))
+
+        cat1 = "pump" if is_pump1 else ("serv" if is_serv1 else ("exc" if is_exc1 else ("trai" if is_trai1 else ("supp" if is_supp1 else None))))
+        cat2 = "pump" if is_pump2 else ("serv" if is_serv2 else ("exc" if is_exc2 else ("trai" if is_trai2 else ("supp" if is_supp2 else None))))
+
+        if cat1 and cat2 and cat1 != cat2:
+            return False
+
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', s1).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', s2).lower()
+        if not c1 or not c2:
+            return False
+        if c1 == c2:
+            return True
+        if c1 in (f"truck{c2}", f"tr{c2}") or c2 in (f"truck{c1}", f"tr{c1}"):
+            return True
+
+        id1 = s1.split("|")[-1].strip() if "|" in s1 else s1
+        id2 = s2.split("|")[-1].strip() if "|" in s2 else s2
+        cid1 = re.sub(r'[^a-zA-Z0-9]', '', id1).lower()
+        cid2 = re.sub(r'[^a-zA-Z0-9]', '', id2).lower()
+        if cid1 and cid2 and cid1 == cid2:
+            return True
+
+        if cid1.isdigit() and cid2.isdigit() and int(cid1) == int(cid2):
+            if cat1 == cat2 or (not cat1 and not cat2):
+                return True
+
         return False
 
     @staticmethod
@@ -567,27 +620,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
     def parse_fieldedge_datetime(dt_val: Any) -> Tuple[str, str, Optional[datetime_time]]:
         """
         Parses a FieldEdge datetime value into (date_str: YYYY-MM-DD, time_key: I:M p, time_obj: time).
-        Converts UTC timestamps with 'Z' or offset to America/Los_Angeles (Pacific Time).
+        FieldEdge API timestamps represent the local dispatch board time directly (even if trailing 'Z' is present).
         """
         if not dt_val:
             return "", "", None
         raw_str = str(dt_val).strip()
         if not raw_str:
             return "", "", None
-
-        has_tz = raw_str.endswith("Z") or bool(re.search(r'[+-]\d{2}:?\d{2}$', raw_str))
-        if has_tz:
-            try:
-                iso_clean = raw_str.replace("Z", "+00:00")
-                parsed_dt = datetime.fromisoformat(iso_clean)
-                pacific_dt = parsed_dt.astimezone(PACIFIC_TZ)
-                date_str = pacific_dt.strftime("%Y-%m-%d")
-                time_key = pacific_dt.strftime("%I:%M %p")
-                if time_key.startswith("0"):
-                    time_key = time_key[1:]
-                return date_str, time_key, pacific_dt.time()
-            except Exception:
-                pass
 
         clean_naive = re.sub(r'[+-]\d{2}:?\d{2}$', '', raw_str.replace("Z", "")).replace("T", " ").split(".")[0].strip()
         for fmt in [
@@ -1359,7 +1398,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     c_first == target_canon or
                     c_raw == target_canon or
                     c_first in target_canons or
-                    c_raw in target_canons
+                    c_raw in target_canons or
+                    self.is_tech_match(s_raw, option_text) or
+                    self.is_tech_match(first_line, option_text)
                 ):
                     await opt_el.scroll_into_view_if_needed()
                     await opt_el.click(force=True)
@@ -1432,14 +1473,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await opt_el.click(force=True)
                         return True
 
-                if not is_target_exc and not is_raw_exc:
-                    after_pipe_target = option_text.split("|")[-1].strip() if "|" in option_text else option_text.strip()
-                    after_pipe_raw = s_raw.split("|")[-1].strip() if "|" in s_raw else s_raw.strip()
-                    if re.match(r'^\d{2,4}$', after_pipe_target) and re.match(r'^\d{2,4}$', after_pipe_raw):
-                        if int(after_pipe_target) == int(after_pipe_raw):
-                            await opt_el.scroll_into_view_if_needed()
-                            await opt_el.click(force=True)
-                            return True
+                if self.is_same_equipment(option_text, s_raw):
+                    await opt_el.scroll_into_view_if_needed()
+                    await opt_el.click(force=True)
+                    return True
 
                 return False
 
@@ -2329,19 +2366,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             and (h.get("tech_name") or "").strip().lower() not in ("unassigned", "none", "clear")
         ]
 
-        assigned_truck_names = {
-            self.canonical_str(h.get("name", ""))
-            for h in truck_assign_headers
-            if (h.get("tech_name") or "").strip() and (h.get("tech_name") or "").strip().lower() not in ("s4", "s3", "unassigned", "none", "clear", "")
-        }
-
         static_headers = [
             h for h in self.template_data.get("static_headers", [])
             if h.get("active", True)
-            and not (
-                (self.canonical_str(h.get("tech_name", "")) in ("s4", "s3", "")) and
-                (self.canonical_str(h.get("name", "")) in assigned_truck_names)
-            )
         ]
 
         out_of_service_headers = []
@@ -2444,6 +2471,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         return True
             return False
 
+        if sn_canonical_names:
+            static_headers = [h for h in static_headers if not _is_sn_asset(h)]
+            print(f"🔧 Exempted {len(sn_canonical_names)} Service Needed vehicle(s) from morning static categories: {', '.join([s['name'] for s in service_needed_headers])}")
+
         # Match truck_assign_headers with service_needed_assets
         # If a truck is assigned to a technician AND has Service Needed:
         # Keep it on the technician at their scheduled time, attach note,
@@ -2463,10 +2494,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 h["is_service_needed"] = True
                 print(f"🔧 Truck '{h_name}' on tech '{h_tech}' marked with Service Needed note at {h.get('start_time')}.")
 
-        # Service Needed assets MUST ALWAYS be included under '🔧 SERVICE NEEDED' at 3:30 PM,
-        # whether assigned to a technician or unassigned in static headers!
-        # Do NOT remove regular static headers (e.g. 5:00 AM under PUMP TRUCKS) because
-        # Service Needed assets can still be operated and remain part of the fleet.
+        # Service Needed assets are placed under '🔧 SERVICE NEEDED' at 3:30 PM on s4
         if service_needed_headers:
             static_headers = static_headers + service_needed_headers
             print(f"🔧 Added {len(service_needed_headers)} Service Needed header(s) under 3:30 PM.")
@@ -2685,7 +2713,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                             w_time = self.normalize_time_key(w.get("time_key", ""))
                                             norm_target_time = self.normalize_time_key(time_key)
                                             is_sn_slot = bool(norm_target_time and w_time == norm_target_time)
-                                            if w.get("is_service_needed") or is_sn_slot:
+                                            if w.get("is_service_needed") or is_sn_slot or c_tk in ("s4", "s3"):
                                                 sn_existing_found = True
                                                 break
                                     if sn_existing_found:
@@ -2755,16 +2783,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                                 board_count += 1
                                             elif is_dummy_tech and not is_service_wo and not is_oos_wo:
                                                 # If this item name is unique on this technician column (only 1 occurrence in template),
-                                                # count it even if scheduled time was slightly adjusted on the board
-                                                if sum(1 for h in static_headers if self.canonical_str(h.get("tech_name", "")) == canon_h_tech and self.canonical_str(h.get("name", "")) == canon_target) == 1:
-                                                    if self.check_item_match(
-                                                        wo,
-                                                        canon_target,
-                                                        time_key=None,
-                                                        require_customer_match=True,
-                                                        match_any_status=True
-                                                    ):
-                                                        board_count += 1
+                                                # count it even if scheduled time was slightly adjusted on the board, but NEVER match
+                                                # cards sitting in Out of Service (1:45 PM) or Service Needed (3:30 PM) slots!
+                                                w_time_norm = self.normalize_time_key(wo.get("time_key", ""))
+                                                if w_time_norm not in ("1:45 PM", "3:30 PM", "1:45", "3:30"):
+                                                    if sum(1 for h in static_headers if self.canonical_str(h.get("tech_name", "")) == canon_h_tech and self.canonical_str(h.get("name", "")) == canon_target) == 1:
+                                                        if self.check_item_match(
+                                                            wo,
+                                                            canon_target,
+                                                            time_key=None,
+                                                            require_customer_match=True,
+                                                            match_any_status=True
+                                                        ):
+                                                            board_count += 1
                                         else:
                                             appt_matched = False
                                             if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
@@ -2901,25 +2932,28 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     print(f"⏭️ Truck '{name}' is Out of Service for {date_str}. Skipping creating truck assign header on tech '{h_tech}'.")
                                     continue
 
-                                truck_on_board = False
+                                truck_on_target_tech = False
                                 found_tech_name = None
                                 found_cust_name = None
-                                for c_t, w_list in existing_wos.items():
-                                    if not c_t or c_t in DUMMY_HEADER_TECHS or any(c_t.startswith(dt) for dt in DUMMY_HEADER_TECHS):
-                                        continue
-                                    for wo in w_list:
+                                found_time = None
+                                if canon_h_tech in existing_wos:
+                                    norm_target_time = self.normalize_time_key(time_key)
+                                    for wo in existing_wos[canon_h_tech]:
                                         if not wo.get("is_appointment"):
                                             c_cust = wo.get("canon_customer", "")
-                                            if c_cust and (c_cust == canon_target or c_cust in (f"truck{canon_target}", f"tr{canon_target}")):
-                                                truck_on_board = True
-                                                found_tech_name = c_t
+                                            w_time = wo.get("time_key", "")
+                                            wo_time_keys = wo.get("time_keys") or ({self.normalize_time_key(w_time)} if w_time else set())
+                                            norm_wo_time = self.normalize_time_key(w_time)
+                                            time_matched = not norm_target_time or not norm_wo_time or norm_target_time == norm_wo_time or (norm_target_time in wo_time_keys)
+                                            if c_cust and (c_cust == canon_target or c_cust in (f"truck{canon_target}", f"tr{canon_target}")) and time_matched:
+                                                truck_on_target_tech = True
+                                                found_tech_name = canon_h_tech
                                                 found_cust_name = c_cust
+                                                found_time = w_time
                                                 break
-                                    if truck_on_board:
-                                        break
 
-                                if truck_on_board:
-                                    print(f"⏭️ Truck '{name}' already exists on tech '{found_tech_name}' (matched customer: '{found_cust_name}') for {date_str}. Recording in history and skipping creation to prevent duplicate assignment.")
+                                if truck_on_target_tech:
+                                    print(f"⏭️ Truck '{name}' already exists on tech '{found_tech_name}' at {found_time} PST (matched: '{found_cust_name}') for {date_str}. Recording in history and skipping creation.")
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 

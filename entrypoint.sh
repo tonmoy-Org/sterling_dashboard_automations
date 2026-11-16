@@ -9,6 +9,7 @@ Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -nolisten unix > /dev/null 2>&1 &
 XVFB_PID=$!
 
 export DISPLAY=:99
+export TZ=America/Los_Angeles
 
 # Graceful cleanup on termination
 trap "kill -TERM $XVFB_PID 2>/dev/null || true" EXIT TERM INT

@@ -484,7 +484,7 @@ async def run_automation(args):
             else:
                 print(f"   Target date range: Today ({get_pst_now().strftime('%Y-%m-%d')}) + {args.days} rolling days ahead.")
 
-            STATUS_DATA["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            STATUS_DATA["last_run"] = get_pst_now().strftime("%Y-%m-%d %H:%M:%S")
             STATUS_DATA["last_run_pst"] = now_pst
             STATUS_DATA["last_status"] = "running"
             try:
@@ -532,7 +532,7 @@ async def run_automation(args):
             await asyncio.sleep(sleep_seconds)
     else:
         now_pst = get_pst_now().strftime("%Y-%m-%d %I:%M:%S %p PST")
-        STATUS_DATA["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        STATUS_DATA["last_run"] = get_pst_now().strftime("%Y-%m-%d %H:%M:%S")
         STATUS_DATA["last_run_pst"] = now_pst
         STATUS_DATA["last_status"] = "running"
         try:
@@ -650,7 +650,7 @@ async def trigger_run(request: Request, background_tasks: BackgroundTasks):
     async def _manual_run():
         scraper = DispatchBoardDisplayAutomationScraper()
         now_pst = get_pst_now().strftime("%Y-%m-%d %I:%M:%S %p PST")
-        STATUS_DATA["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        STATUS_DATA["last_run"] = get_pst_now().strftime("%Y-%m-%d %H:%M:%S")
         STATUS_DATA["last_run_pst"] = now_pst
         STATUS_DATA["last_status"] = "running"
         try:

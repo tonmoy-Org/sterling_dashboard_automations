@@ -198,7 +198,7 @@ class AssetAssignmentScraper(BaseScraper):
             "occurrence": 1,
             "status": "completed",
             "name": "Asset Reconciliation",
-            "created_at": datetime.now().isoformat()
+            "created_at": self.get_pst_now().isoformat()
         }
         history[key] = rec_data
 
@@ -924,6 +924,11 @@ class AssetAssignmentScraper(BaseScraper):
             return False
         if c1 == c2:
             return True
+        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p4" matching "p4jacob"):
+        if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c1) and c2.startswith(c1):
+            return True
+        if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
+            return True
         words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
         words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
 
@@ -934,6 +939,54 @@ class AssetAssignmentScraper(BaseScraper):
 
         if len(c1) >= 4 and len(c2) >= 4:
             if c1 in c2 or c2 in c1:
+                return True
+
+        return False
+
+    @staticmethod
+    def is_same_equipment(name1: str, name2: str) -> bool:
+        if not name1 or not name2:
+            return False
+        import unicodedata, re
+        s1 = unicodedata.normalize('NFKD', str(name1)).strip()
+        s2 = unicodedata.normalize('NFKD', str(name2)).strip()
+
+        is_pump1 = "🚛" in s1 or any(x in s1.lower() for x in ("pump", "pt (", "pt/"))
+        is_serv1 = "🛻" in s1 or any(x in s1.lower() for x in ("ser tr", "service"))
+        is_exc1 = "🏗" in s1 or any(x in s1.lower() for x in ("exc", "u-17", "u-40", "u17", "u40"))
+        is_trai1 = any(x in s1 for x in ("▭", "🔲")) or any(x in s1.lower() for x in ("trai", "tilt", "dump", "t-1", "t-2", "t-3", "t-4", "t-05", "t-6"))
+        is_supp1 = "👥" in s1 or any(x in s1.lower() for x in ("laborer", "support", "helper"))
+
+        is_pump2 = "🚛" in s2 or any(x in s2.lower() for x in ("pump", "pt (", "pt/"))
+        is_serv2 = "🛻" in s2 or any(x in s2.lower() for x in ("ser tr", "service"))
+        is_exc2 = "🏗" in s2 or any(x in s2.lower() for x in ("exc", "u-17", "u-40", "u17", "u40"))
+        is_trai2 = any(x in s2 for x in ("▭", "🔲")) or any(x in s2.lower() for x in ("trai", "tilt", "dump", "t-1", "t-2", "t-3", "t-4", "t-05", "t-6"))
+        is_supp2 = "👥" in s2 or any(x in s2.lower() for x in ("laborer", "support", "helper"))
+
+        cat1 = "pump" if is_pump1 else ("serv" if is_serv1 else ("exc" if is_exc1 else ("trai" if is_trai1 else ("supp" if is_supp1 else None))))
+        cat2 = "pump" if is_pump2 else ("serv" if is_serv2 else ("exc" if is_exc2 else ("trai" if is_trai2 else ("supp" if is_supp2 else None))))
+
+        if cat1 and cat2 and cat1 != cat2:
+            return False
+
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', s1).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', s2).lower()
+        if not c1 or not c2:
+            return False
+        if c1 == c2:
+            return True
+        if c1 in (f"truck{c2}", f"tr{c2}") or c2 in (f"truck{c1}", f"tr{c1}"):
+            return True
+
+        id1 = s1.split("|")[-1].strip() if "|" in s1 else s1
+        id2 = s2.split("|")[-1].strip() if "|" in s2 else s2
+        cid1 = re.sub(r'[^a-zA-Z0-9]', '', id1).lower()
+        cid2 = re.sub(r'[^a-zA-Z0-9]', '', id2).lower()
+        if cid1 and cid2 and cid1 == cid2:
+            return True
+
+        if cid1.isdigit() and cid2.isdigit() and int(cid1) == int(cid2):
+            if cat1 == cat2 or (not cat1 and not cat2):
                 return True
 
         return False
@@ -1183,7 +1236,7 @@ class AssetAssignmentScraper(BaseScraper):
                 for (const item of items) {
                     const txt = (item.textContent || item.innerText || '').trim();
                     const cTxt = norm(txt);
-                    if (cTxt === cTarget || (cTarget && cTxt === cTarget)) {
+                    if (cTxt === cTarget || (cTarget && cTxt === cTarget) || (/^[a-z]{1,2}\\d{1,2}$/.test(cTarget) && cTxt.startsWith(cTarget))) {
                         item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                         item.click();
                         item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
@@ -1675,6 +1728,8 @@ class AssetAssignmentScraper(BaseScraper):
             # Strict exact name and vehicle identifier matching (prevent loose digit overlaps!)
             is_match = False
             if c_target and c_target == c_cust:
+                is_match = True
+            elif self.is_same_equipment(asset_name, cust):
                 is_match = True
             else:
                 ident_cust = cust.split("|")[-1].strip() if "|" in cust else cust.strip()
@@ -2725,12 +2780,14 @@ class AssetAssignmentScraper(BaseScraper):
                 pass
             return False
 
-    async def cancel_work_order_via_list(self, wo_number: str, reason: str = "") -> bool:
+    async def cancel_work_order_via_list(self, wo_number: str, reason: str = "", expected_asset: str = "") -> bool:
         if not wo_number:
             return False
 
         wo_str = str(wo_number).strip()
         print(f"\n🗑️ [Cancel WO #{wo_str}] Initiating cancellation via FieldEdge List (https://login.fieldedge.com/#/List/0)...")
+        if expected_asset:
+            print(f"  🎯 Target asset to cancel: '{expected_asset}'")
         new_page = None
         wo_page = None
 
@@ -2789,7 +2846,28 @@ class AssetAssignmentScraper(BaseScraper):
                 print(f"  ⚠️ [Cancel WO #{wo_str}] No table row found matching WO #{wo_str} in search results.")
                 return False
 
-            print(f"  📋 [Cancel WO #{wo_str}] Found row in search results. Status: '{target_status}'.")
+            target_cust = ""
+            if target_row:
+                cells = target_row.locator("td")
+                if await cells.count() > 0:
+                    target_cust = (await cells.nth(0).inner_text()).strip()
+
+            print(f"  📋 [Cancel WO #{wo_str}] Found row in search results. Customer: '{target_cust}' | Status: '{target_status}'.")
+
+            # SAFETY GUARD: If expected_asset is specified, NEVER cancel if the work order belongs to another asset!
+            if expected_asset and target_cust:
+                row_full = await target_row.inner_text()
+                cust_matches = (
+                    self.is_same_equipment(expected_asset, target_cust) or
+                    self.is_same_equipment(expected_asset, row_full)
+                )
+                if not cust_matches:
+                    print(f"  🛑 [SAFETY GUARD ABORT] Work Order #{wo_str} customer is '{target_cust}', which DOES NOT match expected asset '{expected_asset}'! ABORTING CANCELLATION to prevent deleting wrong equipment!")
+                    return False
+
+            if "cancel" in target_status.lower():
+                print(f"  ✅ [Cancel WO #{wo_str}] WO #{wo_str} is ALREADY '{target_status}' in FieldEdge. Skipping redundant cancellation.")
+                return True
             if "complete" in target_status.lower():
                 print(f"  🛑 [Cancel WO #{wo_str}] WO #{wo_str} is already '{target_status}'. Skipping cancellation to protect completed work order.")
                 return False
@@ -2807,6 +2885,14 @@ class AssetAssignmentScraper(BaseScraper):
                 print(f"  ℹ️ Direct click failed ({e1}). Trying double-click on row...")
                 await target_row.dblclick()
                 await new_page.wait_for_timeout(800)
+
+            # Check if status on details page is already Canceled
+            status_badge = wo_page.locator(".task-status, .work-order-status, [data-automation-id='status']").first
+            if await status_badge.count() > 0:
+                badge_text = (await status_badge.inner_text()).strip()
+                if "cancel" in badge_text.lower():
+                    print(f"  ✅ [Cancel WO #{wo_str}] Details page confirms WO #{wo_str} is ALREADY '{badge_text}'. Skipping redundant cancellation.")
+                    return True
 
             save_btn_selector = self.rules.get(
                 "unassigned_save_btn_selector",
@@ -2834,17 +2920,36 @@ class AssetAssignmentScraper(BaseScraper):
             cancel_reason_text = reason or self.rules.get("unassigned_cancellation_reason", "Duplicate visual aid work order created by dispatch board automation.")
 
             print(f"  🔘 Selecting 'Canceled' radio in Save modal...")
+            modal = wo_page.locator(".modal_gRQBi, .modal, .modal-dialog, [role='dialog'], .dispatch-summary-modal, .v-modal").first
             try:
                 await wo_page.wait_for_selector(radio_btn, state="visible", timeout=7000)
                 await wo_page.click(radio_btn)
             except Exception as inner_e:
-                print(f"  ⚠️ Primary radio selector failed ({inner_e}), trying fallback selector...")
-                alt_radio = ".field-radio-container:has-text('Canceled') .field-radio"
+                print(f"  ⚠️ Primary radio selector failed ({inner_e}), trying modal-scoped fallback selector...")
+                radio_selected = False
                 try:
-                    await wo_page.wait_for_selector(alt_radio, state="visible", timeout=5000)
-                    await wo_page.click(alt_radio)
+                    modal_radio = modal.locator(".field-radio-container:has-text('Canceled') .field-radio, input[value*='Cancel'], label:has-text('Canceled'), .field-radio").first
+                    await modal_radio.click(timeout=5000, force=True)
+                    radio_selected = True
                 except Exception:
-                    await wo_page.locator("text='Canceled'").first.click()
+                    pass
+
+                if not radio_selected:
+                    radio_selected = await wo_page.evaluate("""() => {
+                        const modal = document.querySelector('.modal_gRQBi') || document.querySelector('.modal') || document.querySelector('[role="dialog"]');
+                        if (!modal) return false;
+                        const radios = Array.from(modal.querySelectorAll('.field-radio-container, label, input[type="radio"]'));
+                        for (const r of radios) {
+                            if (r.textContent && r.textContent.toLowerCase().includes('cancel')) {
+                                const radioInput = r.querySelector('.field-radio') || r.querySelector('input') || r;
+                                radioInput.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }""")
+                    if not radio_selected:
+                        print("  ⚠️ Could not select Canceled radio inside modal.")
 
             await wo_page.wait_for_timeout(300)
 
@@ -3074,15 +3179,11 @@ class AssetAssignmentScraper(BaseScraper):
 
                     # 1. First check if asset is assigned to a technician in truck_assign_headers
                     assigned_truck = None
-                    cust_digits = re.findall(r'\d+', cust_name)
                     for tah in self.template_data.get("truck_assign_headers", []):
                         if not tah.get("active", True):
                             continue
                         tah_name = (tah.get("name") or "").strip()
-                        c_tah = self.canonical_str(tah_name)
-                        tah_digits = re.findall(r'\d+', tah_name)
-                        num_match = bool(cust_digits and tah_digits and cust_digits[-1] == tah_digits[-1])
-                        if c_tah == c_cust or num_match:
+                        if self.is_same_equipment(cust_name, tah_name):
                             tech = (tah.get("tech_name") or "").strip()
                             if tech and tech.lower() not in ("s3", "s4", "unassigned", "none", "clear", ""):
                                 assigned_truck = tah
@@ -3098,10 +3199,7 @@ class AssetAssignmentScraper(BaseScraper):
                         default_static = None
                         for sh in self.template_data.get("static_headers", []):
                             sh_name = (sh.get("name") or "").strip()
-                            c_sh = self.canonical_str(sh_name)
-                            sh_digits = re.findall(r'\d+', sh_name)
-                            num_match = bool(cust_digits and sh_digits and cust_digits[-1] == sh_digits[-1])
-                            if c_sh == c_cust or num_match:
+                            if self.is_same_equipment(cust_name, sh_name):
                                 default_static = sh
                                 break
 
@@ -3125,6 +3223,32 @@ class AssetAssignmentScraper(BaseScraper):
                                 target_prio = "[5] PT (Asset Assignment)"
                                 target_tech = "s4"
                             print(f"   Using default fleet slot for '{cust_name}': Tech '{target_tech}', Time: '{target_time}', Priority: '{target_prio}'")
+
+                    # Check if the board ALREADY has a valid card for this asset matching the JSON template:
+                    card_already_exists = False
+                    for r_chk in all_rows:
+                        if r_chk.get("is_completed") or str(r_chk.get("work_order_number")) == str(wo_num):
+                            continue
+                        chk_cust = (r_chk.get("customer_name") or "").strip()
+                        if self.is_same_equipment(cust_name, chk_cust):
+                            chk_tech = (r_chk.get("tech_name") or "").strip()
+                            chk_sched = (r_chk.get("scheduled_date") or "").strip()
+                            if (self.is_tech_match(chk_tech, target_tech) or self.canonical_str(chk_tech) == self.canonical_str(target_tech)) and self.is_time_matching(target_time, chk_sched):
+                                card_already_exists = True
+                                break
+
+                    if card_already_exists:
+                        print(f"🗑️ Asset '{cust_name}' (WO #{wo_num}) is at 1:45 PM on '{curr_tech}', but vehicle is active and target '{target_tech}' ALREADY has a card at '{target_time}'. Cancelling duplicate...")
+                        if click_wos and wo_num:
+                            canceled = await self.cancel_work_order_via_list(
+                                wo_number=wo_num,
+                                reason=f"Duplicate card for '{cust_name}' at 1:45 PM (expected '{target_tech}' already has card at '{target_time}').",
+                                expected_asset=cust_name
+                            )
+                            if canceled:
+                                print(f"✅ Cancelled duplicate 1:45 PM card WO #{wo_num} ({cust_name}).")
+                                total_reconciled += 1
+                                continue
 
                     updated = await self.update_service_needed_work_order(
                         work_order_number=wo_num,
@@ -3156,7 +3280,8 @@ class AssetAssignmentScraper(BaseScraper):
                         print(f"🚨 Out of Service vehicle '{t_name}' (WO #{wo_num}) is assigned to tech '{t_tech}'! Initiating auto-cancellation...")
                         canceled = await self.cancel_work_order_via_list(
                             wo_number=wo_num,
-                            reason=f"Vehicle '{t_name}' is Out of Service; cannot be assigned to tech '{t_tech}'."
+                            reason=f"Vehicle '{t_name}' is Out of Service; cannot be assigned to tech '{t_tech}'.",
+                            expected_asset=t_name
                         )
                         if canceled:
                             print(f"🗑️ Cancelled Out of Service vehicle WO #{wo_num} ({t_name}) on '{t_tech}'.")
@@ -3213,7 +3338,8 @@ class AssetAssignmentScraper(BaseScraper):
                     print(f"   Cancelling leftover Service Needed work order #{wo_num}...")
                     canceled = await self.cancel_work_order_via_list(
                         wo_number=wo_num,
-                        reason=f"Vehicle '{cust_name}' is no longer marked Service Needed in Dashboard."
+                        reason=f"Vehicle '{cust_name}' is no longer marked Service Needed in Dashboard.",
+                        expected_asset=cust_name
                     )
                     if canceled:
                         print(f"🗑️ Cancelled leftover Service Needed WO #{wo_num} ({cust_name}).")
@@ -3228,14 +3354,50 @@ class AssetAssignmentScraper(BaseScraper):
                     target_priority = sn_cfg.get("priority", "[7] 7.12 SERVICE NEEDED")
                     service_note = sn_cfg.get("service_note", "")
 
-                    matching_row = self.find_asset_row(
-                        asset_name,
-                        all_rows,
-                        target_priority=target_priority,
-                        target_time=target_time,
-                        target_tech=target_tech,
-                        is_service_needed=True
-                    )
+                    # Find all non-completed cards on s4/s3/target_tech matching this service-needed asset
+                    all_sn_cards = []
+                    for r in all_rows:
+                        if r.get("is_completed"):
+                            continue
+                        cust_val = r.get("customer_name", "")
+                        if self.is_same_equipment(asset_name, cust_val):
+                            c_r_tech = self.canonical_str(r.get("tech_name", ""))
+                            if c_r_tech in ("s4", "s3", "") or self.is_tech_match(r.get("tech_name", ""), target_tech):
+                                all_sn_cards.append(r)
+
+                    if len(all_sn_cards) > 1:
+                        def _sn_score(row_item):
+                            sc = 0
+                            if self.is_time_matching(target_time, row_item.get("scheduled_date", "")):
+                                sc += 10
+                            if self.is_priority_match(row_item.get("priority_name", ""), target_priority):
+                                sc += 5
+                            return sc
+
+                        all_sn_cards.sort(key=_sn_score, reverse=True)
+                        matching_row = all_sn_cards[0]
+                        # Cancel extra duplicate cards on s4/s3
+                        for dup_card in all_sn_cards[1:]:
+                            dup_wo = dup_card.get("work_order_number")
+                            if dup_wo and click_wos:
+                                print(f"  🗑️ Found duplicate Service Needed card WO #{dup_wo} for '{asset_name}' on tech '{dup_card.get('tech_name')}'. Initiating auto-cancellation...")
+                                canceled = await self.cancel_work_order_via_list(
+                                    wo_number=dup_wo,
+                                    reason=f"Duplicate Service Needed work order for '{asset_name}' on '{target_tech}'.",
+                                    expected_asset=asset_name
+                                )
+                                if canceled:
+                                    print(f"  ✅ Cancelled duplicate Service Needed WO #{dup_wo} ({asset_name}).")
+                                    total_reconciled += 1
+                    else:
+                        matching_row = all_sn_cards[0] if all_sn_cards else self.find_asset_row(
+                            asset_name,
+                            all_rows,
+                            target_priority=target_priority,
+                            target_time=target_time,
+                            target_tech=target_tech,
+                            is_service_needed=True
+                        )
                     if matching_row:
                         wo_num = matching_row.get("work_order_number", "")
                         curr_tech = matching_row.get("tech_name", "")
@@ -3297,9 +3459,19 @@ class AssetAssignmentScraper(BaseScraper):
                     continue
 
                 c_sh = self.canonical_str(sh_name)
-                # CRITICAL GUARD: Never reconcile an assigned technician's truck to s4!
-                if c_sh in assigned_truck_canonical_names or any(at in c_sh for at in assigned_truck_canonical_names if len(at) >= 3):
-                    continue
+                is_driver_truck = c_sh in assigned_truck_canonical_names or any(at in c_sh for at in assigned_truck_canonical_names if len(at) >= 3)
+                if is_driver_truck:
+                    # If this truck is assigned to a driver, only include it in static inventory
+                    # if a card ALREADY exists on s4/s3 (e.g. misplaced at 1:45 PM Out of Service)
+                    # so that we can reconcile its time to 5:00 AM without touching the driver's truck!
+                    has_card_on_s4 = any(
+                        not r.get("is_completed") and
+                        self.canonical_str(r.get("customer_name", "")) == c_sh and
+                        self.canonical_str(r.get("tech_name", "")) in ("s4", "s3", "")
+                        for r in all_rows
+                    )
+                    if not has_card_on_s4:
+                        continue
 
                 # Skip if asset is currently Out of Service or Service Needed (already handled in Stage 0 or 1)
                 if c_sh in out_of_service_names or any(c_name in c_sh for c_name in out_of_service_names if c_name):
@@ -3309,6 +3481,29 @@ class AssetAssignmentScraper(BaseScraper):
 
                 static_inventory_items.append(sh)
 
+            if service_needed_names and click_wos:
+                for r in all_rows:
+                    if r.get("is_completed"):
+                        continue
+                    cust_val = r.get("customer_name", "")
+                    c_r_tech = self.canonical_str(r.get("tech_name", ""))
+                    if c_r_tech in ("s4", "s3", ""):
+                        is_sn = any(self.is_same_equipment(sn_cfg.get("asset_name", ""), cust_val) for sn_cfg in service_needed_configs if sn_cfg.get("asset_name"))
+                        if is_sn:
+                            sched_time = r.get("scheduled_date", "")
+                            if not self.is_time_matching("3:30 PM", sched_time):
+                                dup_wo = r.get("work_order_number")
+                                if dup_wo:
+                                    print(f"  🗑️ Asset '{cust_val}' (WO #{dup_wo}) is Service Needed (expected 3:30 PM), but has extra morning card at '{sched_time}' on s4. Initiating auto-cancellation...")
+                                    canceled = await self.cancel_work_order_via_list(
+                                        wo_number=dup_wo,
+                                        reason=f"Service Needed asset '{cust_val}' belongs only at 3:30 PM on s4 (found extra morning card at {sched_time}).",
+                                        expected_asset=cust_val
+                                    )
+                                    if canceled:
+                                        print(f"  ✅ Cancelled extra morning Service Needed WO #{dup_wo} on s4.")
+                                        total_reconciled += 1
+
             if static_inventory_items and click_wos:
                 print(f"\n🚜 [Stage 2/3] Checking {len(static_inventory_items)} static equipment/inventory assets on {normalized_date}...")
                 for item_cfg in static_inventory_items:
@@ -3317,15 +3512,53 @@ class AssetAssignmentScraper(BaseScraper):
                     target_time = item_cfg.get("start_time", "")
                     target_priority = item_cfg.get("priority", "")
 
-                    matching_row = self.find_asset_row(
-                        asset_name,
-                        all_rows,
-                        target_priority=target_priority,
-                        target_time=target_time,
-                        target_tech=target_tech,
-                        is_service_needed=False,
-                        is_out_of_service=False
-                    )
+                    c_asset = self.canonical_str(asset_name)
+                    is_drv = c_asset in assigned_truck_canonical_names or any(at in c_asset for at in assigned_truck_canonical_names if len(at) >= 3)
+                    rows_to_search = [r for r in all_rows if self.canonical_str(r.get("tech_name", "")) in ("s4", "s3", "")] if is_drv else all_rows
+
+                    # Detect and cancel duplicates on s4 if multiple cards exist for this static asset:
+                    s4_cards = []
+                    for r in all_rows:
+                        if r.get("is_completed"):
+                            continue
+                        cust_val = r.get("customer_name", "")
+                        if self.is_same_equipment(asset_name, cust_val) and self.canonical_str(r.get("tech_name", "")) in ("s4", "s3", ""):
+                            s4_cards.append(r)
+
+                    if len(s4_cards) > 1:
+                        def _static_score(row_item):
+                            sc = 0
+                            if self.is_time_matching(target_time, row_item.get("scheduled_date", "")):
+                                sc += 10
+                            if self.is_priority_match(row_item.get("priority_name", ""), target_priority):
+                                sc += 5
+                            return sc
+
+                        s4_cards.sort(key=_static_score, reverse=True)
+                        matching_row = s4_cards[0]
+                        for extra_card in s4_cards[1:]:
+                            extra_wo = extra_card.get("work_order_number")
+                            extra_time = extra_card.get("scheduled_date", "")
+                            if extra_wo and click_wos:
+                                print(f"  🗑️ Found duplicate/extra card WO #{extra_wo} for '{asset_name}' on 's4' (time: '{extra_time}', expected: '{target_time}'). Initiating auto-cancellation...")
+                                canceled = await self.cancel_work_order_via_list(
+                                    wo_number=extra_wo,
+                                    reason=f"Duplicate card for '{asset_name}' on s4 (time was {extra_time}, expected {target_time}).",
+                                    expected_asset=asset_name
+                                )
+                                if canceled:
+                                    print(f"  ✅ Cancelled duplicate WO #{extra_wo} ({asset_name}) on s4.")
+                                    total_reconciled += 1
+                    else:
+                        matching_row = self.find_asset_row(
+                            asset_name,
+                            rows_to_search,
+                            target_priority=target_priority,
+                            target_time=target_time,
+                            target_tech=target_tech,
+                            is_service_needed=False,
+                            is_out_of_service=False
+                        )
 
                     if matching_row:
                         wo_num = matching_row.get("work_order_number", "")
@@ -3408,6 +3641,19 @@ class AssetAssignmentScraper(BaseScraper):
 
                         print(f"  🎯 Template expected truck for '{tech_display}' is: '{expected_truck_name}'")
 
+                        def _t_score(r_item):
+                            sc = 0
+                            t_n = self.canonical_str(r_item.get("name", ""))
+                            if c_exp_truck and (t_n == c_exp_truck or c_exp_truck in t_n or t_n in c_exp_truck):
+                                sc += 20
+                            expected_hdr = self.get_expected_header_for_truck(r_item.get("name", ""))
+                            exp_t = (expected_hdr.get("start_time") if expected_hdr else None) or "06:00 AM"
+                            if self.is_time_matching(exp_t, r_item.get("scheduled_date", "")):
+                                sc += 10
+                            return sc
+
+                        t_list.sort(key=_t_score, reverse=True)
+
                         matched_found = False
                         for r_truck in t_list:
                             t_name = r_truck.get("name", "")
@@ -3429,7 +3675,8 @@ class AssetAssignmentScraper(BaseScraper):
                                 if click_wos and wo_num:
                                     success = await self.cancel_work_order_via_list(
                                         wo_number=wo_num,
-                                        reason=f"Extra/mismatched truck '{t_name}' on tech '{tech_display}' (expected '{expected_truck_name}')."
+                                        reason=f"Extra/mismatched truck '{t_name}' on tech '{tech_display}' (expected '{expected_truck_name}').",
+                                        expected_asset=t_name
                                     )
                                     if success:
                                         print(f"  🗑️ Cancelled extra/mismatched truck WO #{wo_num} ({t_name}) on '{tech_display}'.")
@@ -3478,7 +3725,7 @@ class AssetAssignmentScraper(BaseScraper):
                         is_completed = r.get("is_completed", False)
 
                         c_curr_tech = self.canonical_str(curr_tech_table)
-                        # If a truck is parked on s4/s3 as inventory, do NOT cancel it unless it is explicitly in out_of_service_assets!
+                        # If a truck is parked on s4/s3 as inventory, check if it's a duplicate with mismatched time:
                         if c_curr_tech in ("s4", "s3", "unassigned", ""):
                             is_oos = False
                             for oos in self.template_data.get("out_of_service_assets", []):
@@ -3486,6 +3733,39 @@ class AssetAssignmentScraper(BaseScraper):
                                     is_oos = True
                                     break
                             if not is_oos:
+                                # Check if there are duplicate cards on s4 for this truck
+                                other_s4_cards = []
+                                for other_r in truck_headers:
+                                    if other_r.get("work_order_number") == wo_num:
+                                        continue
+                                    if self.canonical_str(other_r.get("tech_name", "")) not in ("s4", "s3", ""):
+                                        continue
+                                    o_name = str(other_r.get("name") or other_r.get("customer_name") or "")
+                                    if self.is_same_equipment(truck_name, o_name):
+                                        other_s4_cards.append(other_r)
+                                if other_s4_cards:
+                                    expected_hdr = next(
+                                        (h for h in self.template_data.get("static_headers", [])
+                                         if self.canonical_str(h.get("name", "")) == self.canonical_str(truck_name)
+                                         and self.canonical_str(h.get("tech_name", "")) in ("s4", "s3", "")),
+                                        None
+                                    )
+                                    expected_s4_time = expected_hdr.get("start_time") if expected_hdr else None
+                                    if expected_s4_time:
+                                        this_matches = self.is_time_matching(expected_s4_time, r.get("scheduled_date", ""))
+                                        other_matches = any(self.is_time_matching(expected_s4_time, oc.get("scheduled_date", "")) for oc in other_s4_cards)
+                                        if not this_matches and other_matches:
+                                            print(f"[{idx}/{len(truck_headers)}] ℹ️ Truck '{truck_name}' (WO #{wo_num}) on 's4' has mismatched time '{r.get('scheduled_date')}' and another card already matches expected '{expected_s4_time}'. Initiating cancellation of duplicate...")
+                                            if click_wos and wo_num:
+                                                canceled = await self.cancel_work_order_via_list(
+                                                    wo_number=wo_num,
+                                                    reason=f"Duplicate truck '{truck_name}' on s4 (time was {r.get('scheduled_date')}, expected {expected_s4_time}).",
+                                                    expected_asset=truck_name
+                                                )
+                                                if canceled:
+                                                    print(f"[{idx}/{len(truck_headers)}] 🗑️ Cancelled duplicate truck WO #{wo_num} ({truck_name}) on 's4'.")
+                                                    total_reconciled += 1
+                                                    continue
                                 # Preserved as unassigned inventory on s4
                                 continue
 
@@ -3495,7 +3775,8 @@ class AssetAssignmentScraper(BaseScraper):
                                 if click_wos and wo_num:
                                     canceled = await self.cancel_work_order_via_list(
                                         wo_number=wo_num,
-                                        reason=f"Vehicle '{truck_name}' is turned OFF / Out of Service in Dashboard template."
+                                        reason=f"Vehicle '{truck_name}' is turned OFF / Out of Service in Dashboard template.",
+                                        expected_asset=truck_name
                                     )
                                     if canceled:
                                         print(f"[{idx}/{len(truck_headers)}] 🗑️ Cancelled turned-off truck WO #{wo_num} ({truck_name}) on '{curr_tech_table}'.")
@@ -3513,7 +3794,7 @@ class AssetAssignmentScraper(BaseScraper):
                             curr_sched_table = r.get("scheduled_date", "")
                             tech_matches = bool(curr_tech_table and expected_tech and (self.is_tech_match(curr_tech_table, expected_tech) or self.canonical_str(curr_tech_table) == self.canonical_str(expected_tech)))
 
-                            # Check if truck has Service Needed in Dashboard
+                            # Check if truck has Service Needed in Dashboard (for notes only)
                             sn_match = None
                             for s in service_needed_configs:
                                 if self.canonical_str(s.get("asset_name", "")) == self.canonical_str(truck_name) or (
@@ -3522,18 +3803,14 @@ class AssetAssignmentScraper(BaseScraper):
                                     sn_match = s
                                     break
 
-                            if sn_match:
-                                expected_prio = sn_match.get("priority", "[7] 7.12 SERVICE NEEDED")
-                                expected_note = sn_match.get("service_note", "")
-                                expected_time = sn_match.get("start_time", "3:30 PM")
-                                expected_tech_for_sn = sn_match.get("tech_name")
-                                if expected_tech_for_sn:
-                                    expected_tech = expected_tech_for_sn
-                            else:
-                                hdr = self.get_expected_header_for_truck(truck_name)
-                                expected_prio = (hdr.get("priority") if hdr else None) or r.get("priority") or "[5] PT (Asset Assignment)"
-                                expected_note = ""
-                                expected_time = (hdr.get("start_time") if hdr else None) or "06:00 AM"
+                            hdr = self.get_expected_header_for_truck(truck_name)
+                            expected_prio = (hdr.get("priority") if hdr else None) or r.get("priority") or "[5] PT (Asset Assignment)"
+                            expected_note = sn_match.get("service_note", "") if sn_match else ""
+                            expected_time = (hdr.get("start_time") if hdr else None) or "06:00 AM"
+                            # In Stage 2 (Standard Truck Reconciliation), expected_tech remains the driver (e.g. b Mackie),
+                            # expected_time remains the driver's morning start time (e.g. 06:00 AM),
+                            # and expected_prio remains [5] PT/SER TR.
+                            # NEVER move an assigned driver's morning truck to s4 or change its time to 3:30 PM!
 
                             curr_prio_table = r.get("priority") or r.get("priority_name", "")
                             prio_matches = self.is_priority_match(curr_prio_table, expected_prio)
@@ -3558,7 +3835,42 @@ class AssetAssignmentScraper(BaseScraper):
                                     if click_wos and wo_num:
                                         success = await self.cancel_work_order_via_list(
                                             wo_number=wo_num,
-                                            reason=f"Duplicate truck '{truck_name}' on '{curr_tech_table}' (expected tech '{expected_tech}' already has it)."
+                                            reason=f"Duplicate truck '{truck_name}' on '{curr_tech_table}' (expected tech '{expected_tech}' already has it).",
+                                            expected_asset=truck_name
+                                        )
+                                        if success:
+                                            print(f"[{idx}/{len(truck_headers)}] 🗑️ Cancelled duplicate truck WO #{wo_num} ({truck_name}) on '{curr_tech_table}'.")
+                                            total_reconciled += 1
+                                            continue
+                                        else:
+                                            print(f"[{idx}/{len(truck_headers)}] ⚠️ Could not cancel duplicate WO #{wo_num}. Preserving.")
+                                            continue
+                                    else:
+                                        continue
+                            else:
+                                # tech_matches is True, but time_matches is False or prio_matches is False
+                                # Check if expected_tech ALREADY has another card that matches expected_time:
+                                tech_already_has_time_matched_card = False
+                                for other_r in truck_headers:
+                                    if other_r.get("work_order_number") != wo_num:
+                                        other_truck = self.canonical_str(other_r.get("name", ""))
+                                        other_tech = other_r.get("tech_name", "")
+                                        other_sched = other_r.get("scheduled_date", "")
+                                        if (
+                                            other_truck == self.canonical_str(truck_name) and
+                                            (self.is_tech_match(other_tech, expected_tech) or self.canonical_str(other_tech) == self.canonical_str(expected_tech)) and
+                                            self.is_time_matching(expected_time, other_sched)
+                                        ):
+                                            tech_already_has_time_matched_card = True
+                                            break
+
+                                if tech_already_has_time_matched_card:
+                                    print(f"[{idx}/{len(truck_headers)}] ℹ️ Truck '{truck_name}' (WO #{wo_num}) is on '{curr_tech_table}' at mismatched time '{curr_sched_table}', but tech ALREADY has '{truck_name}' at expected '{expected_time}'. Initiating cancellation of duplicate WO...")
+                                    if click_wos and wo_num:
+                                        success = await self.cancel_work_order_via_list(
+                                            wo_number=wo_num,
+                                            reason=f"Duplicate truck '{truck_name}' at mismatched time '{curr_sched_table}' on '{curr_tech_table}' (already has card at '{expected_time}').",
+                                            expected_asset=truck_name
                                         )
                                         if success:
                                             print(f"[{idx}/{len(truck_headers)}] 🗑️ Cancelled duplicate truck WO #{wo_num} ({truck_name}) on '{curr_tech_table}'.")

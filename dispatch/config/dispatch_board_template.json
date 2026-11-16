@@ -246,7 +246,7 @@
       "duration": "1:00",
       "priority": "[5] PT (Asset Assignment)",
       "tech_name": "s4",
-      "active": false
+      "active": true
     },
     {
       "name": "🚛 | 122",
@@ -254,7 +254,7 @@
       "duration": "1:00",
       "priority": "[5] PT (Asset Assignment)",
       "tech_name": "s4",
-      "active": false
+      "active": true
     },
     {
       "name": "🚛 | 124",
@@ -262,7 +262,7 @@
       "duration": "1:00",
       "priority": "[5] PT (Asset Assignment)",
       "tech_name": "s4",
-      "active": false
+      "active": true
     },
     {
       "name": "🚛 | 87",
@@ -286,7 +286,7 @@
       "duration": "1:00",
       "priority": "[5] SER TR (Asset Assignment)",
       "tech_name": "s4",
-      "active": false
+      "active": true
     },
     {
       "name": "🛻 | 02",
@@ -294,7 +294,7 @@
       "duration": "1:00",
       "priority": "[5] SER TR (Asset Assignment)",
       "tech_name": "s4",
-      "active": false
+      "active": true
     },
     {
       "name": "🛻 | 03",
@@ -302,7 +302,7 @@
       "duration": "1:00",
       "priority": "[5] SER TR (Asset Assignment)",
       "tech_name": "s4",
-      "active": false
+      "active": true
     },
     {
       "name": "🛻 | 71",
