@@ -1966,8 +1966,185 @@ class AssetAssignmentScraper(BaseScraper):
                 await self.close_sidepanel()
                 return True
 
+            total_steps = (1 if need_assignment_update else 0) + (1 if need_wo_update else 0)
+            step_idx = 1
+
+            if need_assignment_update:
+                step_idx += 1
+                print(f"  🕒 [Step {step_idx - 1}/{total_steps}] Updating Assignment card (Need tech: {need_tech_change}, Need time: {need_time_change})...")
+                await self.page.evaluate("""() => {
+                    const cards = Array.from(document.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]'));
+                    const card = cards.find(c => {
+                        const attr = (c.getAttribute('data-edb-sidepanel-card') || '').toLowerCase();
+                        if (attr.includes('assignment')) return true;
+                        const pt = c.querySelector('.panel-title, .field-title');
+                        return pt && (pt.textContent || '').trim().toLowerCase() === 'assignment';
+                    }) || document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') || document.querySelector('.card_ngkhz');
+                    if (card) card.scrollIntoView({ behavior: 'instant', block: 'center' });
+                }""")
+                await self.page.wait_for_timeout(200)
+
+                is_edit_mode = await self.page.evaluate("""() => {
+                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                                 document.querySelector('.tech-dropdown_qufHC') ||
+                                 document.querySelector('.timepicker-container[name="Scheduled Time"]');
+                    return !!card;
+                }""")
+
+                if not is_edit_mode:
+                    for _ in range(3):
+                        assignment_edit_clicked = await self.page.evaluate("""() => {
+                            const cards = Array.from(document.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]'));
+                            const card = cards.find(c => {
+                                const attr = (c.getAttribute('data-edb-sidepanel-card') || '').toLowerCase();
+                                if (attr.includes('assignment')) return true;
+                                const pt = c.querySelector('.panel-title, .field-title');
+                                return pt && (pt.textContent || '').trim().toLowerCase() === 'assignment';
+                            }) || document.querySelector('.card_ngkhz');
+                            if (!card) return false;
+                            const btn = card.querySelector('.header_IVnfD .base-icon.edit') ||
+                                        card.querySelector('.base-icon.edit.default') ||
+                                        card.querySelector('.base-icon.edit') ||
+                                        card.querySelector('.edit');
+                            if (btn && btn.offsetParent !== null) {
+                                btn.click();
+                                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                return true;
+                            }
+                            return false;
+                        }""")
+                        if assignment_edit_clicked:
+                            break
+                        try:
+                            pw_btn = self.page.locator(
+                                '[data-edb-sidepanel-card*="AssignmentCard"] .header_IVnfD .base-icon.edit, '
+                                '[data-edb-sidepanel-card*="Assignment"] .base-icon.edit.default, '
+                                '[data-edb-sidepanel-card*="Assignment"] .header_IVnfD .base-icon.edit, '
+                                '.card_ngkhz:has(.panel-title:has-text("Assignment")) .base-icon.edit'
+                            ).first
+                            if await pw_btn.count() > 0 and await pw_btn.is_visible():
+                                await pw_btn.click(force=True)
+                                break
+                        except Exception:
+                            pass
+                        await self.page.wait_for_timeout(400)
+
+                    for _ in range(8):
+                        await self.page.wait_for_timeout(150)
+                        if await self.page.evaluate("""() => !!(document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') || document.querySelector('.tech-dropdown_qufHC') || document.querySelector('.timepicker-container[name="Scheduled Time"]'))"""):
+                            break
+
+                await self.page.wait_for_timeout(300)
+
+                if target_tech and need_tech_change:
+                    print(f"  👤 Updating technician to '{target_tech}'...")
+                    await self.select_dropdown_option(None, target_tech)
+                    await self.page.wait_for_timeout(300)
+                else:
+                    print(f"  👤 Technician already matches '{target_tech}'. Skipping tech edit.")
+
+                if target_time and need_time_change:
+                    print(f"  ⏰ Setting scheduled time to '{target_time}'...")
+                    time_input_loc = self.page.locator(
+                        '.card_ngkhz.edit-mode-style_ABe0v div[name="Scheduled Time"] input, '
+                        '[data-edb-sidepanel-card*="Assignment"] div[name="Scheduled Time"] input, '
+                        '.card_ngkhz.edit-mode-style_ABe0v .timepicker-container input, '
+                        '[data-edb-sidepanel-card*="Assignment"] .timepicker-container input, '
+                        '.cell:has(.field-title:has-text("scheduled time")) input, '
+                        '.cell-pos-3x1 input, input[placeholder="Time"]'
+                    ).first
+
+                    if await time_input_loc.count() > 0 and await time_input_loc.is_visible():
+                        try:
+                            await time_input_loc.click(force=True)
+                            await self.page.wait_for_timeout(150)
+                            await time_input_loc.press("Control+A")
+                            await time_input_loc.press("Backspace")
+                            await time_input_loc.type(target_time, delay=50)
+                            await self.page.keyboard.press("Enter")
+                            await self.page.keyboard.press("Tab")
+                        except Exception as t_err:
+                            print(f"  ⚠️ Direct typing time note: {t_err}")
+
+                    await self.page.evaluate("""(tVal) => {
+                        const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                                     document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                                     document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
+                                     document.querySelector('.card_ngkhz');
+                        if (!card) return false;
+                        let inp = card.querySelector('div[name="Scheduled Time"] input, .timepicker-container input, .cell-pos-3x1 input, input[placeholder="Time"]');
+                        if (!inp) {
+                            const cells = Array.from(card.querySelectorAll('.cell'));
+                            for (const c of cells) {
+                                const ft = c.querySelector('.field-title');
+                                if (ft && ft.textContent.toLowerCase().includes('scheduled time')) {
+                                    inp = c.querySelector('input');
+                                    if (inp) break;
+                                }
+                            }
+                        }
+                        if (inp) {
+                            inp.focus();
+                            inp.value = tVal;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                            inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                            return true;
+                        }
+                        return false;
+                    }""", target_time)
+                    await self.page.wait_for_timeout(300)
+                else:
+                    print(f"  ⏰ Scheduled time already matches '{target_time}'. Skipping time edit.")
+
+                print("  💾 Saving Assignment card...")
+                saved_assignment = await self.page.evaluate("""() => {
+                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
+                                 document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
+                                 document.querySelector('.card_ngkhz');
+                    if (!card) return false;
+                    const btns = Array.from(card.querySelectorAll('button.confirm_I8LeR, button.button_a3g51.confirm_I8LeR, button'));
+                    const saveBtn = btns.find(b => {
+                        const txt = (b.textContent || '').trim().toLowerCase();
+                        return txt === 'save' || b.classList.contains('confirm_I8LeR');
+                    });
+                    if (saveBtn) {
+                        saveBtn.removeAttribute('disabled');
+                        saveBtn.click();
+                        saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                        return true;
+                    }
+                    return false;
+                }""")
+
+                if not saved_assignment:
+                    try:
+                        pw_save = self.page.locator('.edit-mode-style_ABe0v button.confirm_I8LeR, [data-edb-sidepanel-card*="Assignment"] button.confirm_I8LeR, button.confirm_I8LeR').first
+                        if await pw_save.count() > 0:
+                            await pw_save.click(force=True)
+                            saved_assignment = True
+                    except Exception:
+                        pass
+
+                if saved_assignment:
+                    print(f"  ✅ Saved Assignment card.")
+                    for _ in range(10):
+                        await self.page.wait_for_timeout(150)
+                        edit_done = await self.page.evaluate("""() => {
+                            const editCard = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v');
+                            return !editCard;
+                        }""")
+                        if edit_done:
+                            break
+                    await self.page.wait_for_timeout(300)
+                else:
+                    print("  ⚠️ Assignment Save button not triggered.")
+            else:
+                print(f"  ⏭️ Assignment card already matches (Tech: '{tech_to_check}'). Skipping Assignment edit.")
+
             if need_wo_update:
-                print(f"  📝 [Step 1/2] Updating Work Order details (Need priority: {need_priority_change}, Need note: {need_note_change})...")
+                step_idx += 1
+                print(f"  📝 [Step {step_idx - 1}/{total_steps}] Updating Work Order details (Need priority: {need_priority_change}, Need note: {need_note_change})...")
 
                 print("  📜 Scrolling sidepanel down to Work Order section...")
                 await self.scroll_sidepanel_to_work_order()
@@ -2435,178 +2612,6 @@ class AssetAssignmentScraper(BaseScraper):
                 print(f"  🔙 Back button clicked: {'Success' if back_clicked else 'Not found / already on main'}")
             else:
                 print(f"  ⏭️ Work Order details already set (Priority: '{prio_to_check}'). Skipping Work Order details edit.")
-
-            if need_assignment_update:
-                print(f"  🕒 [Step 2/2] Updating Assignment card (Need tech: {need_tech_change}, Need time: {need_time_change})...")
-                await self.page.evaluate("""() => {
-                    const cards = Array.from(document.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]'));
-                    const card = cards.find(c => {
-                        const attr = (c.getAttribute('data-edb-sidepanel-card') || '').toLowerCase();
-                        if (attr.includes('assignment')) return true;
-                        const pt = c.querySelector('.panel-title, .field-title');
-                        return pt && (pt.textContent || '').trim().toLowerCase() === 'assignment';
-                    }) || document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') || document.querySelector('.card_ngkhz');
-                    if (card) card.scrollIntoView({ behavior: 'instant', block: 'center' });
-                }""")
-                await self.page.wait_for_timeout(200)
-
-                is_edit_mode = await self.page.evaluate("""() => {
-                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                                 document.querySelector('.tech-dropdown_qufHC') ||
-                                 document.querySelector('.timepicker-container[name="Scheduled Time"]');
-                    return !!card;
-                }""")
-
-                if not is_edit_mode:
-                    for _ in range(3):
-                        assignment_edit_clicked = await self.page.evaluate("""() => {
-                            const cards = Array.from(document.querySelectorAll('.card_ngkhz, [data-edb-sidepanel-card]'));
-                            const card = cards.find(c => {
-                                const attr = (c.getAttribute('data-edb-sidepanel-card') || '').toLowerCase();
-                                if (attr.includes('assignment')) return true;
-                                const pt = c.querySelector('.panel-title, .field-title');
-                                return pt && (pt.textContent || '').trim().toLowerCase() === 'assignment';
-                            }) || document.querySelector('.card_ngkhz');
-                            if (!card) return false;
-                            const btn = card.querySelector('.header_IVnfD .base-icon.edit') ||
-                                        card.querySelector('.base-icon.edit.default') ||
-                                        card.querySelector('.base-icon.edit') ||
-                                        card.querySelector('.edit');
-                            if (btn && btn.offsetParent !== null) {
-                                btn.click();
-                                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                return true;
-                            }
-                            return false;
-                        }""")
-                        if assignment_edit_clicked:
-                            break
-                        try:
-                            pw_btn = self.page.locator(
-                                '[data-edb-sidepanel-card*="AssignmentCard"] .header_IVnfD .base-icon.edit, '
-                                '[data-edb-sidepanel-card*="Assignment"] .base-icon.edit.default, '
-                                '[data-edb-sidepanel-card*="Assignment"] .header_IVnfD .base-icon.edit, '
-                                '.card_ngkhz:has(.panel-title:has-text("Assignment")) .base-icon.edit'
-                            ).first
-                            if await pw_btn.count() > 0 and await pw_btn.is_visible():
-                                await pw_btn.click(force=True)
-                                break
-                        except Exception:
-                            pass
-                        await self.page.wait_for_timeout(400)
-
-                    for _ in range(8):
-                        await self.page.wait_for_timeout(150)
-                        if await self.page.evaluate("""() => !!(document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') || document.querySelector('.tech-dropdown_qufHC') || document.querySelector('.timepicker-container[name="Scheduled Time"]'))"""):
-                            break
-
-                await self.page.wait_for_timeout(300)
-
-                if target_tech and need_tech_change:
-                    print(f"  👤 Updating technician to '{target_tech}'...")
-                    await self.select_dropdown_option(None, target_tech)
-                    await self.page.wait_for_timeout(300)
-                else:
-                    print(f"  👤 Technician already matches '{target_tech}'. Skipping tech edit.")
-
-                if target_time and need_time_change:
-                    print(f"  ⏰ Setting scheduled time to '{target_time}'...")
-                    time_input_loc = self.page.locator(
-                        '.card_ngkhz.edit-mode-style_ABe0v div[name="Scheduled Time"] input, '
-                        '[data-edb-sidepanel-card*="Assignment"] div[name="Scheduled Time"] input, '
-                        '.card_ngkhz.edit-mode-style_ABe0v .timepicker-container input, '
-                        '[data-edb-sidepanel-card*="Assignment"] .timepicker-container input, '
-                        '.cell:has(.field-title:has-text("scheduled time")) input, '
-                        '.cell-pos-3x1 input, input[placeholder="Time"]'
-                    ).first
-
-                    if await time_input_loc.count() > 0 and await time_input_loc.is_visible():
-                        try:
-                            await time_input_loc.click(force=True)
-                            await self.page.wait_for_timeout(150)
-                            await time_input_loc.press("Control+A")
-                            await time_input_loc.press("Backspace")
-                            await time_input_loc.type(target_time, delay=50)
-                            await self.page.keyboard.press("Enter")
-                            await self.page.keyboard.press("Tab")
-                        except Exception as t_err:
-                            print(f"  ⚠️ Direct typing time note: {t_err}")
-
-                    await self.page.evaluate("""(tVal) => {
-                        const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                                     document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                                     document.querySelector('[data-edb-sidepanel-card*="Assignment"]') ||
-                                     document.querySelector('.card_ngkhz');
-                        if (!card) return false;
-                        let inp = card.querySelector('div[name="Scheduled Time"] input, .timepicker-container input, .cell-pos-3x1 input, input[placeholder="Time"]');
-                        if (!inp) {
-                            const cells = Array.from(card.querySelectorAll('.cell'));
-                            for (const c of cells) {
-                                const ft = c.querySelector('.field-title');
-                                if (ft && ft.textContent.toLowerCase().includes('scheduled time')) {
-                                    inp = c.querySelector('input');
-                                    if (inp) break;
-                                }
-                            }
-                        }
-                        if (inp) {
-                            inp.focus();
-                            inp.value = tVal;
-                            inp.dispatchEvent(new Event('input', { bubbles: true }));
-                            inp.dispatchEvent(new Event('change', { bubbles: true }));
-                            inp.dispatchEvent(new Event('blur', { bubbles: true }));
-                            return true;
-                        }
-                        return false;
-                    }""", target_time)
-                    await self.page.wait_for_timeout(300)
-                else:
-                    print(f"  ⏰ Scheduled time already matches '{target_time}'. Skipping time edit.")
-
-                print("  💾 Saving Assignment card...")
-                saved_assignment = await self.page.evaluate("""() => {
-                    const card = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v') ||
-                                 document.querySelector('[data-edb-sidepanel-card*="AssignmentCard"]') ||
-                                 document.querySelector('.card_ngkhz');
-                    if (!card) return false;
-                    const btns = Array.from(card.querySelectorAll('button.confirm_I8LeR, button.button_a3g51.confirm_I8LeR, button'));
-                    const saveBtn = btns.find(b => {
-                        const txt = (b.textContent || '').trim().toLowerCase();
-                        return txt === 'save' || b.classList.contains('confirm_I8LeR');
-                    });
-                    if (saveBtn) {
-                        saveBtn.removeAttribute('disabled');
-                        saveBtn.click();
-                        saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                        return true;
-                    }
-                    return false;
-                }""")
-
-                if not saved_assignment:
-                    try:
-                        pw_save = self.page.locator('.edit-mode-style_ABe0v button.confirm_I8LeR, [data-edb-sidepanel-card*="Assignment"] button.confirm_I8LeR, button.confirm_I8LeR').first
-                        if await pw_save.count() > 0:
-                            await pw_save.click(force=True)
-                            saved_assignment = True
-                    except Exception:
-                        pass
-
-                if saved_assignment:
-                    print(f"  ✅ Saved Assignment card.")
-                    for _ in range(10):
-                        await self.page.wait_for_timeout(150)
-                        edit_done = await self.page.evaluate("""() => {
-                            const editCard = document.querySelector('.card_ngkhz.edit-mode-style_ABe0v');
-                            return !editCard;
-                        }""")
-                        if edit_done:
-                            break
-                    await self.page.wait_for_timeout(300)
-                else:
-                    print("  ⚠️ Assignment Save button not triggered.")
-            else:
-                print(f"  ⏭️ Assignment card already matches (Tech: '{tech_to_check}'). Skipping Assignment edit.")
 
             await self.close_sidepanel()
             return True
@@ -3291,9 +3296,49 @@ class AssetAssignmentScraper(BaseScraper):
                             curr_sched_table = r.get("scheduled_date", "")
                             tech_matches = bool(curr_tech_table and expected_tech and self.is_tech_match(curr_tech_table, expected_tech))
 
+                            # Check if truck has Service Needed in Dashboard
+                            sn_match = None
+                            for s in service_needed_configs:
+                                if self.canonical_str(s.get("asset_name", "")) == self.canonical_str(truck_name) or (
+                                    self.canonical_str(truck_name) and self.canonical_str(truck_name) in self.canonical_str(s.get("asset_name", ""))
+                                ):
+                                    sn_match = s
+                                    break
+
+                            if sn_match:
+                                expected_prio = sn_match.get("priority", "[7] 7.12 SERVICE NEEDED")
+                                expected_note = sn_match.get("service_note", "")
+                            else:
+                                hdr = self.get_expected_header_for_truck(truck_name)
+                                expected_prio = (hdr.get("priority") if hdr else None) or r.get("priority") or "[5] PT (Asset Assignment)"
+                                expected_note = ""
+
+                            curr_prio_table = r.get("priority") or r.get("priority_name", "")
+                            prio_matches = self.is_priority_match(curr_prio_table, expected_prio)
+
                             if tech_matches:
-                                print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' at morning slot ({curr_sched_table}). Skipping sidepanel.")
-                                continue
+                                if prio_matches:
+                                    print(f"[{idx}/{len(truck_headers)}] ✅ Truck '{truck_name}' (WO #{wo_num}) is ALREADY assigned to '{curr_tech_table}' with matching priority '{curr_prio_table}' at morning slot ({curr_sched_table}). Skipping sidepanel.")
+                                    continue
+                                else:
+                                    print(f"\n[{idx}/{len(truck_headers)}] ⚠️ Truck '{truck_name}' (WO #{wo_num}) is assigned to '{curr_tech_table}' at morning slot ({curr_sched_table}) but priority is '{curr_prio_table}' (expected '{expected_prio}'). Updating Priority & Note...")
+                                    if click_wos:
+                                        total_checked += 1
+                                        updated = await self.update_service_needed_work_order(
+                                            work_order_number=wo_num,
+                                            asset_name=truck_name,
+                                            target_time=r.get("start_time", "06:00 AM"),
+                                            target_priority=expected_prio,
+                                            service_note=expected_note,
+                                            target_tech=expected_tech,
+                                            current_tech=curr_tech_table,
+                                            current_sched=r.get("scheduled_date", ""),
+                                            current_priority=curr_prio_table,
+                                            stage_label="Assigned Truck Priority Reconciliation"
+                                        )
+                                        if updated:
+                                            total_reconciled += 1
+                                    continue
 
                             expected_tech_already_has_it = False
                             for other_r in truck_headers:
