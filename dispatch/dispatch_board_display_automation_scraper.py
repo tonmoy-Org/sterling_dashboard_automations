@@ -298,19 +298,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if api_url:
             try:
                 import urllib.request
+                import threading
                 endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
                 req_data = json.dumps(rec_data).encode('utf-8')
                 headers = {"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"}
                 headers.update(self._get_api_auth_headers())
-                req = urllib.request.Request(
-                    endpoint,
-                    data=req_data,
-                    headers=headers,
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=4) as response:
-                    if response.status in (200, 201):
+
+                def _send_post(ep, data_bytes, req_headers):
+                    try:
+                        post_req = urllib.request.Request(
+                            ep,
+                            data=data_bytes,
+                            headers=req_headers,
+                            method="POST"
+                        )
+                        with urllib.request.urlopen(post_req, timeout=4) as response:
+                            pass
+                    except Exception:
                         pass
+
+                threading.Thread(target=_send_post, args=(endpoint, req_data, headers), daemon=True).start()
             except Exception:
                 pass
 
@@ -334,10 +341,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     return found
         return None
 
+    _cached_api_token = None
+
     def _get_api_auth_headers(self) -> Dict[str, str]:
         static_token = os.getenv("BACKEND_API_TOKEN", "").strip()
         if static_token:
             return {"Authorization": static_token if " " in static_token else f"Bearer {static_token}"}
+
+        if getattr(self, "_cached_api_token", None):
+            return {"Authorization": f"Bearer {self._cached_api_token}"}
 
         email = os.getenv("BACKEND_API_EMAIL", "").strip()
         password = os.getenv("BACKEND_API_PASSWORD", "")
@@ -372,6 +384,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             token = rest.split(";", 1)[0].strip()
                             break
                 if token:
+                    self._cached_api_token = token
                     print(f"🔐 Logged in to Dashboard API as {email} (JWT acquired).")
                     return {"Authorization": f"Bearer {token}"}
                 print(f"⚠️ Dashboard API login succeeded but no JWT found in response: {raw[:200]}")
