@@ -1188,12 +1188,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         self,
         dropdown_selector: str,
         option_text: str,
-        press_enter: bool = True,
+        press_enter: bool = False,
         is_customer: bool = False,
         is_tech: bool = False
     ) -> bool:
         if not option_text:
             return True
+
+        if not self.page or self.page.is_closed():
+            print(f"❌ Page is closed before selecting '{option_text}'.")
+            return False
 
         import unicodedata
         try:
@@ -1244,10 +1248,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             type_text = re.sub(r'^[\s\u2000-\u200f]+|[\s\u2000-\u200f]+$', '', str(option_text)).strip('\r\n')
             await search_input.fill(type_text)
-            await self.page.wait_for_timeout(350)
 
-            # In Vue-select, if press_enter is requested:
-            if press_enter:
+            if is_customer:
+                # Customer search queries FieldEdge backend; wait for search results to load:
+                await self.page.wait_for_timeout(600)
+                try:
+                    spinner = dropdown.locator(".vs__spinner:visible, .spinner:visible")
+                    if await spinner.count() > 0:
+                        await spinner.first.wait_for(state="hidden", timeout=5000)
+                except Exception:
+                    pass
+            else:
+                await self.page.wait_for_timeout(350)
+
+            # In Vue-select, if press_enter is requested (STRICTLY NOT for customer search):
+            if press_enter and not is_customer:
                 await search_input.press("Enter")
                 await self.page.wait_for_timeout(350)
                 selected_check = dropdown.locator(".vs__selected, .selected-tag").first
@@ -1283,7 +1298,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             options = dropdown.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
             try:
-                await options.first.wait_for(state="visible", timeout=3000)
+                await options.first.wait_for(state="visible", timeout=4000)
             except Exception:
                 pass
 
@@ -1374,31 +1389,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 idx = res.get("index", 0)
                 total = res.get("total", 0)
                 print(f"  -> Found exact match: '{first_line}' (option {idx+1}/{total}). Selected.")
-                try:
-                    await options.nth(idx).click(force=True)
-                except Exception:
-                    pass
 
             # If not clicked, scroll down the dropdown menu container (down to bottom):
             if not clicked:
                 try:
-                    menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
-                    if await menu_container.count() > 0:
-                        for scroll_step in range(12):
-                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 350; }""", await menu_container.element_handle())
-                            await self.page.wait_for_timeout(100)
-                            res = await self.page.evaluate(find_and_click_js, eval_payload)
-                            if res.get("found"):
-                                clicked = True
-                                first_line = res.get("text", "")
-                                idx = res.get("index", 0)
-                                total = res.get("total", 0)
-                                print(f"  -> Found exact match after scrolling: '{first_line}' (option {idx+1}/{total}). Selected.")
-                                try:
-                                    await options.nth(idx).click(force=True)
-                                except Exception:
-                                    pass
-                                break
+                    for scroll_step in range(15):
+                        scrolled = await self.page.evaluate("""() => {
+                            const menu = document.querySelector('ul.vs__dropdown-menu, ul[role="listbox"]');
+                            if (menu) {
+                                menu.scrollTop += 350;
+                                return true;
+                            }
+                            return false;
+                        }""")
+                        if not scrolled:
+                            break
+                        await self.page.wait_for_timeout(150)
+                        res = await self.page.evaluate(find_and_click_js, eval_payload)
+                        if res.get("found"):
+                            clicked = True
+                            first_line = res.get("text", "")
+                            idx = res.get("index", 0)
+                            total = res.get("total", 0)
+                            print(f"  -> Found exact match after scrolling (step {scroll_step+1}): '{first_line}' (option {idx+1}/{total}). Selected.")
+                            break
                 except Exception:
                     pass
 
@@ -1432,6 +1446,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             selected_val = ""
 
             while (time.time() - verify_start) < verify_budget:
+                if self.page.is_closed():
+                    print(f"❌ Page was closed during selection verification of '{option_text}'.")
+                    return False
+
                 selected_el = dropdown.locator(".vs__selected, .selected-tag, .vs__selected-options").first
                 if await selected_el.count() > 0:
                     selected_val = (await selected_el.text_content() or "").strip()
@@ -1491,7 +1509,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             print(f"  [1/7] Customer: '{customer_name}'")
             customer_xpath = self.rules.get('dispatch_board_customer_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]")
-            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True, is_customer=True)
+            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=False, is_customer=True)
             if not success:
                 print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
                 return False
