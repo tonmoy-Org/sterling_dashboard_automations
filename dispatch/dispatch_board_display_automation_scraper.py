@@ -1250,14 +1250,25 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             await search_input.fill(type_text)
 
             if is_customer:
-                # Customer search queries FieldEdge backend; wait for search results to load:
-                await self.page.wait_for_timeout(600)
+                # Customer search queries FieldEdge backend; wait for real results (not just banner header) to load.
+                # Strategy: poll until we have >= 3 items OR 10 seconds pass, then try to find the target.
+                # Also wait for spinner to disappear.
+                await self.page.wait_for_timeout(400)
                 try:
                     spinner = dropdown.locator(".vs__spinner:visible, .spinner:visible")
                     if await spinner.count() > 0:
                         await spinner.first.wait_for(state="hidden", timeout=5000)
                 except Exception:
                     pass
+                # Poll for enough results to load (banner alone = 1 item is not enough)
+                _opts_locator = dropdown.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
+                _cust_wait_start = time.time()
+                while time.time() - _cust_wait_start < 8.0:
+                    _cnt = await _opts_locator.count()
+                    if _cnt >= 2:
+                        break
+                    await self.page.wait_for_timeout(200)
+                print(f"  -> Customer '{option_text}': dropdown loaded {await _opts_locator.count()} items after {time.time()-_cust_wait_start:.1f}s wait.")
             else:
                 await self.page.wait_for_timeout(350)
 
@@ -1389,22 +1400,27 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 idx = res.get("index", 0)
                 total = res.get("total", 0)
                 print(f"  -> Found exact match: '{first_line}' (option {idx+1}/{total}). Selected.")
+            else:
+                print(f"  -> JS scan initial: count={res.get('count',0)}, reason={res.get('reason','?')}")
 
             # If not clicked, scroll down the dropdown menu container (down to bottom):
             if not clicked:
                 try:
-                    for scroll_step in range(15):
+                    # For customer fields: use longer per-step wait (API may still be loading results)
+                    scroll_wait_ms = 300 if is_customer else 150
+                    scroll_steps = 20 if is_customer else 15
+                    for scroll_step in range(scroll_steps):
                         scrolled = await self.page.evaluate("""() => {
                             const menu = document.querySelector('ul.vs__dropdown-menu, ul[role="listbox"]');
                             if (menu) {
-                                menu.scrollTop += 350;
+                                menu.scrollTop += 300;
                                 return true;
                             }
                             return false;
                         }""")
                         if not scrolled:
                             break
-                        await self.page.wait_for_timeout(150)
+                        await self.page.wait_for_timeout(scroll_wait_ms)
                         res = await self.page.evaluate(find_and_click_js, eval_payload)
                         if res.get("found"):
                             clicked = True
@@ -1413,6 +1429,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             total = res.get("total", 0)
                             print(f"  -> Found exact match after scrolling (step {scroll_step+1}): '{first_line}' (option {idx+1}/{total}). Selected.")
                             break
+                        elif is_customer:
+                            print(f"  -> Scroll step {scroll_step+1}: count={res.get('count',0)}, reason={res.get('reason','?')}")
                 except Exception:
                     pass
 
