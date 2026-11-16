@@ -499,15 +499,7 @@ class AssetAssignmentScraper(BaseScraper):
                         await btn.evaluate("el => el.click()")
 
                     print(f"✅ Filters applied using locator: {app_loc}")
-                    try:
-                        await self.page.wait_for_selector(
-                            "tbody.p-datatable-tbody tr, tr.p-selectable-row, .p-datatable-table",
-                            state="attached",
-                            timeout=6000
-                        )
-                    except Exception:
-                        pass
-                    await self.page.wait_for_timeout(400)
+                    await self.page.wait_for_timeout(2000)
                     return True
                 except Exception:
                     continue
@@ -523,9 +515,10 @@ class AssetAssignmentScraper(BaseScraper):
         selectors = [
             ".p-datatable-wrapper",
             ".p-datatable-scrollable-body",
-            ".scroll-container",
             "tbody.fixed-body",
+            ".fixed-body-container",
             ".list-table-scroll-container",
+            ".scroll-container",
         ]
         scrolled_any = False
         for sel in selectors:
@@ -538,7 +531,7 @@ class AssetAssignmentScraper(BaseScraper):
                     is_scrollable = await self.page.evaluate(
                         f"() => {{"
                         f"  const el = document.querySelectorAll('{sel}')[{idx}];"
-                        f"  return el && el.offsetParent !== null && (el.scrollHeight - el.clientHeight > 20);"
+                        f"  return el && (el.scrollHeight > el.clientHeight);"
                         f"}}"
                     )
                     if not is_scrollable:
@@ -552,7 +545,7 @@ class AssetAssignmentScraper(BaseScraper):
                             f"() => {{"
                             f"  const el = document.querySelectorAll('{sel}')[{idx}];"
                             f"  if (el) {{"
-                            f"    el.scrollTop += 600;"
+                            f"    el.scrollTop += 500;"
                             f"    el.dispatchEvent(new Event('scroll'));"
                             f"    return el.scrollTop;"
                             f"  }}"
@@ -562,7 +555,7 @@ class AssetAssignmentScraper(BaseScraper):
                         await self.page.wait_for_timeout(200)
                         if scroll_top == prev_scroll:
                             stuck_count += 1
-                            if stuck_count >= 3:
+                            if stuck_count >= 4:
                                 break
                         else:
                             stuck_count = 0
@@ -577,7 +570,7 @@ class AssetAssignmentScraper(BaseScraper):
                         f"  }}"
                         f"}}"
                     )
-                    await self.page.wait_for_timeout(250)
+                    await self.page.wait_for_timeout(400)
                     print(f"DEBUG: Scrolled '{sel}' (index {idx}) fully.")
                     scrolled_any = True
                 if scrolled_any:
@@ -587,17 +580,25 @@ class AssetAssignmentScraper(BaseScraper):
 
     async def scrape_asset_assignments(self) -> Dict[str, Any]:
         print("⏳ Waiting for Asset Assignment table rows to load...")
-        try:
-            await self.page.wait_for_selector(
-                "tbody.p-datatable-tbody tr, tr.p-selectable-row, .p-datatable-table",
-                state="attached",
-                timeout=15000
-            )
-            await self.page.wait_for_timeout(350)
-        except Exception as e:
-            print(f"⚠️ Timeout waiting for table rows: {e}")
+        has_rows = False
+        for _ in range(30):
+            row_count = await self.page.evaluate("""() => {
+                const rows = document.querySelectorAll(
+                    'tbody.p-datatable-tbody > tr.p-selectable-row, tbody.p-datatable-tbody > tr, tr.p-selectable-row'
+                );
+                return rows ? rows.length : 0;
+            }""")
+            if row_count > 0:
+                has_rows = True
+                print(f"  📊 Detected {row_count} rows in table DOM.")
+                break
+            await self.page.wait_for_timeout(300)
+
+        if not has_rows:
+            print("⚠️ No table rows appeared after waiting.")
             return {"rows": [], "count": 0}
 
+        await self.page.wait_for_timeout(500)
         await self._scroll_table_fully()
 
         try:
