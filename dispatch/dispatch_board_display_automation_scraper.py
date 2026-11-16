@@ -2322,15 +2322,26 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         immediate_action = settings.get("immediate_action", "Create Work Order")
         skip_vehicle_on_weekends = settings.get("skip_vehicle_work_orders_on_weekends", True)
 
-        static_headers = [
-            h for h in self.template_data.get("static_headers", [])
-            if h.get("active", True)
-        ]
         truck_assign_headers = [
             h for h in self.template_data.get("truck_assign_headers", [])
             if h.get("active", True)
             and (h.get("tech_name") or "").strip()
             and (h.get("tech_name") or "").strip().lower() not in ("unassigned", "none", "clear")
+        ]
+
+        assigned_truck_names = {
+            self.canonical_str(h.get("name", ""))
+            for h in truck_assign_headers
+            if (h.get("tech_name") or "").strip() and (h.get("tech_name") or "").strip().lower() not in ("s4", "s3", "unassigned", "none", "clear", "")
+        }
+
+        static_headers = [
+            h for h in self.template_data.get("static_headers", [])
+            if h.get("active", True)
+            and not (
+                (self.canonical_str(h.get("tech_name", "")) in ("s4", "s3", "")) and
+                (self.canonical_str(h.get("name", "")) in assigned_truck_names)
+            )
         ]
 
         out_of_service_headers = []

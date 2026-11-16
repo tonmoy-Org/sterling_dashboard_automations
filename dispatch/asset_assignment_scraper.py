@@ -3270,7 +3270,17 @@ class AssetAssignmentScraper(BaseScraper):
                     else:
                         print(f"  ⚠️ Could not find card for service-needed asset '{asset_name}' on {normalized_date}.")
 
-            # Static Equipment & Inventory Asset Reconciliation (Excavators, Trailers, Inventory Trucks on s4)
+            # Static Equipment & Inventory Asset Reconciliation (Excavators, Trailers, Unassigned Inventory on s4)
+            assigned_truck_canonical_names = set()
+            for tah in self.template_data.get("truck_assign_headers", []):
+                tah_name = (tah.get("name") or "").strip()
+                tah_tech = (tah.get("tech_name") or "").strip()
+                tah_active = tah.get("active", True)
+                if tah_active and tah_tech and tah_tech.lower() not in ("s4", "s3", "unassigned", "none", "clear", ""):
+                    c_tah = self.canonical_str(tah_name)
+                    if c_tah:
+                        assigned_truck_canonical_names.add(c_tah)
+
             static_inventory_items = []
             for sh in self.template_data.get("static_headers", []):
                 if sh.get("active") is False:
@@ -3287,6 +3297,10 @@ class AssetAssignmentScraper(BaseScraper):
                     continue
 
                 c_sh = self.canonical_str(sh_name)
+                # CRITICAL GUARD: Never reconcile an assigned technician's truck to s4!
+                if c_sh in assigned_truck_canonical_names or any(at in c_sh for at in assigned_truck_canonical_names if len(at) >= 3):
+                    continue
+
                 # Skip if asset is currently Out of Service or Service Needed (already handled in Stage 0 or 1)
                 if c_sh in out_of_service_names or any(c_name in c_sh for c_name in out_of_service_names if c_name):
                     continue
@@ -3374,11 +3388,16 @@ class AssetAssignmentScraper(BaseScraper):
                         continue
                     c_tech = self.canonical_str(r.get("tech_name", ""))
                     if c_tech:
+                        # s4 and s3 are staging/inventory columns, NOT individual human drivers!
+                        if c_tech in ("s4", "s3", "unassigned", "none", "clear", ""):
+                            continue
                         if c_tech not in tech_to_trucks:
                             tech_to_trucks[c_tech] = []
                         tech_to_trucks[c_tech].append(r)
 
                 for c_tech, t_list in tech_to_trucks.items():
+                    if c_tech in ("s4", "s3", "unassigned", "none", "clear", ""):
+                        continue
                     if len(t_list) > 1:
                         tech_display = t_list[0].get("tech_name", "")
                         print(f"\n⚠️ Technician '{tech_display}' has {len(t_list)} truck assignments on board: {[t.get('name') for t in t_list]}")
@@ -3457,6 +3476,18 @@ class AssetAssignmentScraper(BaseScraper):
                         truck_name = r.get("name")
                         curr_tech_table = r.get("tech_name", "")
                         is_completed = r.get("is_completed", False)
+
+                        c_curr_tech = self.canonical_str(curr_tech_table)
+                        # If a truck is parked on s4/s3 as inventory, do NOT cancel it unless it is explicitly in out_of_service_assets!
+                        if c_curr_tech in ("s4", "s3", "unassigned", ""):
+                            is_oos = False
+                            for oos in self.template_data.get("out_of_service_assets", []):
+                                if oos.get("active", True) and (self.canonical_str(oos.get("asset_name", "")) == self.canonical_str(truck_name)):
+                                    is_oos = True
+                                    break
+                            if not is_oos:
+                                # Preserved as unassigned inventory on s4
+                                continue
 
                         if self.is_item_turned_off_in_dashboard(truck_name, curr_tech_table):
                             if not is_completed:
