@@ -525,6 +525,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if cat1 == cat2 or (not cat1 and not cat2):
                 return True
 
+        # Check extracted equipment number (e.g. '122' or '01')
+        m1 = re.search(r'\b\d{2,4}\b', s1)
+        m2 = re.search(r'\b\d{2,4}\b', s2)
+        if m1 and m2 and m1.group(0) == m2.group(0):
+            if cat1 == cat2 or (not cat1 and not cat2):
+                return True
+
         return False
 
     @staticmethod
@@ -1258,6 +1265,114 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             clean_search = unicodedata.normalize('NFKD', option_text).strip()
             clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
 
+            type_text = re.sub(r'^[\s\u2000-\u200f]+|[\s\u2000-\u200f]+$', '', str(option_text)).strip('\r\n')
+            await search_input.fill(type_text)
+
+            has_match = False
+            if press_enter or is_customer:
+                print(f"  🔍 Entered search '{type_text}'. Pressing Enter to initiate search...")
+                await search_input.press("Enter")
+                await self.page.wait_for_timeout(500)
+
+                # Wait for search loader / spinner to complete
+                print(f"  ⏳ Waiting for customer search loader/spinner to complete...")
+                try:
+                    spinner_loc = dropdown.locator(".vs__spinner:visible, .spinner:visible, .loading:visible, .vs--loading:visible, [role='status']:visible")
+                    if await spinner_loc.count() > 0:
+                        await spinner_loc.first.wait_for(state="hidden", timeout=12000)
+                except Exception:
+                    pass
+
+                # Poll options for matching result (up to 8 seconds)
+                _poll_start = time.time()
+                while (time.time() - _poll_start) < 8.0:
+                    options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
+                    opt_cnt = await options.count()
+                    if opt_cnt > 0:
+                        for idx in range(opt_cnt):
+                            txt = (await options.nth(idx).text_content() or "").strip()
+                            first_line = [l.strip() for l in txt.splitlines() if l.strip()][0] if txt else ""
+                            if (
+                                self.is_same_equipment(option_text, txt) or
+                                self.is_same_equipment(option_text, first_line) or
+                                (is_tech and (self.is_tech_match(txt, option_text) or self.is_tech_match(first_line, option_text))) or
+                                txt == option_text or
+                                first_line == option_text or
+                                self.canonical_str(txt) == target_canon or
+                                self.canonical_str(first_line) == target_canon
+                            ):
+                                has_match = True
+                                break
+                        if has_match:
+                            print(f"  -> Matching option appeared in dropdown after {time.time() - _poll_start:.1f}s.")
+                            break
+                    await self.page.wait_for_timeout(350)
+
+                # Fallback search if no match found with full term (e.g. searching with truck number without emoji)
+                if not has_match:
+                    fallback_terms = []
+                    m_dig = re.search(r'\b\d{2,4}\b', clean_search)
+                    if m_dig and m_dig.group(0) != type_text:
+                        fallback_terms.append(m_dig.group(0))
+                    for v in name_variants:
+                        if v != type_text and v not in fallback_terms:
+                            fallback_terms.append(v)
+
+                    for fb_term in fallback_terms:
+                        print(f"  -> No matching option for '{type_text}'. Retrying search with '{fb_term}'...")
+                        try:
+                            await search_input.focus()
+                            await search_input.fill("")
+                            await search_input.fill(fb_term)
+                            await self.page.wait_for_timeout(300)
+                            await search_input.press("Enter")
+                            await self.page.wait_for_timeout(500)
+                            try:
+                                spinner_loc = dropdown.locator(".vs__spinner:visible, .spinner:visible, .loading:visible, .vs--loading:visible, [role='status']:visible")
+                                if await spinner_loc.count() > 0:
+                                    await spinner_loc.first.wait_for(state="hidden", timeout=12000)
+                            except Exception:
+                                pass
+                            _fb_poll = time.time()
+                            while (time.time() - _fb_poll) < 6.0:
+                                options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
+                                opt_cnt = await options.count()
+                                for idx in range(opt_cnt):
+                                    txt = (await options.nth(idx).text_content() or "").strip()
+                                    first_line = [l.strip() for l in txt.splitlines() if l.strip()][0] if txt else ""
+                                    if (
+                                        self.is_same_equipment(option_text, txt) or
+                                        self.is_same_equipment(option_text, first_line) or
+                                        (is_tech and (self.is_tech_match(txt, option_text) or self.is_tech_match(first_line, option_text))) or
+                                        txt == option_text or
+                                        first_line == option_text or
+                                        self.canonical_str(txt) == target_canon or
+                                        self.canonical_str(first_line) == target_canon
+                                    ):
+                                        has_match = True
+                                        break
+                                if has_match:
+                                    print(f"  -> Matching option appeared with '{fb_term}' after {time.time() - _fb_poll:.1f}s.")
+                                    break
+                                await self.page.wait_for_timeout(350)
+                            if has_match:
+                                break
+                        except Exception:
+                            pass
+            else:
+                await self.page.wait_for_timeout(500)
+                options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
+                try:
+                    await options.first.wait_for(state="visible", timeout=4000)
+                except Exception:
+                    pass
+
+            options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
+            if (await options.count()) == 0:
+                options = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
+
+            count = await options.count()
+            clicked = False
             raw_target = option_text.strip()
             target_norm = clean_search.lower()
             target_canon = self.canonical_str(option_text)
@@ -1420,75 +1535,70 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 return False
 
             async def _scan_options(check_fn, opt_count) -> bool:
-                options_loc = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
                 for i in range(opt_count):
-                    if await check_fn(options_loc.nth(i)):
+                    if await check_fn(options.nth(i)):
                         return True
                 return False
 
-            type_text = re.sub(r'^[\s\u2000-\u200f]+|[\s\u2000-\u200f]+$', '', str(option_text)).strip('\r\n')
-            candidate_queries = [type_text]
-            for v in name_variants:
-                if v and v not in candidate_queries:
-                    candidate_queries.append(v)
-            m_dig = re.search(r'\b\d{2,4}\b', clean_search)
-            if m_dig and m_dig.group(0) not in candidate_queries:
-                candidate_queries.append(m_dig.group(0))
-            if clean_core and clean_core != option_text and clean_core not in candidate_queries:
-                candidate_queries.append(clean_core)
+            # Strict banner/emoji matching (exact, then fuzzy). Lenient fallback is strictly disabled to prevent emoji/plain mismatch.
+            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count)
+            if not clicked:
+                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count)
 
-            clicked = False
-            options = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
-
-            for q_idx, query in enumerate(candidate_queries):
-                if clicked:
-                    break
-                if q_idx > 0:
-                    print(f"  -> Retrying dropdown search for '{option_text}' with query '{query}' (attempt {q_idx+1}/{len(candidate_queries)})...")
-
+            if not clicked and count > 0:
                 try:
-                    await search_input.focus()
-                    await search_input.fill("")
-                    await search_input.fill(query)
+                    menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
+                    if await menu_container.count() > 0:
+                        for scroll_step in range(3):
+                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
+                            await self.page.wait_for_timeout(200)
+                            count_now = await options.count()
+                            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count_now)
+                            if not clicked:
+                                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count_now)
+                            if clicked:
+                                break
                 except Exception:
                     pass
-
-                # Vue-select debounce and server search trigger wait
-                await self.page.wait_for_timeout(500)
-                try:
-                    spinner = dropdown.locator(".vs__spinner:visible, .spinner:visible")
-                    if await spinner.count() > 0:
-                        print(f"  -> Waiting for search results for '{query}' to load from server...")
-                        await spinner.first.wait_for(state="hidden", timeout=10000)
-                except Exception:
-                    pass
-
-                # Poll options for a matching result (generous timeout so FieldEdge server results can arrive!)
-                poll_start = time.time()
-                poll_budget = 8.0 if is_customer else 4.0
-
-                while (time.time() - poll_start) < poll_budget:
-                    opt_count = await options.count()
-                    if opt_count > 0:
-                        clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), opt_count)
-                        if not clicked:
-                            clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), opt_count)
-                        if clicked:
-                            break
-
-                        # Scroll dropdown menu container to reveal deeper results
-                        try:
-                            menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
-                            if await menu_container.count() > 0:
-                                await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
-                        except Exception:
-                            pass
-
-                    await self.page.wait_for_timeout(350)
 
             if not clicked:
-                print(f"❌ Could not find matching option for '{option_text}' in dropdown ({dropdown_selector}) after checking all queries {candidate_queries}. Aborting selection.")
-                return False
+                if press_enter or is_customer:
+                    selected_check = dropdown.locator(".vs__selected, .selected-tag").first
+                    if await selected_check.count() > 0 and await selected_check.is_visible():
+                        sel_val = (await selected_check.text_content() or "").strip()
+                        clean_sel_val = re.sub(r'[\u00d7xX]$', '', sel_val).strip()
+                        c_sel = self.canonical_str(clean_sel_val)
+                        if self.is_same_equipment(sel_val, option_text) or self.is_same_equipment(clean_sel_val, option_text):
+                            return True
+                        if is_tech and (self.is_tech_match(clean_sel_val, option_text) or self.is_tech_match(sel_val, option_text)):
+                            return True
+
+                    if await options.count() > 0:
+                        for idx_opt in range(await options.count()):
+                            opt_cand = options.nth(idx_opt)
+                            if await opt_cand.is_visible():
+                                f_raw = (await opt_cand.text_content() or "").strip()
+                                clean_f_raw = re.sub(r'[\u00d7xX]$', '', f_raw).strip()
+                                first_l = [l.strip() for l in f_raw.splitlines() if l.strip()][0] if f_raw else ""
+                                if self.is_same_equipment(option_text, f_raw) or self.is_same_equipment(option_text, first_l):
+                                    await opt_cand.scroll_into_view_if_needed()
+                                    await opt_cand.click(force=True)
+                                    clicked = True
+                                    break
+                                if is_tech and (self.is_tech_match(clean_f_raw, option_text) or self.is_tech_match(f_raw, option_text)):
+                                    await opt_cand.scroll_into_view_if_needed()
+                                    await opt_cand.click(force=True)
+                                    clicked = True
+                                    break
+
+                    if not clicked:
+                        # Press Enter to select the highlighted matching option
+                        print(f"  -> Pressing Enter to select matching dropdown option for '{option_text}'...")
+                        await search_input.press("Enter")
+                        await self.page.wait_for_timeout(500)
+                else:
+                    print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
+                    return False
 
             verify_budget = 15.0 if press_enter else 6.0
             verify_start = time.time()

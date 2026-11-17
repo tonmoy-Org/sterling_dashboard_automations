@@ -991,6 +991,13 @@ class AssetAssignmentScraper(BaseScraper):
             if cat1 == cat2 or (not cat1 and not cat2):
                 return True
 
+        # Check extracted equipment number (e.g. '122' or '01')
+        m1 = re.search(r'\b\d{2,4}\b', s1)
+        m2 = re.search(r'\b\d{2,4}\b', s2)
+        if m1 and m2 and m1.group(0) == m2.group(0):
+            if cat1 == cat2 or (not cat1 and not cat2):
+                return True
+
         return False
 
     def get_expected_tech_for_truck(self, truck_name: str) -> Optional[str]:
