@@ -1258,124 +1258,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             clean_search = unicodedata.normalize('NFKD', option_text).strip()
             clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
 
-            type_text = re.sub(r'^[\s\u2000-\u200f]+|[\s\u2000-\u200f]+$', '', str(option_text)).strip('\r\n')
-            await search_input.fill(type_text)
-            await self.page.wait_for_timeout(1000)
-
-            # Locate dropdown options (scoped to dropdown menu)
-            options = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
-            try:
-                await options.first.wait_for(state="visible", timeout=6000)
-            except Exception:
-                pass
-
-            if (await options.count()) == 0:
-                options = self.page.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
-                try:
-                    await options.first.wait_for(state="visible", timeout=4000)
-                except Exception:
-                    pass
-
-            if (await options.count()) == 0 and press_enter:
-                print(f"  -> No options visible for '{option_text}'. Pressing Enter to trigger server search...")
-                await search_input.press("Enter")
-                await self.page.wait_for_timeout(2000)
-                try:
-                    await options.first.wait_for(state="visible", timeout=8000)
-                except Exception:
-                    pass
-
-            # Fallback search without emoji if 0 options returned
-            if (await options.count()) == 0 and len(name_variants) > 1:
-                for fallback_var in name_variants[1:]:
-                    if (await options.count()) > 0:
-                        break
-                    print(f"  -> No options found for '{clean_search}'. Retrying search without emoji using '{fallback_var}'...")
-                    try:
-                        await search_input.focus()
-                        await search_input.fill("")
-                        await search_input.fill(fallback_var)
-                        await self.page.wait_for_timeout(500)
-                        if press_enter:
-                            await search_input.press("Enter")
-                            await self.page.wait_for_timeout(2000)
-                        try:
-                            await options.first.wait_for(state="visible", timeout=7000)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-
-            if (await options.count()) == 0:
-                m_dig = re.search(r'\b\d{2,4}\b', clean_search)
-                if m_dig and m_dig.group(0) != clean_search:
-                    fallback_term = m_dig.group(0)
-                    print(f"  -> No options found for '{clean_search}'. Retrying search with truck number '{fallback_term}'...")
-                    try:
-                        await search_input.focus()
-                        await search_input.fill("")
-                        await search_input.fill(fallback_term)
-                        await self.page.wait_for_timeout(500)
-                        if press_enter:
-                            await search_input.press("Enter")
-                            await self.page.wait_for_timeout(2000)
-                        try:
-                            await options.first.wait_for(state="visible", timeout=7000)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-
-            if (await options.count()) == 0 and press_enter:
-                words = re.findall(r'[a-zA-Z]{3,}', option_text)
-                keyword_fallback = max(words, key=len) if words else ""
-                if keyword_fallback and keyword_fallback.upper() != option_text.upper():
-                    print(f"  -> No options found for '{clean_search}'. Retrying search with keyword: '{keyword_fallback}'...")
-                    try:
-                        await search_input.focus()
-                        await search_input.fill("")
-                        await search_input.fill(keyword_fallback)
-                        await self.page.wait_for_timeout(500)
-                        await search_input.press("Enter")
-                        await self.page.wait_for_timeout(2000)
-                        try:
-                            await options.first.wait_for(state="visible", timeout=7000)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-            else:
-                if (await options.count()) == 0:
-                    if clean_core and clean_core != option_text:
-                        try:
-                            await search_input.focus()
-                            await search_input.fill("")
-                            await search_input.fill(clean_core)
-                            await self.page.wait_for_timeout(500)
-                            try:
-                                await options.first.wait_for(state="visible", timeout=6000)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-                    if (await options.count()) == 0 and len(name_variants) > 1:
-                        for fallback_var in name_variants[1:]:
-                            if (await options.count()) > 0:
-                                break
-                            try:
-                                await search_input.focus()
-                                await search_input.fill("")
-                                await search_input.fill(fallback_var)
-                                await self.page.wait_for_timeout(500)
-                                try:
-                                    await options.first.wait_for(state="visible", timeout=6000)
-                                except Exception:
-                                    pass
-                            except Exception:
-                                pass
-
-            count = await options.count()
-            clicked = False
             raw_target = option_text.strip()
             target_norm = clean_search.lower()
             target_canon = self.canonical_str(option_text)
@@ -1538,68 +1420,75 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 return False
 
             async def _scan_options(check_fn, opt_count) -> bool:
+                options_loc = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
                 for i in range(opt_count):
-                    if await check_fn(options.nth(i)):
+                    if await check_fn(options_loc.nth(i)):
                         return True
                 return False
 
-            # Strict banner/emoji matching (exact, then fuzzy). Lenient fallback is strictly disabled to prevent emoji/plain mismatch.
-            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count)
-            if not clicked:
-                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count)
+            type_text = re.sub(r'^[\s\u2000-\u200f]+|[\s\u2000-\u200f]+$', '', str(option_text)).strip('\r\n')
+            candidate_queries = [type_text]
+            for v in name_variants:
+                if v and v not in candidate_queries:
+                    candidate_queries.append(v)
+            m_dig = re.search(r'\b\d{2,4}\b', clean_search)
+            if m_dig and m_dig.group(0) not in candidate_queries:
+                candidate_queries.append(m_dig.group(0))
+            if clean_core and clean_core != option_text and clean_core not in candidate_queries:
+                candidate_queries.append(clean_core)
 
-            if not clicked and count > 0:
+            clicked = False
+            options = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
+
+            for q_idx, query in enumerate(candidate_queries):
+                if clicked:
+                    break
+                if q_idx > 0:
+                    print(f"  -> Retrying dropdown search for '{option_text}' with query '{query}' (attempt {q_idx+1}/{len(candidate_queries)})...")
+
                 try:
-                    menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
-                    if await menu_container.count() > 0:
-                        for scroll_step in range(3):
-                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
-                            await self.page.wait_for_timeout(200)
-                            count_now = await options.count()
-                            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count_now)
-                            if not clicked:
-                                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count_now)
-                            if clicked:
-                                break
+                    await search_input.focus()
+                    await search_input.fill("")
+                    await search_input.fill(query)
                 except Exception:
                     pass
 
+                # Vue-select debounce and server search trigger wait
+                await self.page.wait_for_timeout(500)
+                try:
+                    spinner = dropdown.locator(".vs__spinner:visible, .spinner:visible")
+                    if await spinner.count() > 0:
+                        print(f"  -> Waiting for search results for '{query}' to load from server...")
+                        await spinner.first.wait_for(state="hidden", timeout=10000)
+                except Exception:
+                    pass
+
+                # Poll options for a matching result (generous timeout so FieldEdge server results can arrive!)
+                poll_start = time.time()
+                poll_budget = 8.0 if is_customer else 4.0
+
+                while (time.time() - poll_start) < poll_budget:
+                    opt_count = await options.count()
+                    if opt_count > 0:
+                        clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), opt_count)
+                        if not clicked:
+                            clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), opt_count)
+                        if clicked:
+                            break
+
+                        # Scroll dropdown menu container to reveal deeper results
+                        try:
+                            menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
+                            if await menu_container.count() > 0:
+                                await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
+                        except Exception:
+                            pass
+
+                    await self.page.wait_for_timeout(350)
+
             if not clicked:
-                if press_enter:
-                    selected_check = dropdown.locator(".vs__selected, .selected-tag").first
-                    if await selected_check.count() > 0 and await selected_check.is_visible():
-                        sel_val = (await selected_check.text_content() or "").strip()
-                        clean_sel_val = re.sub(r'[\u00d7xX]$', '', sel_val).strip()
-                        c_sel = self.canonical_str(clean_sel_val)
-                        t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                        s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', clean_sel_val.lower()))
-                        if is_tech and (self.is_tech_match(clean_sel_val, option_text) or self.is_tech_match(sel_val, option_text)):
-                            return True
-                        banner_ok = (self.has_banner_prefix(sel_val) == target_has_banner)
-                        if banner_ok and (('am' in t_words) == ('am' in s_words) and ('pm' in t_words) == ('pm' in s_words)) and (c_sel == target_canon or self.is_tech_match(clean_sel_val, option_text)):
-                            return True
-                    if await options.count() > 0:
-                        for idx_opt in range(await options.count()):
-                            opt_cand = options.nth(idx_opt)
-                            if await opt_cand.is_visible():
-                                f_raw = (await opt_cand.text_content() or "").strip()
-                                clean_f_raw = re.sub(r'[\u00d7xX]$', '', f_raw).strip()
-                                if is_tech and (self.is_tech_match(clean_f_raw, option_text) or self.is_tech_match(f_raw, option_text)):
-                                    await opt_cand.click(force=True)
-                                    return True
-                                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                                f_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', f_raw.lower()))
-                                time_ok = not is_time_target or ((('am' in t_words) == ('am' in f_words)) and (('pm' in t_words) == ('pm' in f_words)))
-                                banner_ok = (self.has_banner_prefix(f_raw) == target_has_banner)
-                                c_f = self.canonical_str(clean_f_raw)
-                                if time_ok and banner_ok and (c_f in target_canons or c_f == target_canon or self.is_tech_match(clean_f_raw, option_text)):
-                                    await opt_cand.click(force=True)
-                                    return True
-                    print(f"  -> Press-Enter fallback: No valid option was selected for '{option_text}'. Aborting to prevent misassignment.")
-                    return False
-                else:
-                    print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
-                    return False
+                print(f"❌ Could not find matching option for '{option_text}' in dropdown ({dropdown_selector}) after checking all queries {candidate_queries}. Aborting selection.")
+                return False
 
             verify_budget = 15.0 if press_enter else 6.0
             verify_start = time.time()
