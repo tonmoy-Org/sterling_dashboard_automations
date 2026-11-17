@@ -1389,7 +1389,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 if not raw_text:
                     return False
                 s_raw = raw_text.strip()
+                clean_s = re.sub(r'[\u00d7xX]$', '', s_raw).strip()
                 first_line = [l.strip() for l in s_raw.splitlines() if l.strip()][0] if s_raw else ""
+                clean_first = re.sub(r'[\u00d7xX]$', '', first_line).strip()
                 norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
                 c_first = self.canonical_str(first_line)
                 c_raw = self.canonical_str(s_raw)
