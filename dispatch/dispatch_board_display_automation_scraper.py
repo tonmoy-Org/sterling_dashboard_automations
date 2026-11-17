@@ -635,13 +635,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await self.page.wait_for_timeout(200)
 
             # Ensure dropdown menu is open before searching/selecting
-            menu = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
-            toggle = dropdown.locator(".vs__dropdown-toggle, .arrow_icon, .vs__open-indicator").first
+            dd_class = await dropdown.get_attribute("class") or ""
             is_open = (
-                await dropdown.locator(".vs__dropdown-toggle[aria-expanded='true'], .vs--open").count() > 0 or
-                (await menu.count() > 0 and await menu.is_visible())
+                "vs--open" in dd_class or
+                await dropdown.locator(".vs__dropdown-toggle[aria-expanded='true']").count() > 0 or
+                await dropdown.locator("ul.vs__dropdown-menu:visible, ul[role='listbox']:visible, li.vs__dropdown-option:visible").count() > 0 or
+                await self.page.locator("li.vs__dropdown-option:visible").count() > 0
             )
             if not is_open:
+                toggle = dropdown.locator(".vs__dropdown-toggle, .arrow_icon, .vs__open-indicator").first
                 if await toggle.count() > 0:
                     await toggle.click(force=True)
                 else:
@@ -672,15 +674,19 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 await search_input.fill(type_text)
                 await self.page.wait_for_timeout(250)
 
-            # Ensure menu remains open after typing
+            # Re-check open state: typing in vue-select opens menu automatically.
+            # Only click toggle if it's strictly not open.
+            dd_class = await dropdown.get_attribute("class") or ""
             is_open = (
-                await dropdown.locator(".vs__dropdown-toggle[aria-expanded='true'], .vs--open").count() > 0 or
-                (await menu.count() > 0 and await menu.is_visible())
+                "vs--open" in dd_class or
+                await dropdown.locator(".vs__dropdown-toggle[aria-expanded='true']").count() > 0 or
+                await dropdown.locator("ul.vs__dropdown-menu:visible, ul[role='listbox']:visible, li.vs__dropdown-option:visible").count() > 0 or
+                await self.page.locator("li.vs__dropdown-option:visible").count() > 0
             )
             if not is_open:
-                arrow = dropdown.locator(".arrow_icon, .vs__open-indicator, .vs__actions").first
-                if await arrow.count() > 0:
-                    await arrow.click(force=True)
+                toggle = dropdown.locator(".arrow_icon, .vs__open-indicator, .vs__actions").first
+                if await toggle.count() > 0:
+                    await toggle.click(force=True)
                 else:
                     await dropdown.click(force=True)
                 await self.page.wait_for_timeout(250)
@@ -697,12 +703,28 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     pass
             else:
                 await self.page.wait_for_timeout(250)
+
+            async def _trigger_select(opt_el) -> bool:
+                """
+                Dispatches mousedown, mouseup, and click directly on the dropdown option DOM element.
+                Vue-Select binds selection to @mousedown.prevent.stop="select(option)",
+                so dispatching native DOM mousedown is required to trigger selection reliably.
+                """
                 try:
-                    await menu.wait_for(state="visible", timeout=3000)
+                    await opt_el.evaluate("""(el) => {
+                        el.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+                        ['mousedown', 'mouseup', 'click'].forEach(evt => {
+                            el.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                        });
+                    }""")
                 except Exception:
                     pass
-
-            options = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
+                try:
+                    await opt_el.click(force=True)
+                except Exception:
+                    pass
+                await self.page.wait_for_timeout(250)
+                return True
 
             async def _check_and_click_option(opt_candidate, is_fuzzy: bool = False) -> bool:
                 try:
@@ -716,17 +738,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 if is_tech:
                     if self.is_tech_match(clean_opt, option_text) or self.is_tech_match(first_line, option_text):
-                        await opt_candidate.scroll_into_view_if_needed()
-                        await opt_candidate.click(force=True)
-                        return True
+                        print(f"  -> Selecting matched technician option: '{clean_opt}'")
+                        return await _trigger_select(opt_candidate)
                     return False
 
                 # Equipment & fleet check
                 if any(x in option_text for x in ("🚛", "🛻", "🏗")) or any(x in clean_opt for x in ("🚛", "🛻", "🏗")):
                     if self.is_same_equipment(option_text, clean_opt) or self.is_same_equipment(option_text, first_line):
-                        await opt_candidate.scroll_into_view_if_needed()
-                        await opt_candidate.click(force=True)
-                        return True
+                        print(f"  -> Selecting matched equipment option: '{clean_opt}'")
+                        return await _trigger_select(opt_candidate)
                     return False
 
                 if self.has_banner_prefix(clean_opt) != target_has_banner:
@@ -742,32 +762,54 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         c_opt in target_canons or
                         c_first in target_canons
                     ):
-                        await opt_candidate.scroll_into_view_if_needed()
-                        await opt_candidate.click(force=True)
-                        return True
+                        print(f"  -> Selecting matched dropdown option: '{clean_opt}'")
+                        return await _trigger_select(opt_candidate)
                 else:
                     if target_canon and len(target_canon) >= 4 and (target_canon in c_opt or c_opt in target_canon):
-                        await opt_candidate.scroll_into_view_if_needed()
-                        await opt_candidate.click(force=True)
-                        return True
+                        print(f"  -> Selecting fuzzy matched dropdown option: '{clean_opt}'")
+                        return await _trigger_select(opt_candidate)
                 return False
 
             clicked = False
-            # Scan exact matching options
             poll_start = time.time()
-            while time.time() - poll_start < 8.0:
+            max_wait = 12.0 if is_customer else 6.0
+
+            while time.time() - poll_start < max_wait:
+                # 1. First priority: Check highlighted option
+                # Vue-select highlights the best match as you type (.vs__dropdown-option--highlight)
+                high_opts = dropdown.locator("li.vs__dropdown-option--highlight:visible")
+                if await high_opts.count() == 0:
+                    high_opts = self.page.locator("li.vs__dropdown-option--highlight:visible")
+
+                if await high_opts.count() > 0:
+                    if await _check_and_click_option(high_opts.first, is_fuzzy=False):
+                        clicked = True
+                        break
+
+                # 2. Check all visible options (within dropdown, then globally)
+                options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
                 count = await options.count()
+                if count == 0:
+                    options = self.page.locator(".vs__dropdown-menu:visible li:visible, ul[role='listbox']:visible li:visible, li.vs__dropdown-option:visible")
+                    count = await options.count()
+
                 for i in range(count):
                     if await _check_and_click_option(options.nth(i), is_fuzzy=False):
                         clicked = True
                         break
-                if clicked or (count > 0 and not is_customer):
+
+                if clicked:
                     break
-                await self.page.wait_for_timeout(300)
+
+                await self.page.wait_for_timeout(250)
 
             # Fallback fuzzy scan for non-tech items
             if not clicked and not is_tech:
+                options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
                 count = await options.count()
+                if count == 0:
+                    options = self.page.locator(".vs__dropdown-menu:visible li:visible, ul[role='listbox']:visible li:visible, li.vs__dropdown-option:visible")
+                    count = await options.count()
                 for i in range(count):
                     if await _check_and_click_option(options.nth(i), is_fuzzy=True):
                         clicked = True
@@ -775,7 +817,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             if not clicked:
                 if (press_enter or is_customer) and not is_tech:
-                    print(f"  -> Pressing Enter to select matching dropdown option for '{option_text}'...")
+                    print(f"  -> Fallback Enter for '{option_text}'...")
                     await search_input.press("Enter")
                     await self.page.wait_for_timeout(400)
                 else:
@@ -822,6 +864,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await clear_btn.click(force=True)
                 return False
 
+            print(f"  ✅ Dropdown selected '{option_text}' successfully.")
             return True
         except Exception as e:
             print(f"⚠️ Failed to select '{option_text}' in dropdown: {e}")
