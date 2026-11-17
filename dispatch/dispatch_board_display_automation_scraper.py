@@ -1,86 +1,84 @@
+"""
+Dispatch Board Display Automation Scraper
+Automates the pre-creation of daily Dispatch Board headers, truck assignments, and tech routines in FieldEdge.
+Maintains a rolling 31-day horizon of visual aid work orders with intelligent history tracking.
+"""
 import os
-import sys
-import json
 import re
-import asyncio
-import random
-from datetime import datetime, timedelta, time as datetime_time
-from zoneinfo import ZoneInfo
-try:
-    PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
-except Exception:
-    import pytz
-    PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
-
 import time
-import traceback
-import urllib.request
-import urllib.error
+import json
+import asyncio
 import unicodedata
-from typing import List, Dict, Optional, Callable, Tuple, Any
-
-if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
-if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8')
-
-_dispatch_dir = os.path.dirname(os.path.abspath(__file__))
-if _dispatch_dir not in sys.path:
-    sys.path.insert(0, _dispatch_dir)
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List, Tuple, Callable
 
 try:
-    from base_scraper import BaseScraper
+    from base_scraper import BaseScraper, get_pst_now, get_pst_today_str
 except ImportError:
-    try:
-        from automation.scrapers.base_scraper import BaseScraper  # type: ignore
-    except ImportError:
-        from dispatch.base_scraper import BaseScraper  # type: ignore
+    from dispatch.base_scraper import BaseScraper, get_pst_now, get_pst_today_str
 
 
 class DispatchBoardDisplayAutomationScraper(BaseScraper):
+    """
+    Automated scraper for FieldEdge Dispatch Board display items.
+    Creates and manages Static Headers, Truck Assignments, Tech Jobs, and Active Tech routines.
+    """
+
+    _BANNER_EMOJI_REGEX = re.compile(
+        r'[\u203C-\u3299\U0001F000-\U0001F9FF\U0001FA00-\U0001FAFF]+'
+    )
 
     def __init__(self, template_path: Optional[str] = None):
         super().__init__()
         self.scraper_name = "dispatch-board-display-automation"
-        self.intercepted_board_by_date: Dict[str, Any] = {}
-        self.board_req: Dict[str, Any] = {}
+        _dispatch_dir = os.path.dirname(os.path.abspath(__file__))
+
         if template_path:
             self.template_path = template_path
         else:
-            _curr = os.path.dirname(os.path.abspath(__file__))
-            _candidate1 = os.path.join(_curr, "config", "dispatch_board_template.json")
-            _candidate2 = os.path.join(os.path.dirname(_curr), "config", "dispatch_board_template.json")
-            self.template_path = _candidate1 if os.path.exists(_candidate1) else _candidate2
+            cand1 = os.path.join(_dispatch_dir, "config", "dispatch_board_template.json")
+            cand2 = os.path.join(os.path.dirname(_dispatch_dir), "config", "dispatch_board_template.json")
+            self.template_path = cand1 if os.path.exists(cand1) else cand2
+
+        self.history_file = os.path.join(_dispatch_dir, "created_wos_history.json")
         self.template_data = self._load_template()
+        self.intercepted_board_by_date: Dict[str, Any] = {}
+        self.board_req: Dict[str, Any] = {}
+        self.progress_info: Dict[str, Any] = {}
+        self._on_progress_cb: Optional[Callable] = None
+        self.asset_scraper = None
+
+    # --- HISTORY TRACKING & PERSISTENCE ---
 
     def _load_history(self) -> Dict:
-        history = {}
-
+        """Load persistent history of created visual aid work orders."""
         api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
         if api_url:
             try:
                 import urllib.request
                 endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
-                headers = {"User-Agent": "SterlingAutomations/1.0"}
-                headers.update(self._get_api_auth_headers())
+                headers = {"User-Agent": "SterlingAutomations/1.0", **self._get_api_auth_headers()}
                 req = urllib.request.Request(endpoint, headers=headers)
-                with urllib.request.urlopen(req, timeout=5) as response:
+                with urllib.request.urlopen(req, timeout=10) as response:
                     if response.status == 200:
-                        remote_history = json.loads(response.read().decode('utf-8'))
-                        if isinstance(remote_history, dict):
-                            history.update(remote_history)
-                            print(f"✅ Synced {len(remote_history)} central tracking entries from Dashboard API.")
+                        remote_records = json.loads(response.read().decode('utf-8'))
+                        return {r["key"]: r for r in remote_records if isinstance(r, dict) and "key" in r}
             except Exception as e:
-                print(f"ℹ️ API history sync skipped ({e}). Proceeding with in-memory tracking.")
+                print(f"⚠️ Could not load history from API: {e}. Falling back to local file.")
 
-        return history
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
 
     @staticmethod
-    def _is_created_record(v) -> bool:
-        if isinstance(v, dict):
-            status = v.get("status", "")
-            return status in ("created", "existing_on_board", "completed")
-        return False
+    def _is_created_record(record: Any) -> bool:
+        if not isinstance(record, dict):
+            return False
+        return record.get("status") in ("created", "completed", "existing_on_board", "skipped_appointment_conflict")
 
     def is_wo_created(
         self,
@@ -91,6 +89,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         target_count_idx: int,
         time_key: Optional[str] = None
     ) -> bool:
+        """Check if work order is already recorded in history for this date/tech/item/occurrence."""
         norm_time = self.canonical_str(time_key) if time_key else ""
 
         if norm_time:
@@ -106,10 +105,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if base_key in history and self._is_created_record(history[base_key]):
             rec = history[base_key]
             rec_time = rec.get("time") or (rec.get("details", {}).get("time") if isinstance(rec.get("details"), dict) else None)
-            if time_key and rec_time:
-                if self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
-                    return True
-            elif not time_key or not rec_time:
+            if not time_key or not rec_time or self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
                 return True
 
         if not canon_tech:
@@ -117,41 +113,27 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if base_key_notech in history and self._is_created_record(history[base_key_notech]):
                 rec = history[base_key_notech]
                 rec_time = rec.get("time") or (rec.get("details", {}).get("time") if isinstance(rec.get("details"), dict) else None)
-                if time_key and rec_time:
-                    if self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
-                        return True
-                elif not time_key or not rec_time:
+                if not time_key or not rec_time or self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
                     return True
 
+        # Scan for matching occurrence in history dictionary
         for k, v in history.items():
-            if not self._is_created_record(v) or not isinstance(v, dict):
+            if not isinstance(v, dict) or not self._is_created_record(v):
                 continue
-            if (v.get("date") == date_key or k.startswith(f"{date_key}|")):
+            if v.get("date") == date_key or k.startswith(f"{date_key}|"):
                 v_target = v.get("canon_target", "")
                 v_base = v.get("base_target", "")
-                target_matched = (
-                    v_target == canon_target or
-                    v_base == canon_target or
-                    (norm_time and v_target == f"{canon_target}_{norm_time}")
-                )
-                if not target_matched:
-                    continue
-                if v.get("occurrence") != target_count_idx:
+                target_matched = (v_target == canon_target or v_base == canon_target or (norm_time and v_target == f"{canon_target}_{norm_time}"))
+                if not target_matched or v.get("occurrence") != target_count_idx:
                     continue
 
                 rec_tech = v.get("canon_tech") or ""
-                tech_matched = (rec_tech == canon_tech or self.is_tech_match(rec_tech, canon_tech))
-                if not tech_matched:
+                if rec_tech != canon_tech and not self.is_tech_match(rec_tech, canon_tech):
                     continue
 
                 rec_time = v.get("time") or (v.get("details", {}).get("time") if isinstance(v.get("details"), dict) else None)
-                if time_key and rec_time:
-                    if self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
-                        return True
-                    continue
-                elif not time_key or not rec_time:
+                if not time_key or not rec_time or self.normalize_time_key(rec_time) == self.normalize_time_key(time_key):
                     return True
-
         return False
 
     def is_date_fully_completed(
@@ -166,97 +148,47 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         skip_vehicle_on_weekends: bool,
         force: bool = False
     ) -> bool:
+        """Determines if all visual aid work orders for this date are already fully created."""
         if force:
             return False
 
-        template_processed_counts = {}
+        if self.is_wo_created(history, db_date_key, "", "date_processing_complete", 1):
+            return True
 
-        for header in static_headers:
-            name = header.get("name")
-            start_time = header.get("start_time")
-            h_tech = header.get("tech_name")
-            canon_target = self.canonical_str(name)
-            is_service_wo = bool(
-                header.get('is_service_needed_duplicate') or
-                (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
-            )
-            is_oos_wo = bool(
-                header.get('is_out_of_service') or
-                (header.get('reason') and 'DO NOT DISPATCH' in str(header.get('priority', '')))
-            )
-            if is_service_wo:
-                tracking_target = f"{canon_target}_serviceneeded"
-            elif is_oos_wo:
-                tracking_target = f"{canon_target}_outofservice"
-            else:
-                tracking_target = canon_target
+        template_counts: Dict[Tuple[str, str], int] = {}
+
+        def _is_item_done(name: str, tech: Optional[str], start_time: str, is_service_wo: bool = False, is_oos_wo: bool = False) -> bool:
+            c_target = self.canonical_str(name)
+            tracking_target = f"{c_target}_serviceneeded" if is_service_wo else (f"{c_target}_outofservice" if is_oos_wo else c_target)
             try:
                 t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                time_key = t_dt.strftime("%I:%M %p")
-                if time_key.startswith("0"): time_key = time_key[1:]
+                time_key = t_dt.strftime("%I:%M %p").lstrip("0")
             except Exception:
                 time_key = ""
+            c_tech = self.canonical_str(tech or '')
             key = f"{tracking_target}|{time_key}" if time_key else tracking_target
-            canon_h_tech = self.canonical_str(h_tech or '')
-            processed_key = (canon_h_tech, key)
-            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-            target_count_idx = template_processed_counts[processed_key]
+            processed_key = (c_tech, key)
+            template_counts[processed_key] = template_counts.get(processed_key, 0) + 1
+            idx = template_counts[processed_key]
+            return self.is_wo_created(history, db_date_key, c_tech, tracking_target, idx, time_key=time_key)
 
-            if not self.is_wo_created(history, db_date_key, canon_h_tech, tracking_target, target_count_idx, time_key=time_key):
+        for h in static_headers:
+            is_sn = bool(h.get('is_service_needed_duplicate') or (h.get('service_note') and ('SERVICE NEEDED' in str(h.get('priority', '')) or '7.12' in str(h.get('priority', '')))))
+            is_oos = bool(h.get('is_out_of_service') or (h.get('reason') and 'DO NOT DISPATCH' in str(h.get('priority', ''))))
+            if not _is_item_done(h.get("name", ""), h.get("tech_name"), h.get("start_time", ""), is_sn, is_oos):
                 return False
 
         if not (is_weekend and skip_vehicle_on_weekends):
-            for header in truck_assign_headers:
-                name = header.get("name")
-                start_time = header.get("start_time")
-                h_tech = header.get("tech_name")
-                canon_target = self.canonical_str(name)
-                try:
-                    t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                    time_key = t_dt.strftime("%I:%M %p")
-                    if time_key.startswith("0"): time_key = time_key[1:]
-                except Exception:
-                    time_key = ""
-                key = f"{canon_target}|{time_key}" if time_key else canon_target
-                canon_h_tech = self.canonical_str(h_tech or '')
-                processed_key = (canon_h_tech, key)
-                template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                target_count_idx = template_processed_counts[processed_key]
-
-                if not self.is_wo_created(history, db_date_key, canon_h_tech, canon_target, target_count_idx, time_key=time_key):
+            for h in truck_assign_headers:
+                if not _is_item_done(h.get("name", ""), h.get("tech_name"), h.get("start_time", "")):
                     return False
 
-        for job in tech_jobs:
-            if not job.get("active", True):
-                continue
-            name = job.get("name")
-            start_time = job.get("start_time")
-            t_tech = job.get("tech_name")
-            canon_target = self.canonical_str(name)
-            try:
-                t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                time_key = t_dt.strftime("%I:%M %p")
-                if time_key.startswith("0"): time_key = time_key[1:]
-            except Exception:
-                time_key = ""
-            key = f"{canon_target}|{time_key}" if time_key else canon_target
-            canon_t_tech = self.canonical_str(t_tech or '')
-            processed_key = (canon_t_tech, key)
-            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-            target_count_idx = template_processed_counts[processed_key]
-
-            if not self.is_wo_created(history, db_date_key, canon_t_tech, canon_target, target_count_idx, time_key=time_key):
+        for j in tech_jobs:
+            if j.get("active", True) and not _is_item_done(j.get("name", ""), j.get("tech_name"), j.get("start_time", "")):
                 return False
 
-        for tech in active_techs:
-            t_assignment_name = tech
-            canon_target = self.canonical_str(tech)
-            canon_t_assignment = self.canonical_str(t_assignment_name or '')
-            processed_key = (canon_t_assignment, canon_target)
-            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-            target_count_idx = template_processed_counts[processed_key]
-
-            if not self.is_wo_created(history, db_date_key, canon_t_assignment, canon_target, target_count_idx, time_key="4:45 AM"):
+        for t in active_techs:
+            if not _is_item_done(t, t, "4:45 AM"):
                 return False
 
         return True
@@ -271,6 +203,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         status: str = "created",
         details: Optional[Dict] = None
     ):
+        """Record work order creation in local dictionary and async post to Dashboard API."""
         det = details or {}
         time_key = det.get("time", "")
         norm_time = self.canonical_str(time_key) if time_key else ""
@@ -288,523 +221,189 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             **det
         }
         history[key] = rec_data
-
         base_key = f"{date_key}|{canon_tech}|{canon_target}|{target_count_idx}"
         if base_key not in history:
             history[base_key] = rec_data
 
         api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
         if api_url:
-            try:
-                import urllib.request
-                import threading
-                endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
-                req_data = json.dumps(rec_data).encode('utf-8')
-                headers = {"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"}
-                headers.update(self._get_api_auth_headers())
+            import threading, urllib.request
+            endpoint = f"{api_url}/automation/dispatch-history/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-history/"
+            req_data = json.dumps(rec_data).encode('utf-8')
+            headers = {"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0", **self._get_api_auth_headers()}
 
-                def _send_post(ep, data_bytes, req_headers):
-                    try:
-                        post_req = urllib.request.Request(
-                            ep,
-                            data=data_bytes,
-                            headers=req_headers,
-                            method="POST"
-                        )
-                        with urllib.request.urlopen(post_req, timeout=4) as response:
-                            pass
-                    except Exception:
-                        pass
-
-                threading.Thread(target=_send_post, args=(endpoint, req_data, headers), daemon=True).start()
-            except Exception:
-                pass
-
-    @staticmethod
-    def _extract_jwt_from_response(data) -> Optional[str]:
-        token_keys = ("access", "access_token", "accessToken", "token", "jwt", "id_token", "idToken", "auth_token")
-        if isinstance(data, dict):
-            for k in token_keys:
-                v = data.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-            for v in data.values():
-                if isinstance(v, (dict, list)):
-                    found = DispatchBoardDisplayAutomationScraper._extract_jwt_from_response(v)
-                    if found:
-                        return found
-        elif isinstance(data, list):
-            for v in data:
-                found = DispatchBoardDisplayAutomationScraper._extract_jwt_from_response(v)
-                if found:
-                    return found
-        return None
-
-    _cached_api_token = None
-
-    def _get_api_auth_headers(self) -> Dict[str, str]:
-        static_token = os.getenv("BACKEND_API_TOKEN", "").strip()
-        if static_token:
-            return {"Authorization": static_token if " " in static_token else f"Bearer {static_token}"}
-
-        if getattr(self, "_cached_api_token", None):
-            return {"Authorization": f"Bearer {self._cached_api_token}"}
-
-        email = os.getenv("BACKEND_API_EMAIL", "").strip()
-        password = os.getenv("BACKEND_API_PASSWORD", "")
-        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
-        if not (email and password and api_url):
-            print("⚠️ BACKEND_API_EMAIL / BACKEND_API_PASSWORD not set in .env - calling Dashboard API without JWT.")
-            return {}
-
-        import urllib.request, urllib.error
-        base = api_url if api_url.endswith("/api") else f"{api_url}/api"
-        login_path = os.getenv("BACKEND_LOGIN_PATH", "/auth/login").strip() or "/auth/login"
-        endpoint = f"{base}/{login_path.lstrip('/')}"
-        body = json.dumps({"email": email, "password": password}).encode("utf-8")
-        req = urllib.request.Request(
-            endpoint,
-            data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"},
-            method="POST"
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-                token = None
+            def _send_post():
                 try:
-                    token = self._extract_jwt_from_response(json.loads(raw))
+                    req = urllib.request.Request(endpoint, data=req_data, headers=headers, method="POST")
+                    with urllib.request.urlopen(req, timeout=4):
+                        pass
                 except Exception:
                     pass
-                if not token:
-                    for cookie in response.headers.get_all("Set-Cookie") or []:
-                        name, _, rest = cookie.partition("=")
-                        if name.strip().lower() in ("access", "access_token", "accesstoken", "token", "jwt"):
-                            token = rest.split(";", 1)[0].strip()
-                            break
-                if token:
-                    self._cached_api_token = token
-                    print(f"🔐 Logged in to Dashboard API as {email} (JWT acquired).")
-                    return {"Authorization": f"Bearer {token}"}
-                print(f"⚠️ Dashboard API login succeeded but no JWT found in response: {raw[:200]}")
-        except urllib.error.HTTPError as he:
-            err_body = ""
-            try:
-                err_body = he.read().decode("utf-8", errors="replace")[:200]
-            except Exception:
-                pass
-            print(f"⚠️ Dashboard API login failed ({endpoint}): HTTP {he.code} {err_body}")
-        except Exception as e:
-            print(f"⚠️ Dashboard API login error ({endpoint}): {e}")
-        return {}
 
-    def _load_template(self) -> Dict:
-        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
-        if api_url:
-            try:
-                import urllib.request
-                endpoint = f"{api_url}/automation/dispatch-config/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-config/"
-                headers = {"User-Agent": "SterlingAutomations/1.0"}
-                headers.update(self._get_api_auth_headers())
-                req = urllib.request.Request(endpoint, headers=headers)
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    if response.status == 200:
-                        remote_data = json.loads(response.read().decode('utf-8'))
-                        print(f"✅ Loaded live configuration from Dashboard API: {endpoint}")
-                        local_data = {}
-                        if os.path.exists(self.template_path):
-                            try:
-                                with open(self.template_path, "r", encoding="utf-8") as f:
-                                    local_data = json.load(f)
-                            except Exception:
-                                local_data = {}
+            threading.Thread(target=_send_post, daemon=True).start()
 
-                        for key, value in remote_data.items():
-                            local_data[key] = value
+    # --- STRING EXTRACTION & PARSING UTILITIES ---
 
-                        try:
-                            with open(self.template_path, "w", encoding="utf-8") as f:
-                                json.dump(local_data, f, indent=2, ensure_ascii=False)
-                            print(f"💾 Cached live template data to {self.template_path}")
-                        except Exception as cache_err:
-                            print(f"⚠️ Could not cache template data to local file: {cache_err}")
-
-                        return local_data
-            except Exception as e:
-                print(f"⚠️ Could not fetch live template from API ({api_url}): {e}. Falling back to local template file.")
-
-        if os.path.exists(self.template_path):
-            with open(self.template_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        print(f"⚠️ Template file not found at {self.template_path}, no defaults applied.")
-        return {}
-
-    @staticmethod
-    def canonical_str(t: str) -> str:
-        if not t:
-            return ""
-        import unicodedata, re
-        norm = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(t))).lower()
-        if not norm:
-            norm = str(t).strip().lower()
-        return norm
-
-    @staticmethod
-    def is_tech_match(tech1: str, tech2: str) -> bool:
-        if not tech1 or not tech2:
-            return False
-        import unicodedata, re
-        t1 = re.sub(r'[\u00d7xX]$', '', str(tech1)).strip()
-        t2 = re.sub(r'[\u00d7xX]$', '', str(tech2)).strip()
-        if t1.lower() == t2.lower():
-            return True
-        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t1)).lower()
-        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t2)).lower()
-        return bool(c1 and c2 and c1 == c2)
-
-    @staticmethod
-    def is_same_equipment(name1: str, name2: str) -> bool:
-        if not name1 or not name2:
-            return False
-        import unicodedata, re
-        s1 = unicodedata.normalize('NFKD', str(name1)).strip()
-        s2 = unicodedata.normalize('NFKD', str(name2)).strip()
-
-        is_pump1 = "🚛" in s1 or any(x in s1.lower() for x in ("pump", "pt (", "pt/"))
-        is_serv1 = "🛻" in s1 or any(x in s1.lower() for x in ("ser tr", "service"))
-        is_exc1 = "🏗" in s1 or any(x in s1.lower() for x in ("exc", "u-17", "u-40", "u17", "u40"))
-        is_trai1 = any(x in s1 for x in ("▭", "🔲")) or any(x in s1.lower() for x in ("trai", "tilt", "dump", "t-1", "t-2", "t-3", "t-4", "t-05", "t-6"))
-        is_supp1 = "👥" in s1 or any(x in s1.lower() for x in ("laborer", "support", "helper"))
-
-        is_pump2 = "🚛" in s2 or any(x in s2.lower() for x in ("pump", "pt (", "pt/"))
-        is_serv2 = "🛻" in s2 or any(x in s2.lower() for x in ("ser tr", "service"))
-        is_exc2 = "🏗" in s2 or any(x in s2.lower() for x in ("exc", "u-17", "u-40", "u17", "u40"))
-        is_trai2 = any(x in s2 for x in ("▭", "🔲")) or any(x in s2.lower() for x in ("trai", "tilt", "dump", "t-1", "t-2", "t-3", "t-4", "t-05", "t-6"))
-        is_supp2 = "👥" in s2 or any(x in s2.lower() for x in ("laborer", "support", "helper"))
-
-        cat1 = "pump" if is_pump1 else ("serv" if is_serv1 else ("exc" if is_exc1 else ("trai" if is_trai1 else ("supp" if is_supp1 else None))))
-        cat2 = "pump" if is_pump2 else ("serv" if is_serv2 else ("exc" if is_exc2 else ("trai" if is_trai2 else ("supp" if is_supp2 else None))))
-
-        if cat1 and cat2 and cat1 != cat2:
-            return False
-
-        c1 = re.sub(r'[^a-zA-Z0-9]', '', s1).lower()
-        c2 = re.sub(r'[^a-zA-Z0-9]', '', s2).lower()
-        if not c1 or not c2:
-            return False
-        if c1 == c2:
-            return True
-        if c1 in (f"truck{c2}", f"tr{c2}") or c2 in (f"truck{c1}", f"tr{c1}"):
-            return True
-
-        id1 = s1.split("|")[-1].strip() if "|" in s1 else s1
-        id2 = s2.split("|")[-1].strip() if "|" in s2 else s2
-        cid1 = re.sub(r'[^a-zA-Z0-9]', '', id1).lower()
-        cid2 = re.sub(r'[^a-zA-Z0-9]', '', id2).lower()
-        if cid1 and cid2 and cid1 == cid2:
-            return True
-
-        if cid1.isdigit() and cid2.isdigit() and int(cid1) == int(cid2):
-            if cat1 == cat2 or (not cat1 and not cat2):
-                return True
-
-        # Check extracted equipment number (e.g. '122' or '01')
-        m1 = re.search(r'\b\d{2,4}\b', s1)
-        m2 = re.search(r'\b\d{2,4}\b', s2)
-        if m1 and m2 and m1.group(0) == m2.group(0):
-            if cat1 == cat2 or (not cat1 and not cat2):
-                return True
-
-        return False
-
-    @staticmethod
-    def _extract_all_strings_recursive(obj) -> List[str]:
-        strings = []
+    def _extract_all_strings_recursive(self, obj: Any) -> List[str]:
+        """Extract all string values from nested ScheduleItem JSON."""
+        res = []
         if isinstance(obj, str):
-            if obj.strip():
-                strings.append(obj.strip())
+            res.append(obj)
         elif isinstance(obj, dict):
             for v in obj.values():
-                strings.extend(DispatchBoardDisplayAutomationScraper._extract_all_strings_recursive(v))
-        elif isinstance(obj, (list, tuple)):
-            for elem in obj:
-                strings.extend(DispatchBoardDisplayAutomationScraper._extract_all_strings_recursive(elem))
-        return strings
+                res.extend(self._extract_all_strings_recursive(v))
+        elif isinstance(obj, list):
+            for item in obj:
+                res.extend(self._extract_all_strings_recursive(item))
+        return res
 
     @staticmethod
-    def normalize_time_key(time_val: Optional[str]) -> str:
-        if not time_val:
+    def normalize_time_key(time_str: str) -> str:
+        """Normalizes time strings (e.g. '04:45 AM' -> '4:45 AM')."""
+        if not time_str:
             return ""
-        s = str(time_val).strip()
-        for fmt in ["%I:%M %p", "%I:%M%p", "%I:%M:%S %p", "%H:%M:%S", "%H:%M"]:
-            try:
-                dt = datetime.strptime(s.upper(), fmt)
-                formatted = dt.strftime("%I:%M %p")
-                return formatted[1:] if formatted.startswith("0") else formatted
-            except Exception:
-                pass
-        return s.upper().lstrip("0")
+        s = re.sub(r'[^a-zA-Z0-9:]', '', str(time_str)).upper()
+        m = re.search(r'(\d{1,2}):(\d{2})([AP]M)?', s)
+        if m:
+            h = int(m.group(1))
+            minute = m.group(2)
+            p = m.group(3) or ""
+            return f"{h}:{minute} {p}".strip()
+        return time_str.strip().lstrip("0")
 
-    @staticmethod
     def check_item_match(
+        self,
         wo: Dict,
         canon_target: str,
         time_key: Optional[str] = None,
-        require_customer_match: bool = False,
         is_service_wo: bool = False,
         is_oos_wo: bool = False,
+        require_customer_match: bool = False,
         match_any_status: bool = False
     ) -> bool:
-        if not canon_target:
+        """Determines if a live work order on the Dispatch Board matches the target specification."""
+        c_cust = wo.get("canon_customer", "")
+        raw_cust = wo.get("raw_customer", "")
+        w_time = wo.get("time_key", "")
+        wo_time_keys = wo.get("time_keys") or ({self.normalize_time_key(w_time)} if w_time else set())
+
+        name_match = (
+            c_cust == canon_target or
+            self.is_same_equipment(raw_cust, canon_target) or
+            (not require_customer_match and canon_target in wo.get("canon_strings", []))
+        )
+        if not name_match:
             return False
 
-        if wo.get("is_appointment"):
-            return False
+        if time_key:
+            norm_target = self.normalize_time_key(time_key)
+            norm_wo = self.normalize_time_key(w_time)
+            time_match = not norm_target or not norm_wo or norm_target == norm_wo or (norm_target in wo_time_keys)
+            if not time_match:
+                return False
 
         if not match_any_status:
-            wo_is_sn = bool(wo.get("is_service_needed"))
-            wo_is_oos = bool(wo.get("is_out_of_service"))
-
-            if is_service_wo and not wo_is_sn:
+            if is_service_wo and not wo.get("is_service_needed"):
                 return False
-            if not is_service_wo and wo_is_sn:
+            if is_oos_wo and not wo.get("is_out_of_service"):
                 return False
-
-            if is_oos_wo and not wo_is_oos:
-                return False
-            if not is_oos_wo and wo_is_oos:
+            if not is_service_wo and not is_oos_wo and (wo.get("is_service_needed") or wo.get("is_out_of_service")):
                 return False
 
-        w_time = wo.get("time_key", "")
-        wo_time_keys = wo.get("time_keys") or ({DispatchBoardDisplayAutomationScraper.normalize_time_key(w_time)} if w_time else set())
-        if time_key:
-            norm_target = DispatchBoardDisplayAutomationScraper.normalize_time_key(time_key)
-            if norm_target and wo_time_keys and norm_target not in wo_time_keys:
-                if not (is_service_wo or is_oos_wo):
-                    return False
+        return True
 
-        c_cust = wo.get("canon_customer", "")
-        c_strings = wo.get("canon_strings", [])
-
-        if require_customer_match or len(canon_target) <= 4 or len(c_cust) <= 4:
-            if c_cust == canon_target:
-                return True
-            if canon_target in c_strings:
-                if not any(cs.startswith("u") or cs.startswith("t") for cs in [c_cust, canon_target]):
-                    return True
-            if c_cust and canon_target and c_cust.isdigit() and canon_target.isdigit() and int(c_cust) == int(canon_target):
-                return True
-            return False
-
-        if canon_target in c_strings:
-            return True
-
-        if c_cust and len(canon_target) >= 5 and len(c_cust) >= 5 and (canon_target == c_cust or canon_target in c_cust or c_cust in canon_target):
-            return True
-
-        c_comb = wo.get("canon_combined", "")
-        if c_comb and len(canon_target) >= 5 and (canon_target == c_comb or canon_target in c_comb):
-            return True
-
-        return False
-
-    @staticmethod
-    def parse_fieldedge_datetime(dt_val: Any) -> Tuple[str, str, Optional[datetime_time]]:
-        """
-        Parses a FieldEdge datetime value into (date_str: YYYY-MM-DD, time_key: I:M p, time_obj: time).
-        FieldEdge API timestamps represent the local dispatch board time directly (even if trailing 'Z' is present).
-        """
-        if not dt_val:
+    def parse_fieldedge_datetime(self, dt_str: Optional[str]) -> Tuple[str, str, Optional[datetime.time]]:
+        """Parses FieldEdge date/time strings to (YYYY-MM-DD, 12h time_key, time_obj)."""
+        if not dt_str:
             return "", "", None
-        raw_str = str(dt_val).strip()
-        if not raw_str:
-            return "", "", None
+        raw_dt = str(dt_str).replace("Z", "").replace("T", " ")
+        raw_dt = re.sub(r'[+-]\d{2}:?\d{2}$', '', raw_dt).split(".")[0].strip()
 
-        clean_naive = re.sub(r'[+-]\d{2}:?\d{2}$', '', raw_str.replace("Z", "")).replace("T", " ").split(".")[0].strip()
-        for fmt in [
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%I:%M %p",
-            "%H:%M:%S",
-            "%H:%M"
-        ]:
+        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%I:%M %p", "%H:%M:%S", "%H:%M"]:
             try:
-                local_dt = datetime.strptime(clean_naive, fmt)
-                date_str = local_dt.strftime("%Y-%m-%d") if "%Y" in fmt else ""
-                time_key = local_dt.strftime("%I:%M %p")
-                if time_key.startswith("0"):
-                    time_key = time_key[1:]
-                return date_str, time_key, local_dt.time()
+                dt = datetime.strptime(raw_dt, fmt)
+                date_part = dt.strftime("%Y-%m-%d") if "%Y" in fmt else ""
+                t_k = dt.strftime("%I:%M %p").lstrip("0")
+                return date_part, t_k, dt.time()
             except Exception:
                 pass
-
         return "", "", None
 
-    def extract_existing_wos(self, board_data, target_date_key: Optional[str] = None):
+    def extract_existing_wos(self, board_data: Dict, target_date_key: Optional[str] = None) -> Tuple[Optional[str], Dict[str, List[Dict]]]:
+        """Parses FieldEdge DispatchBoard JSON payload into existing_wos grouped by technician."""
         if not board_data or "Board" not in board_data:
             return None, {}
-        
+
         board_date_str = target_date_key or None
-        existing_wos = {}
-        
+        existing_wos: Dict[str, List[Dict]] = {}
+
         if not board_date_str and board_data["Board"].get("Headers"):
-            first_header = board_data["Board"]["Headers"][0]
-            dt_str = first_header.get("HeaderDateTime")
-            if dt_str:
+            first_hdr = board_data["Board"]["Headers"][0]
+            dt_s = first_hdr.get("HeaderDateTime")
+            if dt_s:
                 try:
-                    board_date_str = dt_str.replace("T", " ").split(" ")[0]
+                    board_date_str = dt_s.replace("T", " ").split(" ")[0]
                 except Exception:
                     pass
 
         effective_date = target_date_key or board_date_str
-        
+
         for group in board_data["Board"].get("Groups", []):
             for row in group.get("Rows", []):
-                raw_row_name = row.get("Name") or ""
-                canon_tech = self.canonical_str(raw_row_name)
-                
+                canon_tech = self.canonical_str(row.get("Name") or "")
                 if canon_tech not in existing_wos:
                     existing_wos[canon_tech] = []
-                
+
                 for item in row.get("ScheduleItems", []):
                     all_raw_strings = self._extract_all_strings_recursive(item)
                     canon_strings = [self.canonical_str(s) for s in all_raw_strings if s]
-                    canon_strings = [cs for cs in canon_strings if cs]
-                    canon_combined = self.canonical_str(" ".join(all_raw_strings)) if all_raw_strings else ""
-
                     cust_name = str(item.get("CustomerName") or item.get("Customer") or item.get("Name") or item.get("Title") or "")
-                    canon_customer = self.canonical_str(cust_name)
-                    
-                    dt_str = (
-                        item.get("ScheduleDateTime") or
-                        item.get("ScheduledDateTime") or
-                        item.get("ScheduledFrom") or
-                        item.get("StartDateTime") or
-                        item.get("StartTime")
-                    )
+                    dt_str = item.get("ScheduleDateTime") or item.get("ScheduledDateTime") or item.get("StartDateTime") or item.get("StartTime")
                     item_date_str, time_key, time_obj = self.parse_fieldedge_datetime(dt_str)
 
-                    naive_date_str = ""
-                    naive_time_key = ""
-                    if dt_str:
-                        raw_dt_clean = re.sub(r'[+-]\d{2}:?\d{2}$', '', str(dt_str).replace("Z", "")).replace("T", " ").split(".")[0].strip()
-                        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%I:%M %p", "%H:%M:%S", "%H:%M"]:
-                            try:
-                                ldt = datetime.strptime(raw_dt_clean, fmt)
-                                if "%Y" in fmt:
-                                    naive_date_str = ldt.strftime("%Y-%m-%d")
-                                t_k = ldt.strftime("%I:%M %p")
-                                if t_k.startswith("0"): t_k = t_k[1:]
-                                naive_time_key = t_k
-                                break
-                            except Exception:
-                                pass
+                    if effective_date and item_date_str and item_date_str != effective_date:
+                        continue
 
-                    if effective_date:
-                        date_matches = (
-                            item_date_str == effective_date or
-                            naive_date_str == effective_date or
-                            (not item_date_str and not naive_date_str)
-                        )
-                        if not date_matches:
-                            continue
-
-                    time_keys = set()
-                    if time_key:
-                        time_keys.add(self.normalize_time_key(time_key))
-                    if naive_time_key:
-                        time_keys.add(self.normalize_time_key(naive_time_key))
-
-                    item_prio = str(item.get("Priority") or item.get("PriorityName") or item.get("PriorityDescription") or "")
+                    time_keys = {self.normalize_time_key(time_key)} if time_key else set()
+                    item_prio = str(item.get("Priority") or item.get("PriorityName") or "")
                     norm_prio = re.sub(r'[^a-zA-Z0-9]', '', item_prio).lower()
 
-                    is_sn = (
-                        "serviceneeded" in norm_prio or
-                        "712" in norm_prio or
-                        any("serviceneeded" in s.lower() or "712" in s for s in canon_strings) or
-                        bool(time_keys.intersection({"3:30 PM", "3:30", "03:30 PM", "3:30pm"})) and canon_tech in ["s3", "s4"]
-                    )
+                    is_sn = ("serviceneeded" in norm_prio or "712" in norm_prio or any("serviceneeded" in s.lower() or "712" in s for s in canon_strings))
+                    is_oos = ("donotdispatch" in norm_prio or "outofservice" in norm_prio or any("donotdispatch" in s.lower() or "outofservice" in s for s in canon_strings))
 
-                    is_oos = (
-                        "donotdispatch" in norm_prio or
-                        "outofservice" in norm_prio or
-                        any("donotdispatch" in s.lower() or "outofservice" in s.lower() for s in canon_strings) or
-                        bool(time_keys.intersection({"1:45 PM", "1:45", "01:45 PM", "1:45pm"})) and canon_tech in ["s3", "s4"]
-                    )
-                            
                     existing_wos[canon_tech].append({
-                        "canon_customer": canon_customer,
-                        "canon_strings": canon_strings,
-                        "canon_combined": canon_combined,
-                        "time_key": time_key or naive_time_key,
+                        "id": item.get("Id") or item.get("WorkOrderId"),
+                        "raw_customer": cust_name,
+                        "canon_customer": self.canonical_str(cust_name),
+                        "time_key": time_key,
                         "time_keys": time_keys,
                         "time_obj": time_obj,
                         "is_service_needed": is_sn,
                         "is_out_of_service": is_oos,
-                        "is_appointment": False
-                    })
-
-                for appt in row.get("AppointmentItems", []):
-                    all_raw_strings = self._extract_all_strings_recursive(appt)
-                    canon_strings = [self.canonical_str(s) for s in all_raw_strings if s]
-                    canon_strings = [cs for cs in canon_strings if cs]
-                    canon_combined = self.canonical_str(" ".join(all_raw_strings)) if all_raw_strings else ""
-
-                    desc_name = str(appt.get("Description") or appt.get("Title") or appt.get("Name") or "OFF")
-                    canon_customer = self.canonical_str(desc_name)
-
-                    dt_str = (
-                        appt.get("ScheduledFrom") or
-                        appt.get("ScheduleDateTime") or
-                        appt.get("ScheduledDateTime") or
-                        appt.get("StartDateTime") or
-                        appt.get("StartTime")
-                    )
-                    dt_to_str = appt.get("ScheduledTo") or appt.get("EndDateTime")
-                    appt_from_date, time_key, start_time_obj = self.parse_fieldedge_datetime(dt_str)
-                    appt_to_date, _, end_time_obj = self.parse_fieldedge_datetime(dt_to_str)
-
-                    if effective_date:
-                        if appt_to_date and appt_to_date < effective_date:
-                            continue
-                        if appt_from_date and appt_from_date > effective_date:
-                            continue
-
-                    existing_wos[canon_tech].append({
-                        "canon_customer": canon_customer,
                         "canon_strings": canon_strings,
-                        "canon_combined": canon_combined,
-                        "time_key": time_key,
-                        "start_time_obj": start_time_obj,
-                        "end_time_obj": end_time_obj,
-                        "is_appointment": True
+                        "is_appointment": bool(item.get("AppointmentId") or item.get("IsAppointment")),
+                        "start_time_obj": time_obj
                     })
-                        
+
         return board_date_str, existing_wos
 
-    async def fetch_board_data_for_date(self, target_date_str: str, board_req: dict):
-        req_to_use = board_req or getattr(self, 'board_req', {})
+    # --- BOARD NAVIGATION & DATA FETCHING ---
+
+    async def fetch_board_data_for_date(self, target_date_str: str, board_req: dict) -> Tuple[Optional[str], Dict[str, List[Dict]]]:
+        """Dynamically fetch Dispatch Board JSON payload for target date using captured request."""
+        req_to_use = board_req or self.board_req
         if not req_to_use or not req_to_use.get("url"):
-            print(f"  ⚠️ Cannot dynamically fetch board data for {target_date_str}: board_req template missing.")
             return None, {}
 
         try:
             payload = json.loads(req_to_use.get("post_data") or "{}")
-            payload["Date"] = target_date_str + "T00:00:00"
+            payload["Date"] = f"{target_date_str}T00:00:00"
             for k in list(payload.keys()):
                 if "date" in k.lower():
-                    if "end" in k.lower():
-                        payload[k] = target_date_str + "T23:59:59"
-                    else:
-                        payload[k] = target_date_str + "T00:00:00"
+                    payload[k] = f"{target_date_str}T23:59:59" if "end" in k.lower() else f"{target_date_str}T00:00:00"
 
-            headers = dict(req_to_use.get("headers", {}))
-            cleaned_headers = {}
-            forbidden = {'host', 'content-length', 'connection', 'origin', 'referer', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'}
-            for hk, hv in headers.items():
-                if hk.lower() not in forbidden and not hk.startswith(':'):
-                    cleaned_headers[hk] = hv
-            cleaned_headers['Content-Type'] = 'application/json'
+            headers = {k: v for k, v in req_to_use.get("headers", {}).items() if k.lower() not in {'host', 'content-length', 'connection', 'origin', 'referer', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'} and not k.startswith(':')}
+            headers['Content-Type'] = 'application/json'
 
             fetch_js = f"""
             async () => {{
@@ -812,12 +411,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     const resp = await fetch("{req_to_use['url']}", {{
                         method: 'POST',
                         credentials: 'include',
-                        headers: {json.dumps(cleaned_headers)},
+                        headers: {json.dumps(headers)},
                         body: JSON.stringify({json.dumps(payload)})
                     }});
-                    if (!resp.ok) {{
-                        return {{ error: 'HTTP ' + resp.status, status: resp.status }};
-                    }}
+                    if (!resp.ok) return {{ error: 'HTTP ' + resp.status }};
                     return await resp.json();
                 }} catch(e) {{
                     return {{ error: e.toString() }};
@@ -829,11 +426,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 self.intercepted_board_by_date[target_date_str] = new_data
                 b_date, e_wos = self.extract_existing_wos(new_data, target_date_key=target_date_str)
                 total_wos = sum(len(w_l) for w_l in e_wos.values())
-                print(f"📡 Dynamically fetched board date: '{b_date}' | Found {len(e_wos)} tech groups, {total_wos} existing work orders.")
+                print(f"📡 Dynamically fetched board date: '{b_date}' | Found {len(e_wos)} tech groups, {total_wos} work orders.")
                 return b_date, e_wos
-            else:
-                err_msg = new_data.get("error") if isinstance(new_data, dict) else str(new_data)
-                print(f"⚠️ Dynamic board fetch returned invalid response for {target_date_str}: {err_msg}")
         except Exception as e:
             print(f"⚠️ Exception fetching board data for {target_date_str}: {e}")
         return None, {}
@@ -841,37 +435,25 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
     async def get_or_fetch_board_data_for_date(self, target_date_obj: datetime, max_retries: int = 2) -> Tuple[Optional[str], Optional[Dict]]:
         target_date_key = target_date_obj.strftime("%Y-%m-%d")
 
-        # 1. First check if we already have it in cache
         if target_date_key in self.intercepted_board_by_date:
             b_data = self.intercepted_board_by_date[target_date_key]
             b_date, e_wos = self.extract_existing_wos(b_data, target_date_key=target_date_key)
-            total_items = sum(len(w_list) for w_list in e_wos.values())
-            print(f"📡 Verified FieldEdge API board data from cache for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
             return b_date, e_wos
 
-        # 2. Navigate to the date on the Dispatch Board
         await self.navigate_to_board_date(target_date_obj)
 
-        # 3. Dynamic fetch via page.evaluate
         if self.board_req and self.board_req.get("url"):
             print(f"🔄 Fetching FieldEdge API board data for target date {target_date_key}...")
             b_date, e_wos = await self.fetch_board_data_for_date(target_date_key, self.board_req)
             if b_date == target_date_key and e_wos is not None:
-                total_items = sum(len(w_list) for w_list in e_wos.values())
-                print(f"📡 Verified FieldEdge API board data via fetch for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
                 return b_date, e_wos
 
-        # 4. If retry is allowed, retry once
         if max_retries > 0:
-            print(f"🔁 Retrying FieldEdge API board fetch for {target_date_key}...")
             await self.page.wait_for_timeout(1000)
             b_date, e_wos = await self.fetch_board_data_for_date(target_date_key, self.board_req)
             if b_date == target_date_key and e_wos is not None:
-                total_items = sum(len(w_list) for w_list in e_wos.values())
-                print(f"📡 Verified FieldEdge API board data on retry for {target_date_key}: {len(e_wos)} tech groups, {total_items} items.")
                 return b_date, e_wos
 
-        # 5. If STILL not verified, do NOT guess or default to empty dict! Return None to indicate failure!
         print(f"⛔ CRITICAL SAFETY GUARD: Could NOT verify FieldEdge Dispatch Board API for date {target_date_key}!")
         return None, None
 
@@ -879,8 +461,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         try:
             date_url_str = target_date_obj.strftime("%m-%d-%Y")
             target_url = f"https://login.fieldedge.com/#/DispatchBoard/{date_url_str}"
-            print(f"🗓️ Navigating to Dispatch Board URL for date: {target_url}")
-            
+            print(f"🗓️ Navigating to Dispatch Board URL: {target_url}")
             await self.page.goto(target_url, wait_until='domcontentloaded', timeout=30000)
             await self.page.reload(wait_until='domcontentloaded', timeout=30000)
             try:
@@ -889,11 +470,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await spinners.first.wait_for(state="hidden", timeout=4000)
             except Exception:
                 pass
-
             await self.page.wait_for_timeout(1000)
             return True
         except Exception as e:
-            print(f"⚠️ Could not navigate to board date via URL {target_url}: {e}")
+            print(f"⚠️ Could not navigate to board date via URL: {e}")
             return False
 
     async def ensure_clean_dispatch_board(self, force_reload: bool = False):
@@ -902,735 +482,263 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         if "Login" in current_url or await self.page.locator("input[name='UserName']").is_visible():
             print("⚠️ Detected Login redirect. Re-authenticating to FieldEdge...")
-            try:
-                await self.login_fieldedge()
-                print(f"Returning to Dispatch Board: {dispatch_url}")
-                await self.page.goto(dispatch_url, wait_until='domcontentloaded')
-                try:
-                    btn_loc = self.page.locator("//button[contains(normalize-space(), 'Work Order') or contains(normalize-space(), 'Create Work Order')]")
-                    await btn_loc.first.wait_for(state="attached", timeout=4000)
-                except Exception:
-                    await self.page.wait_for_timeout(1000)
-                await self.page.wait_for_timeout(500)
-            except Exception as e:
-                print(f"❌ Re-authentication failed: {e}")
+            await self.login_fieldedge()
+            await self.page.goto(dispatch_url, wait_until='domcontentloaded')
+            await self.page.wait_for_timeout(500)
             return
 
-        needs_fresh_load = force_reload
-
-        if "Dispatch" not in current_url or "DispatchSummary" in current_url:
-            needs_fresh_load = True
-        else:
-            try:
-                spinners = self.page.locator(".loading, .spinner, .v-spinner, div[class*='loading']:visible")
-                if await spinners.count() > 0 and await spinners.first.is_visible():
-                    try:
-                        await spinners.first.wait_for(state="hidden", timeout=4000)
-                    except Exception:
-                        print("⚠️ Dispatch Board stuck in loading spinner. Triggering fresh page reload...")
-                        needs_fresh_load = True
-            except Exception:
-                pass
-
-        if needs_fresh_load:
-            print(f"🔄 Fresh loading Dispatch Board URL: {dispatch_url}")
-            try:
-                await self.page.goto(dispatch_url, wait_until='domcontentloaded', timeout=30000)
-            except Exception as e:
-                print(f"⚠️ Navigation error ({e}). Retrying page reload...")
-                await self.page.reload(wait_until='domcontentloaded')
-            try:
-                btn_loc = self.page.locator("//button[contains(normalize-space(), 'Work Order') or contains(normalize-space(), 'Create Work Order')]")
-                await btn_loc.first.wait_for(state="attached", timeout=4000)
-            except Exception:
-                await self.page.wait_for_timeout(1000)
+        if force_reload or "Dispatch" not in current_url or "DispatchSummary" in current_url:
+            print(f"🔄 Reloading Dispatch Board URL: {dispatch_url}")
+            await self.page.goto(dispatch_url, wait_until='domcontentloaded', timeout=30000)
             await self.page.wait_for_timeout(500)
 
-    async def open_create_wo_modal(self):
-        xpath = self.rules.get('dispatch_board_create_wo_btn_xpath') or "//button[contains(normalize-space(), 'Work Order') or contains(normalize-space(), 'Create Work Order')]"
-        if not xpath:
-            print("⚠️ 'dispatch_board_create_wo_btn_xpath' rule not defined.")
-            return False
+    # --- WORK ORDER MODAL CONTROLS ---
+
+    async def open_create_wo_modal(self) -> bool:
+        """Opens Create Work Order modal, handling loading spinners and reload fallbacks."""
+        customer_sel = self.rules.get(
+            'dispatch_board_customer_xpath',
+            "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]"
+        )
+        if await self.page.locator(customer_sel).count() > 0 and await self.page.locator(customer_sel).first.is_visible():
+            return True
 
         await self.ensure_clean_dispatch_board()
 
-        customer_modal_selectors = [
-            self.rules.get(
-                'dispatch_board_customer_xpath',
-                "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]"
-            ),
-            "#vscreate-wo-customer-select",
-            "#vscreate-wo-customer-select__combobox",
-            "div[id*='vscreate-wo-customer-select']",
-            ".customer-select",
-            ".customer-search-container"
-        ]
-
-        # 1. Quick check: is the Create Work Order modal ALREADY open from a previous step?
-        for cand in customer_modal_selectors:
-            try:
-                m_loc = self.page.locator(cand).first
-                if await m_loc.count() > 0 and await m_loc.is_visible():
-                    return True
-            except Exception:
-                pass
-
-        # 2. Wait for any loading spinners or overlays to clear first
-        try:
-            spinners = self.page.locator(".loading, .spinner, .v-spinner, div[class*='loading']:visible")
-            if await spinners.count() > 0:
-                await spinners.first.wait_for(state="hidden", timeout=5000)
-        except Exception:
-            pass
-
         btn_candidates = [
-            xpath,
-            "//button[contains(normalize-space(), 'Create Work Order') or contains(normalize-space(), 'Work Order')]",
+            self.rules.get('dispatch_board_create_wo_btn_xpath', "//button[contains(normalize-space(), 'Work Order')]"),
             "button:has-text('Create Work Order')",
             "button:has-text('Work Order')",
-            "button[data-automation-id*='create-wo']",
-            "button[class*='create-wo']"
+            "button[data-automation-id*='create-wo']"
         ]
 
-        # 3. Robust polling loop: give FieldEdge up to 10 seconds to finish rendering and make button visible
-        import time
-        start_t = time.time()
-        clicked = False
-
-        while time.time() - start_t < 10:
+        for attempt in range(2):
             for cand in btn_candidates:
-                try:
-                    btns = self.page.locator(cand)
-                    c = await btns.count()
-                    for i in range(c):
-                        btn = btns.nth(i)
-                        if await btn.is_visible():
-                            await btn.scroll_into_view_if_needed()
-                            try:
-                                await btn.click(timeout=1500)
-                            except Exception:
-                                await self.page.evaluate("(el) => el.click()", await btn.element_handle())
-                            clicked = True
-                            break
-                    if clicked:
-                        break
-                except Exception:
-                    pass
-            if clicked:
-                break
-            await self.page.wait_for_timeout(300)
-
-        # 4. Wait for modal to appear
-        if clicked:
-            _modal_start = time.time()
-            modal_visible = False
-            while time.time() - _modal_start < 10:
-                for cand in customer_modal_selectors:
+                btn = self.page.locator(cand).first
+                if await btn.count() > 0 and await btn.is_visible():
                     try:
-                        loc = self.page.locator(cand).first
-                        if await loc.count() > 0 and await loc.is_visible():
-                            modal_visible = True
-                            break
+                        await btn.click(timeout=2000)
                     except Exception:
-                        pass
-                if modal_visible:
+                        await self.page.evaluate("(el) => el.click()", await btn.element_handle())
                     break
-                await self.page.wait_for_timeout(150)
 
-            if modal_visible:
-                return True
+            start_t = time.time()
+            while time.time() - start_t < 8:
+                if await self.page.locator(customer_sel).count() > 0 and await self.page.locator(customer_sel).first.is_visible():
+                    return True
+                await self.page.wait_for_timeout(200)
 
-            print("  -> Customer modal element not detected after initial click, attempting JS re-click...")
-            for cand in btn_candidates:
-                try:
-                    btns = self.page.locator(cand)
-                    c = await btns.count()
-                    for i in range(c):
-                        btn = btns.nth(i)
-                        if await btn.is_visible():
-                            try:
-                                await self.page.evaluate("(el) => el.click()", await btn.element_handle())
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-            await self.page.wait_for_timeout(1000)
+            if attempt == 0:
+                print("⚠️ Retrying opening modal with fresh Dispatch Board reload...")
+                await self.ensure_clean_dispatch_board(force_reload=True)
 
-            for cand in customer_modal_selectors:
-                try:
-                    loc = self.page.locator(cand).first
-                    if await loc.count() > 0 and await loc.is_visible():
-                        return True
-                except Exception:
-                    pass
+        return False
 
-        # 5. Fallback reload retry if initial attempts failed
-        print("⚠️ Could not locate or open Create Work Order modal within 10s. Retrying with fresh dispatch board reload...")
+    async def close_create_wo_modal(self) -> bool:
+        """Closes open Create Work Order modal using Cancel button or Escape."""
         try:
-            await self.ensure_clean_dispatch_board(force_reload=True)
-            await self.page.wait_for_timeout(1000)
-
-            retry_clicked = False
-            retry_start = time.time()
-            while time.time() - retry_start < 10:
-                for cand in btn_candidates:
-                    try:
-                        btns = self.page.locator(cand)
-                        c = await btns.count()
-                        for i in range(c):
-                            btn = btns.nth(i)
-                            if await btn.is_visible():
-                                await btn.scroll_into_view_if_needed()
-                                try:
-                                    await btn.click(timeout=1500)
-                                except Exception:
-                                    await self.page.evaluate("(el) => el.click()", await btn.element_handle())
-                                retry_clicked = True
-                                break
-                        if retry_clicked:
-                            break
-                    except Exception:
-                        pass
-                if retry_clicked:
-                    break
-                await self.page.wait_for_timeout(300)
-
-            if not retry_clicked:
-                print("❌ Retry also failed: No visible Create Work Order button found.")
-                return False
-
-            await self.page.wait_for_timeout(1000)
-            return True
-        except Exception as retry_err:
-            print(f"❌ Retry also failed: {retry_err}")
-            return False
-
-    async def close_create_wo_modal(self):
-        try:
-            cancel_candidates = [
-                "button:has-text('Cancel')",
-                "button.cancel_button",
-                ".modal-header .close",
-                "button.close",
-                "[aria-label='Close']",
-                ".modal-close"
-            ]
-            for cand in cancel_candidates:
+            for cand in ["button:has-text('Cancel')", "button.close", "[aria-label='Close']"]:
                 btn = self.page.locator(cand).first
                 if await btn.count() > 0 and await btn.is_visible():
                     await btn.click(force=True)
                     await self.page.wait_for_timeout(200)
                     return True
             await self.page.keyboard.press("Escape")
-            await self.page.wait_for_timeout(250)
+            await self.page.wait_for_timeout(200)
             return True
         except Exception:
             return False
 
     @staticmethod
     def extract_name_variants(text: str) -> List[str]:
-        """
-        Extracts all useful search & match variants for a name (with and without emojis/pipes).
-        e.g. '👥 | GENE' -> ['👥 | GENE', '| GENE', 'GENE']
-             '🛻 | 04'   -> ['🛻 | 04', '| 04', '04']
-             ' GENE'     -> [' GENE', 'GENE']
-        """
-        variants = []
+        """Extracts name search variants (with/without emojis, after pipes)."""
         if not text:
-            return variants
+            return []
         raw = str(text).strip()
-        variants.append(raw)
-
-        # 1. Strip emojis and astral unicode symbols
+        variants = [raw]
         no_emoji = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f\u200d]', '', raw).strip()
         if no_emoji and no_emoji != raw:
             variants.append(no_emoji)
-
-        # 2. Strip leading/trailing pipes, symbols, whitespace, em-spaces
         clean_core = re.sub(r'^[|#\-_\s\u2000-\u200f]+|[|#\-_\s\u2000-\u200f]+$', '', no_emoji).strip()
         if clean_core and clean_core not in variants:
             variants.append(clean_core)
-
-        # 3. Extract after pipe if present
         if "|" in raw:
-            right_side = raw.split("|")[-1].strip()
-            right_clean = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f\u200d\u2000-\u200f]', '', right_side).strip()
-            if right_clean and right_clean not in variants:
-                variants.append(right_clean)
-
+            right_side = re.sub(r'[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f\u200d\u2000-\u200f]', '', raw.split("|")[-1]).strip()
+            if right_side and right_side not in variants:
+                variants.append(right_side)
         return variants
-
-    _BANNER_EMOJI_REGEX = re.compile(
-        r'['
-        r'\u203C-\u3299'         # Miscellaneous symbols, Dingbats, geometric shapes
-        r'\U0001F000-\U0001F9FF' # Emoticons, transport, supplemental symbols
-        r'\U0001FA00-\U0001FAFF' # Symbols and pictographs extended-A
-        r']+'
-    )
 
     @classmethod
     def has_banner_prefix(cls, t: str) -> bool:
-        if not t:
-            return False
-        return ('|' in t) or bool(cls._BANNER_EMOJI_REGEX.search(str(t)))
+        return ('|' in str(t)) or bool(cls._BANNER_EMOJI_REGEX.search(str(t)))
+
+    # --- DROPDOWN SELECTION & VERIFICATION ---
 
     async def select_dropdown_option(
         self,
         dropdown_selector: str,
         option_text: str,
-        press_enter: bool = True,
+        press_enter: bool = False,
         is_tech: bool = False,
         is_customer: bool = False
     ) -> bool:
+        """
+        Selects an option in a Vue-Select dropdown.
+        Strictly enforces exact technician names without fuzzy/partial searches.
+        Enforces category and emoji guards on equipment.
+        """
         if not option_text:
-            return True
+            return False
 
-        import unicodedata
         try:
             dropdown = self.page.locator(dropdown_selector).first
-            try:
-                await dropdown.wait_for(state="visible", timeout=8000)
-            except Exception:
-                pass
+            await dropdown.wait_for(state="visible", timeout=10000)
+            search_input = dropdown.locator("input.vs__search, input").first
 
-            await dropdown.scroll_into_view_if_needed()
-            await dropdown.click(force=True)
-            await self.page.wait_for_timeout(250)
+            # Check existing selection
+            sel_el = dropdown.locator(".vs__selected, .selected-tag").first
+            if await sel_el.count() > 0 and await sel_el.is_visible():
+                cur_val = (await sel_el.text_content() or "").strip()
+                clean_cur = re.sub(r'[\u00d7xX]$', '', cur_val).strip()
 
-            search_input = dropdown.locator("input.vs__search, input[type='search'], input").first
-            if await search_input.count() == 0 or not await search_input.is_visible():
-                search_input = self.page.locator("input.vs__search:visible, input[type='search']:visible").first
+                already_matched = False
+                if is_tech:
+                    already_matched = self.is_tech_match(clean_cur, option_text) or self.is_tech_match(cur_val, option_text)
+                elif self.is_same_equipment(clean_cur, option_text) or clean_cur == option_text or self.canonical_str(clean_cur) == self.canonical_str(option_text):
+                    already_matched = True
 
-            if not is_customer:
-                is_customer = "customer" in dropdown_selector.lower()
-            if not is_tech:
-                is_tech = "primary tech" in dropdown_selector.lower() or "tech" in dropdown_selector.lower()
+                if already_matched:
+                    print(f"  -> '{option_text}' already selected in dropdown ('{cur_val}'). Proceeding.")
+                    return True
 
-            # Pre-check: if dropdown already has an item selected
-            existing_sel = dropdown.locator(".vs__selected, .selected-tag").first
-            if await existing_sel.count() > 0:
-                cur_val = (await existing_sel.text_content() or "").strip()
-                if cur_val:
-                    clean_cur = re.sub(r'[\u00d7xX]$', '', cur_val).strip()
-                    already_matched = False
-                    if cur_val == option_text or clean_cur == option_text or self.canonical_str(clean_cur) == self.canonical_str(option_text):
-                        already_matched = True
-                    elif self.is_same_equipment(cur_val, option_text):
-                        already_matched = True
-                    elif is_tech and (self.is_tech_match(clean_cur, option_text) or self.is_tech_match(cur_val, option_text)):
-                        already_matched = True
+                clear_btn = dropdown.locator(".vs__clear, button.close, button.vs__clear").first
+                if await clear_btn.count() > 0 and await clear_btn.is_visible():
+                    await clear_btn.click(force=True)
+                else:
+                    await search_input.click(force=True)
+                    await search_input.press("Backspace")
+                await self.page.wait_for_timeout(250)
 
-                    if already_matched:
-                        print(f"  -> '{option_text}' is already selected in dropdown ('{cur_val}'). Proceeding.")
-                        return True
-                    else:
-                        print(f"  -> Clearing existing mismatched selection '{cur_val}' (expected '{option_text}')...")
-                        clear_btn = dropdown.locator(".vs__clear, button.vs__clear, button.close, .vs__actions button").first
-                        if await clear_btn.count() > 0 and await clear_btn.is_visible():
-                            await clear_btn.click(force=True)
-                        else:
-                            await search_input.click(force=True)
-                            await search_input.press("Backspace")
-                        await self.page.wait_for_timeout(300)
+            await search_input.focus()
+            await search_input.fill("")
 
-            try:
-                await search_input.focus()
-                await search_input.fill("")
-            except Exception:
-                pass
+            # Prepare search term
+            type_text = str(option_text).strip()
+            clean_search = unicodedata.normalize('NFKD', type_text).strip()
+            target_canon = self.canonical_str(type_text)
 
-            if is_tech:
-                target_has_banner = False
-                name_variants = [str(option_text).strip()]
-                target_canons = {self.canonical_str(option_text)}
-                target_norms = {unicodedata.normalize('NFKD', option_text).strip().lower()}
-                is_time_target = False
-                clean_search = unicodedata.normalize('NFKD', option_text).strip()
-                clean_core = clean_search
-            else:
-                target_has_banner = self.has_banner_prefix(option_text)
-                name_variants = self.extract_name_variants(option_text)
-                target_canons = set(self.canonical_str(v) for v in name_variants if self.canonical_str(v))
-                target_norms = set(unicodedata.normalize('NFKD', v).strip().lower() for v in name_variants if v)
-                is_time_target = bool(re.search(r'\b\d{1,2}:\d{2}\b', option_text)) or any(w in ('am', 'pm') for w in re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
-                clean_search = unicodedata.normalize('NFKD', option_text).strip()
-                clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
+            name_variants = [type_text] if is_tech else self.extract_name_variants(option_text)
+            target_canons = {self.canonical_str(v) for v in name_variants if self.canonical_str(v)}
+            target_has_banner = False if is_tech else self.has_banner_prefix(option_text)
 
-            type_text = re.sub(r'^[\s\u2000-\u200f]+|[\s\u2000-\u200f]+$', '', str(option_text)).strip('\r\n')
             await search_input.fill(type_text)
 
-            has_match = False
             if press_enter or is_customer:
-                print(f"  🔍 Entered search '{type_text}'. Pressing Enter to initiate search...")
+                print(f"  🔍 Entered '{type_text}'. Pressing Enter to initiate search...")
                 await search_input.press("Enter")
                 await self.page.wait_for_timeout(500)
-
-                # Wait for search loader / spinner to complete
-                print(f"  ⏳ Waiting for customer search loader/spinner to complete...")
                 try:
-                    spinner_loc = dropdown.locator(".vs__spinner:visible, .spinner:visible, .loading:visible, .vs--loading:visible, [role='status']:visible")
-                    if await spinner_loc.count() > 0:
-                        await spinner_loc.first.wait_for(state="hidden", timeout=12000)
-                except Exception:
-                    pass
-
-                # Poll options for matching result (up to 8 seconds)
-                _poll_start = time.time()
-                while (time.time() - _poll_start) < 8.0:
-                    options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
-                    opt_cnt = await options.count()
-                    if opt_cnt > 0:
-                        for idx in range(opt_cnt):
-                            txt = (await options.nth(idx).text_content() or "").strip()
-                            first_line = [l.strip() for l in txt.splitlines() if l.strip()][0] if txt else ""
-                            if (
-                                self.is_same_equipment(option_text, txt) or
-                                self.is_same_equipment(option_text, first_line) or
-                                (is_tech and (self.is_tech_match(txt, option_text) or self.is_tech_match(first_line, option_text))) or
-                                txt == option_text or
-                                first_line == option_text or
-                                self.canonical_str(txt) == target_canon or
-                                self.canonical_str(first_line) == target_canon
-                            ):
-                                has_match = True
-                                break
-                        if has_match:
-                            print(f"  -> Matching option appeared in dropdown after {time.time() - _poll_start:.1f}s.")
-                            break
-                    await self.page.wait_for_timeout(350)
-
-                # Fallback search if no match found with full term (e.g. searching with truck number without emoji)
-                if not has_match and not is_tech:
-                    fallback_terms = []
-                    m_dig = re.search(r'\b\d{2,4}\b', clean_search)
-                    if m_dig and m_dig.group(0) != type_text:
-                        fallback_terms.append(m_dig.group(0))
-                    for v in name_variants:
-                        if v != type_text and v not in fallback_terms:
-                            fallback_terms.append(v)
-
-                    for fb_term in fallback_terms:
-                        print(f"  -> No matching option for '{type_text}'. Retrying search with '{fb_term}'...")
-                        try:
-                            await search_input.focus()
-                            await search_input.fill("")
-                            await search_input.fill(fb_term)
-                            await self.page.wait_for_timeout(300)
-                            await search_input.press("Enter")
-                            await self.page.wait_for_timeout(500)
-                            try:
-                                spinner_loc = dropdown.locator(".vs__spinner:visible, .spinner:visible, .loading:visible, .vs--loading:visible, [role='status']:visible")
-                                if await spinner_loc.count() > 0:
-                                    await spinner_loc.first.wait_for(state="hidden", timeout=12000)
-                            except Exception:
-                                pass
-                            _fb_poll = time.time()
-                            while (time.time() - _fb_poll) < 6.0:
-                                options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
-                                opt_cnt = await options.count()
-                                for idx in range(opt_cnt):
-                                    txt = (await options.nth(idx).text_content() or "").strip()
-                                    first_line = [l.strip() for l in txt.splitlines() if l.strip()][0] if txt else ""
-                                    if (
-                                        self.is_same_equipment(option_text, txt) or
-                                        self.is_same_equipment(option_text, first_line) or
-                                        (is_tech and (self.is_tech_match(txt, option_text) or self.is_tech_match(first_line, option_text))) or
-                                        txt == option_text or
-                                        first_line == option_text or
-                                        self.canonical_str(txt) == target_canon or
-                                        self.canonical_str(first_line) == target_canon
-                                    ):
-                                        has_match = True
-                                        break
-                                if has_match:
-                                    print(f"  -> Matching option appeared with '{fb_term}' after {time.time() - _fb_poll:.1f}s.")
-                                    break
-                                await self.page.wait_for_timeout(350)
-                            if has_match:
-                                break
-                        except Exception:
-                            pass
-            else:
-                await self.page.wait_for_timeout(500)
-                options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
-                try:
-                    await options.first.wait_for(state="visible", timeout=4000)
+                    spinner = dropdown.locator(".vs__spinner:visible, .spinner:visible")
+                    if await spinner.count() > 0:
+                        await spinner.first.wait_for(state="hidden", timeout=12000)
                 except Exception:
                     pass
 
             options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
-            if (await options.count()) == 0:
-                options = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
 
-            count = await options.count()
-            clicked = False
-            raw_target = option_text.strip()
-            target_norm = clean_search.lower()
-            target_canon = self.canonical_str(option_text)
-            m_core = re.sub(r'^[a-z0-9]\s*', '', target_norm)
-            core_name = m_core if len(m_core) >= 3 else target_norm
-
-            async def _exact_match_option(opt_el, strict_banner: bool = True) -> bool:
-                if not await opt_el.is_visible():
+            async def _check_and_click_option(opt_candidate, is_fuzzy: bool = False) -> bool:
+                if not await opt_candidate.is_visible():
                     return False
-                raw_text = await opt_el.text_content()
+                raw_text = (await opt_candidate.text_content() or "").strip()
                 if not raw_text:
                     return False
-                s_raw = raw_text.strip()
-                clean_s = re.sub(r'[\u00d7xX]$', '', s_raw).strip()
-                first_line = [l.strip() for l in s_raw.splitlines() if l.strip()][0] if s_raw else ""
-                clean_first = re.sub(r'[\u00d7xX]$', '', first_line).strip()
-                norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
-                c_first = self.canonical_str(first_line)
-                c_raw = self.canonical_str(s_raw)
+                clean_opt = re.sub(r'[\u00d7xX]$', '', raw_text).strip()
+                first_line = clean_opt.splitlines()[0].strip() if clean_opt else ""
 
-                if is_time_target:
-                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                    o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', s_raw.lower()))
-                    if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
-                        return False
-
-                # 1. Equipment & Fleet Category / Emoji Lock:
-                is_target_fleet = any(x in option_text for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
-                is_cand_fleet = any(x in s_raw for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
-                if is_target_fleet or is_cand_fleet:
-                    if self.is_same_equipment(option_text, s_raw) or self.is_same_equipment(option_text, first_line):
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
-                        return True
-                    else:
-                        return False
-
-                # 2. Technician lock:
                 if is_tech:
-                    if (
-                        self.is_tech_match(clean_s, option_text) or
-                        self.is_tech_match(clean_first, option_text) or
-                        self.is_tech_match(s_raw, option_text) or
-                        self.is_tech_match(first_line, option_text)
-                    ):
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
+                    if self.is_tech_match(clean_opt, option_text) or self.is_tech_match(first_line, option_text):
+                        await opt_candidate.scroll_into_view_if_needed()
+                        await opt_candidate.click(force=True)
                         return True
-                    else:
-                        return False
-
-                if strict_banner and (self.has_banner_prefix(s_raw) != target_has_banner):
                     return False
 
-                if (
-                    s_raw == raw_target or
-                    first_line in name_variants or
-                    s_raw in name_variants or
-                    norm_first == target_norm or
-                    norm_first in target_norms or
-                    c_first == target_canon or
-                    c_raw == target_canon or
-                    c_first in target_canons or
-                    c_raw in target_canons or
-                    self.is_tech_match(clean_s, option_text) or
-                    self.is_tech_match(clean_first, option_text) or
-                    self.is_tech_match(s_raw, option_text) or
-                    self.is_tech_match(first_line, option_text)
-                ):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-                return False
+                # Equipment & fleet check
+                if any(x in option_text for x in ("🚛", "🛻", "🏗")) or any(x in clean_opt for x in ("🚛", "🛻", "🏗")):
+                    if self.is_same_equipment(option_text, clean_opt) or self.is_same_equipment(option_text, first_line):
+                        await opt_candidate.scroll_into_view_if_needed()
+                        await opt_candidate.click(force=True)
+                        return True
+                    return False
 
-            async def _fuzzy_match_option(opt_el, strict_banner: bool = True) -> bool:
-                if is_tech:
+                if self.has_banner_prefix(clean_opt) != target_has_banner:
                     return False
-                if not await opt_el.is_visible():
-                    return False
-                raw_text = await opt_el.text_content()
-                if not raw_text:
-                    return False
-                s_raw = raw_text.strip()
-                if s_raw == raw_target:
-                    return False
-                clean_s = re.sub(r'[\u00d7xX]$', '', s_raw).strip()
-                first_line = [l.strip() for l in s_raw.splitlines() if l.strip()][0] if s_raw else ""
-                clean_first = re.sub(r'[\u00d7xX]$', '', first_line).strip()
-                norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
-                norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
-                c_raw = self.canonical_str(s_raw)
+
+                c_opt = self.canonical_str(clean_opt)
                 c_first = self.canonical_str(first_line)
-
-                if is_time_target:
-                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                    o_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', s_raw.lower()))
-                    if ('am' in t_words) != ('am' in o_words) or ('pm' in t_words) != ('pm' in o_words):
-                        return False
-
-                # 1. Equipment & Fleet Category / Emoji Lock:
-                is_target_fleet = any(x in option_text for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
-                is_cand_fleet = any(x in s_raw for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
-                if is_target_fleet or is_cand_fleet:
-                    if self.is_same_equipment(option_text, s_raw) or self.is_same_equipment(option_text, first_line):
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
+                if not is_fuzzy:
+                    if clean_opt == type_text or clean_opt in name_variants or c_opt in target_canons or c_first in target_canons:
+                        await opt_candidate.scroll_into_view_if_needed()
+                        await opt_candidate.click(force=True)
                         return True
-                    else:
-                        return False
-
-                if strict_banner and (self.has_banner_prefix(s_raw) != target_has_banner):
-                    return False
-
-                if norm_raw == target_norm or norm_raw == clean_core.lower() or norm_first in target_norms:
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                if (c_first and c_first in target_canons) or (c_raw and c_raw in target_canons):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                if target_canon and (target_canon == c_raw or target_canon == c_first or self.canonical_str(clean_core) in (c_raw, c_first)):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                if (
-                    self.is_tech_match(clean_s, option_text) or
-                    self.is_tech_match(clean_s, clean_search) or
-                    self.is_tech_match(s_raw, option_text) or
-                    self.is_tech_match(s_raw, clean_search) or
-                    any(self.is_tech_match(clean_s, v) for v in name_variants) or
-                    any(self.is_tech_match(s_raw, v) for v in name_variants)
-                ):
-                    await opt_el.scroll_into_view_if_needed()
-                    await opt_el.click(force=True)
-                    return True
-
-                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                if len(target_norm) >= 4 and len(norm_raw) >= 4 and not any(w in ('shop', 'am', 'pm') for w in t_words):
-                    if target_norm in norm_raw or norm_raw in target_norm:
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
-                        return True
-
-                return False
-
-            async def _scan_options(check_fn, opt_count) -> bool:
-                for i in range(opt_count):
-                    if await check_fn(options.nth(i)):
-                        return True
-                return False
-
-            # Strict banner/emoji matching (exact, then fuzzy). Lenient fallback is strictly disabled to prevent emoji/plain mismatch.
-            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count)
-            if not clicked:
-                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count)
-
-            if not clicked and count > 0:
-                try:
-                    menu_container = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
-                    if await menu_container.count() > 0:
-                        for scroll_step in range(3):
-                            await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
-                            await self.page.wait_for_timeout(200)
-                            count_now = await options.count()
-                            clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count_now)
-                            if not clicked:
-                                clicked = await _scan_options(lambda opt: _fuzzy_match_option(opt, strict_banner=True), count_now)
-                            if clicked:
-                                break
-                except Exception:
-                    pass
-
-            if not clicked:
-                if press_enter or is_customer:
-                    selected_check = dropdown.locator(".vs__selected, .selected-tag").first
-                    if await selected_check.count() > 0 and await selected_check.is_visible():
-                        sel_val = (await selected_check.text_content() or "").strip()
-                        clean_sel_val = re.sub(r'[\u00d7xX]$', '', sel_val).strip()
-                        c_sel = self.canonical_str(clean_sel_val)
-                        if self.is_same_equipment(sel_val, option_text) or self.is_same_equipment(clean_sel_val, option_text):
-                            return True
-                        if is_tech and (self.is_tech_match(clean_sel_val, option_text) or self.is_tech_match(sel_val, option_text)):
-                            return True
-
-                    if await options.count() > 0:
-                        for idx_opt in range(await options.count()):
-                            opt_cand = options.nth(idx_opt)
-                            if await opt_cand.is_visible():
-                                f_raw = (await opt_cand.text_content() or "").strip()
-                                clean_f_raw = re.sub(r'[\u00d7xX]$', '', f_raw).strip()
-                                first_l = [l.strip() for l in f_raw.splitlines() if l.strip()][0] if f_raw else ""
-                                if self.is_same_equipment(option_text, f_raw) or self.is_same_equipment(option_text, first_l):
-                                    await opt_cand.scroll_into_view_if_needed()
-                                    await opt_cand.click(force=True)
-                                    clicked = True
-                                    break
-                                if is_tech and (self.is_tech_match(clean_f_raw, option_text) or self.is_tech_match(f_raw, option_text)):
-                                    await opt_cand.scroll_into_view_if_needed()
-                                    await opt_cand.click(force=True)
-                                    clicked = True
-                                    break
-
-                    if not clicked:
-                        if not is_tech:
-                            # Press Enter to select the highlighted matching option
-                            print(f"  -> Pressing Enter to select matching dropdown option for '{option_text}'...")
-                            await search_input.press("Enter")
-                            await self.page.wait_for_timeout(500)
-                        else:
-                            print(f"⚠️ Could not find exact matching option for technician '{option_text}' in dropdown. Aborting selection.")
-                            return False
                 else:
-                    print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
+                    if target_canon and len(target_canon) >= 4 and (target_canon in c_opt or c_opt in target_canon):
+                        await opt_candidate.scroll_into_view_if_needed()
+                        await opt_candidate.click(force=True)
+                        return True
+                return False
+
+            clicked = False
+            # Scan exact matching options
+            poll_start = time.time()
+            while time.time() - poll_start < 8.0:
+                count = await options.count()
+                for i in range(count):
+                    if await _check_and_click_option(options.nth(i), is_fuzzy=False):
+                        clicked = True
+                        break
+                if clicked or count > 0:
+                    break
+                await self.page.wait_for_timeout(300)
+
+            # Fallback fuzzy scan for non-tech items
+            if not clicked and not is_tech:
+                count = await options.count()
+                for i in range(count):
+                    if await _check_and_click_option(options.nth(i), is_fuzzy=True):
+                        clicked = True
+                        break
+
+            if not clicked:
+                if (press_enter or is_customer) and not is_tech:
+                    print(f"  -> Pressing Enter to select matching dropdown option for '{option_text}'...")
+                    await search_input.press("Enter")
+                    await self.page.wait_for_timeout(400)
+                else:
+                    print(f"⚠️ Could not find exact matching option for '{option_text}' in dropdown. Aborting selection.")
                     return False
 
-            verify_budget = 15.0 if press_enter else 6.0
+            # Verify selection
             verify_start = time.time()
             is_verified = False
             selected_val = ""
 
-            while (time.time() - verify_start) < verify_budget:
-                selected_el = dropdown.locator(".vs__selected, .selected-tag, .vs__selected-options").first
-                if await selected_el.count() > 0:
-                    selected_val = (await selected_el.text_content() or "").strip()
+            while time.time() - verify_start < (12.0 if press_enter else 5.0):
+                sel_check = dropdown.locator(".vs__selected, .selected-tag").first
+                if await sel_check.count() > 0:
+                    selected_val = (await sel_check.text_content() or "").strip()
                     clean_val = re.sub(r'[\u00d7xX]$', '', selected_val).strip()
-                    clean_sel = self.canonical_str(clean_val)
-                    clean_opt = self.canonical_str(option_text)
-                    t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
-                    s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', selected_val.lower()))
-                    qualifier_conflict = is_time_target and ((('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words)))
-                    sel_has_banner = self.has_banner_prefix(selected_val)
-                    banner_conflict = False if is_tech else (target_has_banner != sel_has_banner)
-                    equip_ok = True
-                    is_target_fleet = any(x in option_text for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
-                    is_sel_fleet = any(x in selected_val for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
-                    if is_target_fleet or is_sel_fleet:
-                        equip_ok = self.is_same_equipment(selected_val, option_text)
 
                     if is_tech:
-                        if (
-                            selected_val == option_text or
-                            clean_val == option_text or
-                            self.is_tech_match(clean_val, option_text) or
-                            self.is_tech_match(selected_val, option_text)
-                        ):
+                        if self.is_tech_match(clean_val, option_text) or self.is_tech_match(selected_val, option_text):
                             is_verified = True
                             break
-                    elif not qualifier_conflict and not banner_conflict and equip_ok and (
-                        selected_val == option_text or
-                        clean_val == option_text or
-                        clean_sel == clean_opt or
-                        self.is_same_equipment(selected_val, option_text) or
-                        clean_sel in target_canons or
-                        selected_val.strip() in name_variants or
-                        clean_val.strip() in name_variants or
-                        any(v.lower() == selected_val.strip().lower() for v in name_variants) or
-                        any(v.lower() == clean_val.strip().lower() for v in name_variants) or
-                        selected_val.strip().lower() == option_text.strip().lower() or
-                        clean_val.strip().lower() == option_text.strip().lower()
-                    ):
-                        is_verified = True
-                        break
-                await self.page.wait_for_timeout(250)
+                    else:
+                        banner_ok = (self.has_banner_prefix(selected_val) == target_has_banner)
+                        equip_ok = self.is_same_equipment(selected_val, option_text) if any(x in option_text for x in ("🚛", "🛻", "🏗")) else True
+                        if banner_ok and equip_ok and (clean_val == type_text or self.canonical_str(clean_val) in target_canons or clean_val in name_variants):
+                            is_verified = True
+                            break
+                await self.page.wait_for_timeout(200)
 
             if not is_verified:
                 print(f"❌ Selection verification failed: expected '{option_text}', but dropdown selected '{selected_val}'. Aborting selection.")
@@ -1639,11 +747,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await clear_btn.click(force=True)
                 return False
 
-            await self.page.wait_for_timeout(350)
             return True
         except Exception as e:
-            print(f"⚠️ Failed to select '{option_text}' in dropdown ({dropdown_selector}): {e}")
+            print(f"⚠️ Failed to select '{option_text}' in dropdown: {e}")
             return False
+
+    # --- WORK ORDER FILL & SAVE ---
 
     async def fill_and_save_work_order(
         self,
@@ -1660,767 +769,198 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         task_type: Optional[str] = None,
         summary_note: Optional[str] = None
     ) -> bool:
+        """Fills all fields in Create Work Order modal, validates data, saves, and confirms completion if requested."""
         try:
-            opened = await self.open_create_wo_modal()
-            if not opened:
+            if not await self.open_create_wo_modal():
                 return False
-
-            await self.page.wait_for_timeout(600)
-
-            print(f"  [1/7] Customer: '{customer_name}'")
-            customer_xpath = self.rules.get('dispatch_board_customer_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]")
-            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True, is_customer=True)
-            if not success:
-                print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
-                return False
-
-            print(f"  -> Waiting for customer data and background spinners to finish...")
-            import time
-            _load_start = time.time()
-            _max_load_wait = 60
-            _form_ready = False
 
             await self.page.wait_for_timeout(400)
 
-            while (time.time() - _load_start) < _max_load_wait:
-                try:
-                    spinner_loc = self.page.locator(".spinner:visible, .vs__spinner:visible, .loading:visible, .p-progress-spinner:visible, .loading-mask:visible, .vs--loading:visible")
-                    active_spinners = await spinner_loc.count()
-
-                    task_ready = self.page.locator(
-                        self.rules.get('dispatch_board_task_xpath',
-                            "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task') and not(contains(normalize-space(),'Duration'))]/following::div[contains(@class,'v-select')][1]")
-                    ).first
-                    task_vis = await task_ready.is_visible()
-                    task_class = (await task_ready.get_attribute("class") or "") if task_vis else ""
-                    task_disabled = "vs--disabled" in task_class or "disabled" in task_class
-
-                    dialog_confirm = self.page.locator(
-                        "//div[contains(@class,'v-dialog') or contains(@class,'modal') or contains(@class,'p-dialog')]//button[contains(@class,'confirm') or contains(.,'Confirm') or contains(.,'OK') or contains(.,'Yes') or contains(.,'Select')]"
-                    ).first
-                    if await dialog_confirm.count() > 0 and await dialog_confirm.is_visible():
-                        print("  -> Dismissing customer dialog/alert with Confirm button...")
-                        await dialog_confirm.click(force=True)
-                        await self.page.wait_for_timeout(400)
-                        continue
-
-                    if active_spinners == 0 and task_vis and not task_disabled:
-                        _form_ready = True
-                        elapsed = round(time.time() - _load_start, 1)
-                        print(f"  -> Form and customer data fully ready in {elapsed}s (0 spinners active). Proceeding.")
-                        break
-                    elif active_spinners > 0:
-                        print(f"  -> Waiting for {active_spinners} background spinners to finish...")
-                except Exception:
-                    pass
-
-                await self.page.wait_for_timeout(300)
-
-            if not _form_ready:
-                print(f"  ❌ Form not ready after {_max_load_wait}s (Customer '{customer_name}' data did not load or spinners hung). Aborting safely.")
+            # 1. Customer
+            print(f"  [1/7] Customer: '{customer_name}'")
+            cust_xpath = self.rules.get('dispatch_board_customer_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]")
+            if not await self.select_dropdown_option(cust_xpath, customer_name, press_enter=True, is_customer=True):
+                print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
                 await self.close_create_wo_modal()
                 return False
 
-            await self.page.wait_for_timeout(500)
+            # Wait for customer data spinners
+            load_start = time.time()
+            form_ready = False
+            task_xpath = self.rules.get('dispatch_board_task_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task') and not(contains(normalize-space(),'Duration'))]/following::div[contains(@class,'v-select')][1]")
 
-            print(f"  [2/7] Immediate Action: '{immediate_action}'")
-            ia_xpath = self.rules.get(
-                'dispatch_board_immediate_action_xpath',
-                "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Immediate Action')]/following::div[contains(@class,'v-select')][1]"
-            )
+            while time.time() - load_start < 45:
+                spinners = self.page.locator(".spinner:visible, .vs__spinner:visible, .loading:visible")
+                task_el = self.page.locator(task_xpath).first
+                task_vis = await task_el.count() > 0 and await task_el.is_visible()
+                task_cls = (await task_el.get_attribute("class") or "") if task_vis else ""
+
+                dialog = self.page.locator("//div[contains(@class,'v-dialog') or contains(@class,'modal')]//button[contains(.,'Confirm') or contains(.,'OK') or contains(.,'Yes')]").first
+                if await dialog.count() > 0 and await dialog.is_visible():
+                    await dialog.click(force=True)
+
+                if (await spinners.count()) == 0 and task_vis and "disabled" not in task_cls:
+                    form_ready = True
+                    break
+                await self.page.wait_for_timeout(250)
+
+            if not form_ready:
+                print(f"  ❌ Form not ready after 45s for Customer '{customer_name}'. Aborting.")
+                await self.close_create_wo_modal()
+                return False
+
+            # 2. Immediate Action
+            ia_xpath = self.rules.get('dispatch_board_immediate_action_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Immediate Action')]/following::div[contains(@class,'v-select')][1]")
             await self.select_dropdown_option(ia_xpath, immediate_action, press_enter=False)
-            await self.page.wait_for_timeout(350)
 
-            print(f"  [3/7] Task: '{task}'")
-            task_xpath = self.rules.get(
-                'dispatch_board_task_xpath',
-                "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task') and not(contains(normalize-space(),'Duration'))]/following::div[contains(@class,'v-select')][1]"
-            )
+            # 3. Task
             await self.select_dropdown_option(task_xpath, task, press_enter=False)
-            await self.page.wait_for_timeout(350)
 
-            print(f"  [4/7] Lead Source: '{lead_source}'")
-            lead_xpath = self.rules.get(
-                'dispatch_board_lead_source_xpath',
-                "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Work Order Lead Source')]/following::div[contains(@class,'v-select')][1]"
-            )
+            # 4. Lead Source
+            lead_xpath = self.rules.get('dispatch_board_lead_source_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Work Order Lead Source')]/following::div[contains(@class,'v-select')][1]")
             await self.select_dropdown_option(lead_xpath, lead_source, press_enter=False)
-            await self.page.wait_for_timeout(350)
 
-            print(f"  [5/7] Priority: '{priority}'")
-            priority_xpath = self.rules.get(
-                'dispatch_board_priority_xpath',
-                "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Priority')]/following::div[contains(@class,'v-select')][1]"
-            )
-            await self.select_dropdown_option(priority_xpath, priority, press_enter=False)
-            await self.page.wait_for_timeout(350)
+            # 5. Priority
+            prio_xpath = self.rules.get('dispatch_board_priority_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Priority')]/following::div[contains(@class,'v-select')][1]")
+            await self.select_dropdown_option(prio_xpath, priority, press_enter=False)
 
+            # 6. Primary Tech
+            tech_xpath = self.rules.get('dispatch_board_tech_name_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Primary Tech')]/following::div[contains(@class,'v-select')][1]")
             if tech_name:
                 print(f"  [6/7] Primary Tech: '{tech_name}'")
-                tech_xpath = self.rules.get(
-                    'dispatch_board_tech_name_xpath',
-                    "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Primary Tech')]/following::div[contains(@class,'v-select')][1]"
-                )
-                tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True, is_tech=True)
-                if not tech_selected:
-                    print(f"❌ Failed to match and select expected technician '{tech_name}'. Aborting work order to prevent wrong/duplicate assignment.")
+                if not await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True, is_tech=True):
+                    print(f"❌ Failed to select technician '{tech_name}'. Aborting work order.")
                     await self.close_create_wo_modal()
                     return False
 
-                tech_container = self.page.locator(tech_xpath).first
-                selected_tech_text = (await tech_container.locator(".vs__selected").text_content() or "").strip()
-                clean_tech_val = re.sub(r'[\u00d7xX]$', '', selected_tech_text).strip()
-                clean_actual_tech = self.canonical_str(clean_tech_val)
-                clean_target_tech = self.canonical_str(tech_name)
-                tech_verified = (
-                    selected_tech_text == tech_name or
-                    clean_tech_val == tech_name or
-                    clean_actual_tech == clean_target_tech or
-                    self.is_tech_match(clean_tech_val, tech_name) or
-                    self.is_tech_match(selected_tech_text, tech_name)
-                )
-                if not tech_verified:
-                    print(f"🛑 STRICT SAFETY STOP: Primary Tech modal value is '{selected_tech_text}', but expected '{tech_name}'! Aborting work order to prevent misassignment.")
-                    await self.close_create_wo_modal()
-                    return False
-
-                print(f"  -> Waiting for Date/Time fields to become active...")
-                try:
-                    date_input_xpath = self.rules.get('dispatch_board_date_input_xpath', "//input[@name='Start Date']")
-                    date_field = self.page.locator(date_input_xpath).first
-                    await date_field.wait_for(state="visible", timeout=8000)
-                    for _ in range(35):
-                        is_disabled = await date_field.get_attribute("disabled")
-                        if is_disabled is None:
-                            print(f"  -> Date field enabled. Ready.")
-                            break
-                        await self.page.wait_for_timeout(200)
-                except Exception:
-                    await self.page.wait_for_timeout(300)
-
+            # 7. Date, Time, Duration
             print(f"  [7/7] Date: {target_date} | Time: {start_time} | Duration: {duration}")
-            try:
-                date_input = self.page.locator(
-                    self.rules.get('dispatch_board_date_input_xpath', "//input[@name='Start Date']")
-                ).first
-                try:
-                    await date_input.wait_for(state="visible", timeout=6000)
-                    for _ in range(25):
-                        is_disabled = await date_input.get_attribute("disabled")
-                        if is_disabled is None:
-                            break
-                        await self.page.wait_for_timeout(200)
-                except Exception:
-                    pass
 
-                if await date_input.is_visible(timeout=1000):
-                    await date_input.click(force=True)
+            async def _fill_field(locator, val: str):
+                if await locator.count() > 0 and await locator.is_visible():
+                    await locator.click(force=True)
                     await self.page.keyboard.press("Control+A")
                     await self.page.keyboard.press("Backspace")
-                    await date_input.type(target_date, delay=30)
+                    await locator.type(val, delay=25)
                     await self.page.keyboard.press("Enter")
-                    await date_input.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
+                    await locator.evaluate(f"el => {{ el.value = '{val}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
                     await self.page.keyboard.press("Tab")
-                    await self.page.wait_for_timeout(200)
 
-                time_input = self.page.locator(
-                    self.rules.get('dispatch_board_time_input_xpath',
-                        "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Start Time')]/following::input[1]")
-                ).first
-                if await time_input.is_visible(timeout=3500) and not await time_input.get_attribute("disabled"):
-                    await time_input.click(force=True)
-                    await self.page.keyboard.press("Control+A")
-                    await self.page.keyboard.press("Backspace")
-                    await time_input.type(start_time, delay=30)
-                    await self.page.keyboard.press("Enter")
-                    await time_input.evaluate(f"el => {{ el.value = '{start_time}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
-                    await self.page.keyboard.press("Tab")
-                    await self.page.wait_for_timeout(200)
+            date_input = self.page.locator(self.rules.get('dispatch_board_date_input_xpath', "//input[@name='Start Date']")).first
+            await _fill_field(date_input, target_date)
 
-                    try:
-                        actual_start_time = await time_input.input_value()
-                        t_exp = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                        t_act = datetime.strptime(actual_start_time.strip().upper(), "%I:%M %p") if actual_start_time else None
-                        if t_act and t_exp != t_act:
-                            print(f"  ⚠️ FieldEdge auto-adjusted Start Time to '{actual_start_time}'. Re-forcing '{start_time}'...")
-                            await time_input.click(force=True)
-                            await self.page.keyboard.press("Control+A")
-                            await self.page.keyboard.press("Backspace")
-                            await time_input.type(start_time, delay=30)
-                            await self.page.keyboard.press("Enter")
-                            await time_input.evaluate(f"el => {{ el.value = '{start_time}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
-                            await self.page.keyboard.press("Tab")
-                            await self.page.wait_for_timeout(200)
-                    except Exception:
-                        pass
+            time_input = self.page.locator(self.rules.get('dispatch_board_time_input_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Start Time')]/following::input[1]")).first
+            await _fill_field(time_input, start_time)
 
-                duration_input = self.page.locator(
-                    self.rules.get('dispatch_board_duration_input_xpath',
-                        "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task Duration')]/following::input[contains(@class,'base-input')][1]")
-                ).first
-                if await duration_input.is_visible(timeout=1500) and not await duration_input.get_attribute("disabled"):
-                    fmt_dur = ("0" + duration) if len(duration) == 4 and ":" in duration else duration
-                    await duration_input.click(force=True)
-                    await self.page.keyboard.press("Control+A")
-                    await self.page.keyboard.press("Backspace")
-                    await duration_input.type(fmt_dur, delay=30)
-                    await self.page.keyboard.press("Enter")
-                    await duration_input.evaluate(f"el => {{ el.value = '{fmt_dur}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
-                    await self.page.keyboard.press("Tab")
-                    await self.page.wait_for_timeout(150)
+            duration_input = self.page.locator(self.rules.get('dispatch_board_duration_input_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task Duration')]/following::input[contains(@class,'base-input')][1]")).first
+            fmt_dur = ("0" + duration) if len(duration) == 4 and ":" in duration else duration
+            await _fill_field(duration_input, fmt_dur)
 
-            except Exception as e:
-                print(f"  Note on Date/Time/Duration fields: {e}")
-
+            # Work Summary Note
             if summary_note:
-                print(f"  📝 Entering Work Order Summary: '{summary_note[:40]}...'")
-                try:
-                    filled_note = await self.page.evaluate("""(note) => {
-                        const containers = document.querySelectorAll('.summary-note-container_f6fBE, .field-container, .form-group');
-                        for (const c of containers) {
-                            const title = c.querySelector('.field-title, label, .title');
-                            if (title && (title.textContent.toLowerCase().includes('work summary') || 
-                                         (title.textContent.toLowerCase().includes('summary') && !title.textContent.toLowerCase().includes('customer')))) {
-                                const ta = c.querySelector('textarea, .text-area_he5R6');
-                                if (ta) {
-                                    ta.focus();
-                                    ta.value = note;
-                                    ta.dispatchEvent(new Event('input', { bubbles: true }));
-                                    ta.dispatchEvent(new Event('change', { bubbles: true }));
-                                    return true;
-                                }
-                            }
-                        }
-                        const allTextareas = document.querySelectorAll('.on-bottom-modal textarea, .v-dialog textarea, .modal textarea, .text-area_he5R6');
-                        if (allTextareas.length >= 2) {
-                            const ta = allTextareas[1];
-                            ta.focus();
-                            ta.value = note;
-                            ta.dispatchEvent(new Event('input', { bubbles: true }));
-                            ta.dispatchEvent(new Event('change', { bubbles: true }));
-                            return true;
-                        } else if (allTextareas.length === 1) {
-                            const ta = allTextareas[0];
-                            ta.focus();
-                            ta.value = note;
-                            ta.dispatchEvent(new Event('input', { bubbles: true }));
-                            ta.dispatchEvent(new Event('change', { bubbles: true }));
-                            return true;
-                        }
-                        return false;
-                    }""", summary_note)
+                ta = self.page.locator(".summary-note-container_f6fBE textarea, textarea[name='WorkSummary'], .text-area_he5R6").first
+                if await ta.count() > 0 and await ta.is_visible():
+                    await ta.fill(summary_note)
+                    await ta.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
 
-                    if not filled_note:
-                        for sel in [
-                            '.summary-note-container_f6fBE:has-text("Work Summary") textarea',
-                            'div:has-text("Work Summary") + div textarea',
-                            'textarea[name="WorkSummary"]',
-                            '.text-area_he5R6'
-                        ]:
-                            ta_loc = self.page.locator(sel).first
-                            if await ta_loc.count() > 0 and await ta_loc.is_visible():
-                                await ta_loc.fill(summary_note)
-                                await ta_loc.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
-                                break
-
-                    await self.page.wait_for_timeout(150)
-                except Exception as note_err:
-                    print(f"  ⚠️ Warning setting Work Order Summary note: {note_err}")
-
-            try:
-                await self.page.evaluate("() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }")
-            except Exception:
-                pass
-
+            # Final Safety Guards: Verify Tech & Customer before clicking Save
             if tech_name:
                 final_tech = (await self.page.locator(tech_xpath).locator(".vs__selected").text_content() or "").strip()
-                clean_final_tech = re.sub(r'[\u00d7xX]$', '', final_tech).strip()
-                clean_f = self.canonical_str(clean_final_tech)
-                clean_t = self.canonical_str(tech_name)
-                final_verified = (
-                    final_tech == tech_name or
-                    clean_final_tech == tech_name or
-                    clean_f == clean_t or
-                    self.is_tech_match(clean_final_tech, tech_name) or
-                    self.is_tech_match(final_tech, tech_name)
-                )
-                if not final_verified:
-                    print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Primary Tech '{final_tech}' != expected '{tech_name}'. Aborting save.")
+                if not (final_tech == tech_name or self.is_tech_match(final_tech, tech_name)):
+                    print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Tech '{final_tech}' != expected '{tech_name}'. Aborting save.")
                     await self.close_create_wo_modal()
                     return False
 
-            # --- FINAL PRE-SAVE GUARD: CUSTOMER NAME & BANNER/EMOJI VERIFICATION ---
-            final_cust = (await self.page.locator(customer_xpath).locator(".vs__selected, .selected-tag").first.text_content() or "").strip()
-            clean_cust = self.canonical_str(final_cust)
-            clean_target = self.canonical_str(customer_name)
-            cust_name_variants = self.extract_name_variants(customer_name)
-            cust_target_canons = set(self.canonical_str(v) for v in cust_name_variants if self.canonical_str(v))
-
-            target_has_banner = self.has_banner_prefix(customer_name)
-            sel_has_banner = self.has_banner_prefix(final_cust)
-            banner_conflict = (target_has_banner != sel_has_banner)
-
-            is_time_cust = bool(re.search(r'\b\d{1,2}:\d{2}\b', customer_name)) or any(w in ('am', 'pm') for w in re.findall(r'\b[a-zA-Z0-9]+\b', customer_name.lower()))
-            qualifier_conflict = False
-            if is_time_cust:
-                t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', customer_name.lower()))
-                s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', final_cust.lower()))
-                qualifier_conflict = ((('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words)))
-
-            name_matched = (
-                final_cust == customer_name or
-                clean_cust == clean_target or
-                clean_cust in cust_target_canons or
-                final_cust in cust_name_variants or
-                any(v.lower() == final_cust.lower() for v in cust_name_variants) or
-                self.is_same_equipment(final_cust, customer_name)
-            )
-
-            if banner_conflict or qualifier_conflict or not name_matched:
-                reason = "banner/emoji mismatch" if banner_conflict else ("time qualifier conflict" if qualifier_conflict else "name mismatch")
-                print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Customer '{final_cust}' ({reason}) != expected '{customer_name}' (target_banner={target_has_banner}, sel_banner={sel_has_banner}). Aborting save to prevent invalid work order.")
+            final_cust = (await self.page.locator(cust_xpath).locator(".vs__selected, .selected-tag").first.text_content() or "").strip()
+            if not (final_cust == customer_name or self.is_same_equipment(final_cust, customer_name) or self.canonical_str(final_cust) == self.canonical_str(customer_name)):
+                print(f"🛑 FINAL PRE-SAVE CHECK FAILED: Customer '{final_cust}' != expected '{customer_name}'. Aborting save.")
                 await self.close_create_wo_modal()
                 return False
 
-            save_btn = None
-            for save_sel in [
-                "//button[contains(@class,'confirm') and .//span[normalize-space()='Save']]",
-                "//*[@id='scroll-container']/div/div[5]/div/button[3]",
-                "div.on-bottom-modal button.confirm_hsagT",
-                "button.confirm_hsagT",
-                "button:has-text('Save')",
-            ]:
-                try:
-                    loc = self.page.locator(save_sel).last
-                    if await loc.count() > 0 and await loc.is_visible(timeout=6000):
-                        save_btn = loc
-                        break
-                except Exception:
-                    pass
-
-            if not save_btn:
-                save_btn = self.page.locator("//button[contains(@class,'confirm') and .//span[normalize-space()='Save']]").last
-                try:
-                    await save_btn.wait_for(state="visible", timeout=8000)
-                except Exception:
-                    print(f"⚠️ Save button not visible for '{customer_name}'. Aborting.")
-                    return False
-
-            print(f"  -> Waiting for form to validate and Save button to be ready...")
-            await self.page.wait_for_timeout(250)
-
-            for _ in range(25):
-                try:
-                    is_disabled = await save_btn.get_attribute("disabled")
-                    btn_class = await save_btn.get_attribute("class") or ""
-                    aria_disabled = await save_btn.get_attribute("aria-disabled")
-                    if is_disabled is None and "disabled" not in btn_class and aria_disabled != "true":
-                        break
-                except Exception:
-                    pass
-                await self.page.wait_for_timeout(150)
-
-            async def _trigger_save_click():
-                if not save_btn:
-                    return
-                try:
-                    await save_btn.scroll_into_view_if_needed()
-                    await save_btn.click(timeout=3000, force=True)
-                except Exception:
-                    pass
-                try:
-                    await self.page.evaluate("""
-                        (btn) => {
-                            if (!btn) return;
-                            btn.scrollIntoView({ block: 'center', inline: 'center' });
-                            const span = btn.querySelector('span') || btn.querySelector('.content_YwYtM') || btn;
-                            const evts = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-                            for (const ev of evts) {
-                                btn.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }));
-                                if (span && span !== btn) {
-                                    span.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }));
-                                }
-                            }
-                        }
-                    """, await save_btn.element_handle())
-                except Exception:
-                    pass
-
-            await _trigger_save_click()
+            # Save Button
+            save_btn = self.page.locator("//button[contains(@class,'confirm') and .//span[normalize-space()='Save']], button:has-text('Save')").last
+            await save_btn.wait_for(state="visible", timeout=8000)
+            await save_btn.click(force=True)
             print(f"✅ Clicked Save for: '{customer_name}'")
 
-            customer_xpath_val = self.rules.get(
-                'dispatch_board_customer_xpath',
-                "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]"
-            )
-            customer_field = self.page.locator(customer_xpath_val).first
-
-            print("  -> Waiting for Save to process (modal to close)...")
+            # Wait for modal to close
+            save_start = time.time()
             modal_closed = False
-            _save_start = time.time()
-            _last_reclick = _save_start
-
-            await self.page.wait_for_timeout(350)
-
-            while time.time() - _save_start < 30:
-                current_url = self.page.url
-                if "DispatchSummary" in current_url:
+            while time.time() - save_start < 25:
+                if "DispatchSummary" in self.page.url:
                     modal_closed = True
                     break
-
-                for conf_sel in [
-                    "//div[contains(@class,'v-dialog') or contains(@class,'modal')]//button[contains(@class,'confirm') or contains(.,'Confirm') or contains(.,'Yes') or contains(.,'Save Anyway') or contains(.,'Proceed') or contains(.,'Continue')]",
-                    "button:has-text('Confirm'):visible",
-                    "button:has-text('Yes'):visible",
-                    "button:has-text('Save Anyway'):visible",
-                    "button:has-text('Proceed'):visible",
-                ]:
-                    try:
-                        conf_btn = self.page.locator(conf_sel).last
-                        if await conf_btn.count() > 0 and await conf_btn.is_visible():
-                            btn_text = (await conf_btn.text_content() or '').strip()
-                            if btn_text and 'Save' not in btn_text:
-                                print(f"  -> Found confirmation/conflict popup button '{btn_text}'. Clicking to confirm...")
-                                await conf_btn.click(force=True)
-                                await self.page.wait_for_timeout(300)
-                                break
-                    except Exception:
-                        pass
-
-                try:
-                    err_text = await self.page.evaluate("""
-                        () => {
-                            const selectors = [
-                                '.toast-error', '.toast-message', '.error-message',
-                                '.validation-message', '.v-messages__message', '.alert-danger',
-                                '[role="alert"]', '.notification-error', '.modal-error'
-                            ];
-                            for (const sel of selectors) {
-                                const el = document.querySelector(sel);
-                                if (el && el.offsetParent !== null) {
-                                    const txt = (el.textContent || '').trim();
-                                    if (txt) return txt;
-                                }
-                            }
-                            return '';
-                        }
-                    """)
-                    if err_text:
-                        print(f"  ⚠️ Error/notice detected on page: '{err_text}'")
-                except Exception:
-                    pass
-
-                save_btn_visible = False
-                try:
-                    if await save_btn.count() > 0 and await save_btn.is_visible():
-                        save_btn_visible = True
-                except Exception:
-                    save_btn_visible = False
-
-                customer_visible = False
-                try:
-                    if await customer_field.count() > 0 and await customer_field.is_visible():
-                        customer_visible = True
-                except Exception:
-                    customer_visible = False
-
-                modal_container_visible = False
-                try:
-                    modal_cont = self.page.locator("div.on-bottom-modal, div.create-workorder-form-grid").first
-                    if await modal_cont.count() > 0 and await modal_cont.is_visible():
-                        modal_container_visible = True
-                except Exception:
-                    modal_container_visible = False
-
-                if not save_btn_visible and not customer_visible and not modal_container_visible:
+                if (await self.page.locator(cust_xpath).count() == 0) or not await self.page.locator(cust_xpath).first.is_visible():
                     modal_closed = True
-                    elapsed = round(time.time() - _save_start, 1)
-                    print(f"  -> Save processed successfully (modal closed in {elapsed}s).")
                     break
-
-                if (time.time() - _last_reclick) >= 5.0:
-                    _last_reclick = time.time()
-                    print("  -> Modal still open, re-clicking Save button...")
-                    await _trigger_save_click()
-
-                await self.page.wait_for_timeout(200)
+                # Handle any conflict popup
+                popup_btn = self.page.locator("//div[contains(@class,'v-dialog') or contains(@class,'modal')]//button[contains(.,'Confirm') or contains(.,'Save Anyway') or contains(.,'Proceed')]").first
+                if await popup_btn.count() > 0 and await popup_btn.is_visible():
+                    await popup_btn.click(force=True)
+                await self.page.wait_for_timeout(300)
 
             if not modal_closed:
-                print(f"  ❌ Modal did not close after 30s for '{customer_name}'. Work order save was not confirmed!")
-                print("  -> Closing stuck modal to ensure subsequent work orders are not blocked...")
+                print(f"❌ Modal did not close after 25s for '{customer_name}'. Aborting.")
                 await self.close_create_wo_modal()
                 return False
 
-            await self.page.wait_for_timeout(400)
-
+            # Mark Completed via DispatchSummary
             if mark_completed:
-                print("  -> Waiting for DispatchSummary Save button...")
-                summary_completed = False
+                print("  -> Finalizing 'Completed' status on DispatchSummary...")
+                summary_save = self.page.locator("button#dispatch-summary-save-workorder").first
                 try:
-                    summary_save_btn = self.page.locator("button#dispatch-summary-save-workorder").first
+                    await summary_save.wait_for(state="visible", timeout=15000)
+                    await summary_save.click(force=True)
 
-                    try:
-                        await summary_save_btn.wait_for(state="visible", timeout=20000)
-                    except Exception:
-                        current_url = self.page.url
-                        print(f"  -> DispatchSummary button not found in time. Current URL: {current_url}")
-                        if "DispatchSummary" in current_url or "dispatch-summary" in current_url.lower():
-                            print("  -> Detected DispatchSummary URL. Retrying button search...")
-                            await self.page.wait_for_timeout(600)
-                            await summary_save_btn.wait_for(state="visible", timeout=10000)
-                        else:
-                            if immediate_action == "Complete Work Order":
-                                print(f"🎉 WO '{customer_name}' auto-completed directly via Immediate Action (no redirect needed).")
-                                summary_completed = True
-                            else:
-                                print(f"  ⚠️ DispatchSummary not opened for '{customer_name}' "
-                                      f"(task_type='{task_type or task}'). "
-                                      f"WO created but not auto-completed. Skipping completion step.")
-                                raise Exception("DispatchSummary page not reached")
+                    confirm_btn = self.page.locator("button#confirm-save-dispatch-summary, button:has-text('Confirm')").first
+                    modal_open = False
+                    for _ in range(25):
+                        if await confirm_btn.count() > 0 and await confirm_btn.is_visible():
+                            modal_open = True
+                            break
+                        await self.page.wait_for_timeout(200)
 
-                    if not summary_completed:
-                        try:
-                            await self.page.keyboard.press("Tab")
-                            await self.page.wait_for_timeout(150)
-                        except Exception:
-                            pass
-
-                        await summary_save_btn.scroll_into_view_if_needed()
-                        print("  -> Waiting for DispatchSummary Save button to be enabled & interactable...")
-
-                        try:
-                            await summary_save_btn.click(force=True, timeout=5000)
-                            print("  -> DispatchSummary Save button clicked.")
-                            save_clicked = True
-                        except Exception as e:
-                            print(f"  -> Playwright save click error: {e}")
-                            save_clicked = False
-
-                        print("  -> Save clicked. Checking for status confirmation modal...")
-
-                        confirm_btn = self.page.locator("button#confirm-save-dispatch-summary, button:has-text('Confirm')").first
-                        modal_title_loc = self.page.locator(".label-title:has-text('Would you like to change the status?')").first
-                        
-                        modal_appeared = False
-                        _modal_start = time.time()
-                        _reclicked = False
-                        
-                        while time.time() - _modal_start < 12:
-                            try:
-                                if (await confirm_btn.count() > 0 and await confirm_btn.is_visible()) or \
-                                   (await modal_title_loc.count() > 0 and await modal_title_loc.is_visible()):
-                                    modal_appeared = True
-                                    print(f"  -> Confirmation modal appeared in {round(time.time() - _modal_start, 1)}s!")
-                                    break
-                            except Exception:
-                                pass
-
-                            if not _reclicked and (time.time() - _modal_start >= 4.0):
-                                _reclicked = True
-                                try:
-                                    await self.page.evaluate("""
-                                        () => {
-                                            const btn = document.querySelector('#dispatch-summary-save-workorder');
-                                            if (btn) {
-                                                const target = btn.querySelector('.content_YwYtM, span') || btn;
-                                                ['mousedown', 'mouseup', 'click'].forEach(evt => {
-                                                    target.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                                                });
-                                            }
-                                        }
-                                    """)
-                                except Exception:
-                                    pass
-
-                            await self.page.wait_for_timeout(200)
-
-                        if modal_appeared:
-                            print("  -> Selecting 'Completed' status in confirmation modal...")
-                            try:
-                                clicked = await self.page.evaluate("""
-                                    () => {
-                                        const containers = document.querySelectorAll('.small.field-radio-container, .field-radio-container');
-                                        for (const c of containers) {
-                                            const span = c.querySelector('.radio-label span') || c.querySelector('span');
-                                            if (span && span.textContent.trim() === 'Completed') {
-                                                c.scrollIntoView({ behavior: 'instant', block: 'center' });
-                                                c.click();
-                                                const radio = c.querySelector('.field-radio');
-                                                if (radio) {
-                                                    radio.click();
-                                                    radio.classList.add('field-radio-checked');
-                                                }
-                                                ['mousedown', 'mouseup', 'click'].forEach(evt => {
-                                                    c.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                                                });
-                                                return true;
-                                            }
-                                        }
-                                        return false;
-                                    }
-                                """)
-                                print(f"  -> JS click 'Completed' radio: {'success' if clicked else 'element not found'}")
-                                await self.page.wait_for_timeout(250)
-
-                                checked_cls = await self.page.evaluate("""
-                                    () => {
-                                        const containers = document.querySelectorAll('.small.field-radio-container, .field-radio-container');
-                                        for (const c of containers) {
-                                            if (c.textContent.trim().includes('Completed')) {
-                                                const radio = c.querySelector('.field-radio');
-                                                return radio ? radio.className : '';
-                                            }
-                                        }
-                                        return '';
-                                    }
-                                """)
-                                if "field-radio-checked" not in (checked_cls or ""):
-                                    print("  -> Trying Playwright click on 'Completed' radio container...")
-                                    try:
-                                        container_locator = self.page.locator(".small.field-radio-container, .field-radio-container").filter(has_text="Completed").first
-                                        await container_locator.scroll_into_view_if_needed()
-                                        await container_locator.click(force=True)
-                                        await self.page.wait_for_timeout(200)
-                                    except Exception:
-                                        pass
-
-                                print("  -> Selected 'Completed' status. Giving Vue 1.5s to update...")
-                                await self.page.wait_for_timeout(350)
-                            except Exception as radio_err:
-                                print(f"  -> Radio selection note: {radio_err}")
-
-                            print("  -> Clicking Confirm button in modal...")
-                            
-                            try:
-                                await self.page.evaluate("""
-                                    () => {
-                                        const btn = document.querySelector('button#confirm-save-dispatch-summary') ||
-                                                    Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Confirm' || b.textContent.trim() === 'Save');
-                                        if (btn) {
-                                            btn.removeAttribute('disabled');
-                                            btn.classList.remove('disabled');
-                                        }
-                                    }
-                                """)
-                            except Exception:
-                                pass
-
-                            try:
-                                await self.page.evaluate("""
-                                    () => {
-                                        const btn = document.querySelector('button#confirm-save-dispatch-summary') ||
-                                                    Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Confirm' || b.textContent.trim() === 'Save');
-                                        if (btn) {
-                                            btn.focus();
-                                            btn.click();
-                                            ['mousedown', 'mouseup', 'click'].forEach(evt => {
-                                                btn.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                                            });
-                                            return true;
-                                        }
-                                        return false;
-                                    }
-                                """)
-                            except Exception:
-                                pass
-
-                            try:
-                                await confirm_btn.scroll_into_view_if_needed()
-                                await confirm_btn.click(force=True)
-                            except Exception:
-                                pass
-
-                            print("  -> Clicked Confirm. Waiting for save to process...")
+                    if modal_open:
+                        radio = self.page.locator(".field-radio-container").filter(has_text="Completed").first
+                        if await radio.count() > 0:
+                            await radio.click(force=True)
                             await self.page.wait_for_timeout(300)
-                            try:
-                                await confirm_btn.wait_for(state="hidden", timeout=10000)
-                                print("  -> Modal closed. Save confirmed!")
-                            except Exception:
-                                print("  -> Modal close timeout — proceeding anyway.")
-                            summary_completed = True
-                            print(f"🎉 Active Tech WO '{customer_name}' saved & completed!")
-                        else:
-                            summary_completed = True
-                            print(f"🎉 Active Tech WO '{customer_name}' saved (no status modal)!")
-                except Exception as summary_err:
-                    if not summary_completed:
-                        print(f"  -> DispatchSummary flow note for '{customer_name}': {summary_err}")
-            else:
-                print(f"🎉 Static WO '{customer_name}' saved!")
+                        await confirm_btn.click(force=True)
+                        await confirm_btn.wait_for(state="hidden", timeout=8000)
+                        print(f"🎉 Active Tech WO '{customer_name}' saved & completed!")
+                except Exception as sum_err:
+                    print(f"  Note on DispatchSummary completion: {sum_err}")
 
-            print(f"  Returning to Dispatch Board (fresh load)...")
-            await self.ensure_clean_dispatch_board(force_reload=True)
             return True
-
-        except Exception as err:
-            print(f"❌ Error in fill_and_save_work_order for '{customer_name}': {err}")
+        except Exception as e:
+            print(f"⚠️ Error saving work order for '{customer_name}': {e}")
+            await self.close_create_wo_modal()
             return False
 
-    async def check_and_handle_session(self, on_progress: Optional[Callable] = None) -> bool:
-        if not self.page:
-            return True
-        current_url = self.page.url or ""
-        if "Login" in current_url or "Account/Login" in current_url:
-            print("⚠️ FieldEdge logout detected! (Single account concurrent login from another device).")
-            try:
-                print("🔄 Attempting immediate re-login...")
-                await self.login_fieldedge()
-                if "Login" not in self.page.url:
-                    print("✅ FieldEdge session restored!")
-                    return True
-            except Exception as e:
-                print(f"⚠️ Immediate re-login failed ({e}). Starting 30-minute retry countdown...")
+    # --- MAIN AUTOMATION RUNNER ---
 
-            for m in range(30, 0, -1):
-                msg = f"⚠️ Session logged out (Concurrent login detected). Retrying automatic login in {m} minute(s) (PST)..."
-                print(f"⏳ [{self.get_pst_now().strftime('%I:%M:%S %p PST')}] {msg}")
-                if hasattr(self, "progress_info"):
-                    self.progress_info["status"] = "paused_concurrent_login"
-                    self.progress_info["status_message"] = msg
-                    if on_progress:
-                        try:
-                            on_progress(self.progress_info)
-                        except Exception:
-                            pass
-                await asyncio.sleep(60)
-
-            print("🔄 30 minutes completed. Re-initializing browser & attempting automatic login...")
-            try:
-                await self.initialize()
-                await self.login_fieldedge()
-                print("✅ Re-login successful after 30m wait!")
-                return True
-            except Exception as login_err:
-                print(f"❌ Re-login attempt failed: {login_err}")
-                return False
-        return True
-
-    async def run(self, days: int = 30, dry_run: bool = False, active_techs: Optional[List[str]] = None, start_date_str: Optional[str] = None, on_progress: Optional[Callable] = None, skip_asset: bool = False, force: bool = False):
-        _start_time = time.time()
-        _error_occurred = None
-        _records_processed = 0
-        _details = {"processed_dates": []}
-
+    async def run(
+        self,
+        days: int = 30,
+        dry_run: bool = False,
+        active_techs: Optional[List[str]] = None,
+        start_date_str: Optional[str] = None,
+        on_progress: Optional[Callable] = None,
+        skip_asset: bool = False,
+        force: bool = False
+    ):
+        """Runs the rolling multi-day automation loop for Dispatch Board and Asset Assignment reconciliation."""
         self._on_progress_cb = on_progress
         self.progress_info = {
-            "current_day": 0,
-            "total_days": days,
-            "current_date": None,
-            "completed_days": 0,
-            "remaining_days": days,
-            "percent_complete": 0.0,
-            "status": "starting",
-            "status_message": f"Initializing automation for {days} days...",
+            "current_day": 0, "total_days": days, "current_date": None,
+            "completed_days": 0, "remaining_days": days, "percent_complete": 0.0,
+            "status": "starting", "status_message": f"Initializing automation for {days} days...",
             "fieldedge_status": "Connecting / Logging in..."
         }
         if on_progress:
-            try:
-                on_progress(self.progress_info)
-            except Exception:
-                pass
+            on_progress(self.progress_info)
 
         self.template_data = self._load_template()
-
         settings = self.template_data.get("general_settings", {})
         task = settings.get("task", "8 - INTERNAL")
         lead_source = settings.get("lead_source", "Sterling Septic -FE")
@@ -2429,1045 +969,306 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
         truck_assign_headers = [
             h for h in self.template_data.get("truck_assign_headers", [])
-            if h.get("active", True)
-            and (h.get("tech_name") or "").strip()
-            and (h.get("tech_name") or "").strip().lower() not in ("unassigned", "none", "clear")
+            if h.get("active", True) and (h.get("tech_name") or "").strip() and (h.get("tech_name") or "").strip().lower() not in ("unassigned", "none", "clear")
         ]
+        static_headers = [h for h in self.template_data.get("static_headers", []) if h.get("active", True)]
 
-        static_headers = [
-            h for h in self.template_data.get("static_headers", [])
-            if h.get("active", True)
-        ]
-
+        # Process Out of Service assets
         out_of_service_headers = []
         oos_canonical_names = set()
-        oos_asset_numbers = set()
-
         for oos in self.template_data.get("out_of_service_assets", []):
             if not oos.get("active", True):
                 continue
             oos_name = (oos.get("asset_name") or "").strip()
-            if not oos_name:
-                continue
-            c_n = self.canonical_str(oos_name)
-            if c_n:
-                oos_canonical_names.add(c_n)
-            after_pipe = oos_name.split("|")[-1].strip() if "|" in oos_name else oos_name.strip()
-            if re.match(r'^\d{2,4}$', after_pipe):
-                oos_asset_numbers.add(after_pipe)
-
-            note = oos.get("service_note") or oos.get("reason") or ""
-            out_of_service_headers.append({
-                "name": oos_name,
-                "start_time": oos.get("start_time") or "1:45 PM",
-                "duration": oos.get("duration") or "1:30",
-                "priority": oos.get("priority") or "[4] DO NOT DISPATCH (Tracking)",
-                "tech_name": oos.get("tech_name") or "s4",
-                "service_note": note,
-                "reason": note,
-                "is_out_of_service": True,
-                "active": True,
-                "task": oos.get("task", task),
-            })
-
-        def _is_oos_asset(header_item):
-            h_name = header_item.get("name", "")
-            h_asset = header_item.get("asset_name", "")
-            for check_str in (h_name, h_asset):
-                if not check_str:
-                    continue
-                if self.canonical_str(check_str) in oos_canonical_names:
-                    return True
-                after_p = check_str.split("|")[-1].strip() if "|" in check_str else check_str.strip()
-                if re.match(r'^\d{2,4}$', after_p) and after_p in oos_asset_numbers:
-                    is_h_truck = ("🛻" in check_str or "🚛" in check_str)
-                    if is_h_truck:
-                        return True
-            return False
+            if oos_name:
+                oos_canonical_names.add(self.canonical_str(oos_name))
+                out_of_service_headers.append({
+                    "name": oos_name,
+                    "start_time": oos.get("start_time") or "1:45 PM",
+                    "duration": oos.get("duration") or "1:30",
+                    "priority": oos.get("priority") or "[4] DO NOT DISPATCH (Tracking)",
+                    "tech_name": oos.get("tech_name") or "s4",
+                    "service_note": oos.get("service_note") or oos.get("reason", ""),
+                    "is_out_of_service": True,
+                    "active": True,
+                    "task": oos.get("task", task),
+                })
 
         if oos_canonical_names:
-            static_headers = [h for h in static_headers if not _is_oos_asset(h)]
-            truck_assign_headers = [h for h in truck_assign_headers if not _is_oos_asset(h)]
-            print(f"🚫 Exempted {len(oos_canonical_names)} Out of Service vehicle(s) from standard categories: {', '.join([s['name'] for s in out_of_service_headers])}")
+            static_headers = [h for h in static_headers if self.canonical_str(h.get("name", "")) not in oos_canonical_names]
+            truck_assign_headers = [h for h in truck_assign_headers if self.canonical_str(h.get("name", "")) not in oos_canonical_names]
 
+        # Process Service Needed assets
         service_needed_headers = []
-        sn_canonical_names = set()
-        sn_asset_numbers = set()
-        sn_map = {}
-
         for sn in self.template_data.get("service_needed_assets", []):
             if not sn.get("active", True):
                 continue
             sn_name = (sn.get("asset_name") or "").strip()
-            if not sn_name:
-                continue
-            if self.canonical_str(sn_name) in oos_canonical_names:
-                continue
+            if sn_name and self.canonical_str(sn_name) not in oos_canonical_names:
+                service_needed_headers.append({
+                    "name": sn_name,
+                    "start_time": sn.get("start_time") or "3:30 PM",
+                    "duration": sn.get("duration") or "1:00",
+                    "priority": sn.get("priority") or "[7] 7.12 SERVICE NEEDED",
+                    "tech_name": "s4",
+                    "service_note": sn.get("service_note") or "",
+                    "is_service_needed_duplicate": True,
+                    "active": True,
+                    "task": sn.get("task", task),
+                })
 
-            c_n = self.canonical_str(sn_name)
-            sn_canonical_names.add(c_n)
-            sn_map[c_n] = sn
-            after_pipe = sn_name.split("|")[-1].strip() if "|" in sn_name else sn_name.strip()
-            if re.match(r'^\d{2,4}$', after_pipe):
-                sn_asset_numbers.add(after_pipe)
-                sn_map[after_pipe] = sn
-
-            service_needed_headers.append({
-                "name": sn_name,
-                "start_time": sn.get("start_time") or "3:30 PM",
-                "duration": sn.get("duration") or "1:00",
-                "priority": sn.get("priority") or "[7] 7.12 SERVICE NEEDED",
-                "tech_name": "s4",
-                "service_note": sn.get("service_note") or "",
-                "is_service_needed_duplicate": True,
-                "active": True,
-                "task": sn.get("task", task),
-            })
-
-        def _is_sn_asset(header_item):
-            h_name = header_item.get("name", "")
-            h_asset = header_item.get("asset_name", "")
-            for check_str in (h_name, h_asset):
-                if not check_str:
-                    continue
-                if self.canonical_str(check_str) in sn_canonical_names:
-                    return True
-                after_p = check_str.split("|")[-1].strip() if "|" in check_str else check_str.strip()
-                if re.match(r'^\d{2,4}$', after_p) and after_p in sn_asset_numbers:
-                    is_h_truck = ("🛻" in check_str or "🚛" in check_str)
-                    if is_h_truck:
-                        return True
-            return False
-
-        if sn_canonical_names:
-            static_headers = [h for h in static_headers if not _is_sn_asset(h)]
-            print(f"🔧 Exempted {len(sn_canonical_names)} Service Needed vehicle(s) from morning static categories: {', '.join([s['name'] for s in service_needed_headers])}")
-
-        # Match truck_assign_headers with service_needed_assets
-        # If a truck is assigned to a technician AND has Service Needed:
-        # Keep it on the technician at their scheduled time, attach note,
-        # AND ALSO create the Service Needed card under '🔧 SERVICE NEEDED' at 3:30 PM!
-        for h in truck_assign_headers:
-            h_name = h.get("name", "")
-            c_h = self.canonical_str(h_name)
-            after_p = h_name.split("|")[-1].strip() if "|" in h_name else h_name.strip()
-            sn_obj = sn_map.get(c_h) or (sn_map.get(after_p) if re.match(r'^\d{2,4}$', after_p) else None)
-
-            h_tech = (h.get("tech_name") or "").strip()
-            is_assigned = h.get("active", True) and h_tech and h_tech.lower() not in ("unassigned", "none", "clear")
-
-            if sn_obj and is_assigned:
-                h["service_note"] = sn_obj.get("service_note") or ""
-                h["summary_note"] = sn_obj.get("service_note") or ""
-                h["is_service_needed"] = True
-                print(f"🔧 Truck '{h_name}' on tech '{h_tech}' marked with Service Needed note at {h.get('start_time')}.")
-
-        # Service Needed assets are placed under '🔧 SERVICE NEEDED' at 3:30 PM on s4
         if service_needed_headers:
-            static_headers = static_headers + service_needed_headers
-            print(f"🔧 Added {len(service_needed_headers)} Service Needed header(s) under 3:30 PM.")
-        tech_defaults = self.template_data.get("technician_display_defaults", {})
-        tech_jobs = self.template_data.get("tech_jobs", [])
-
-        tech_priorities = {}
-        tech_metadata = {}
+            static_headers.extend(service_needed_headers)
 
         template_techs = self.template_data.get("active_techs", [])
-        
-        for entry in template_techs:
-            name = entry.get("name", "")
-            if name:
-                tech_priorities[name] = entry.get("priority")
-                tech_metadata[name] = entry
-                c_name = self.canonical_str(name)
-                tech_priorities[c_name] = entry.get("priority")
-                tech_metadata[c_name] = entry
-
         if not active_techs:
-            active_techs = [entry.get("name", "") for entry in template_techs if entry.get("name") and entry.get("active", True)]
-            skipped = [entry.get("name", "") for entry in template_techs if entry.get("name") and not entry.get("active", True)]
-            print(f"📋 Loaded {len(active_techs)} active technicians from template config.")
-            if skipped:
-                print(f"⏭️ Skipping {len(skipped)} inactive tech(s) from template: {', '.join(skipped)}")
+            active_techs = [e.get("name", "") for e in template_techs if e.get("name") and e.get("active", True)]
 
+        tech_jobs = self.template_data.get("tech_jobs", [])
+
+        # Start Date resolution
+        start_dt = self.get_pst_now().date()
         if start_date_str:
-            parsed_dt = None
-            try:
-                from dateutil import parser as date_parser
-                parsed_dt = date_parser.parse(start_date_str).date()
-            except Exception:
-                for fmt in ("%B %d", "%b %d", "%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
-                    try:
-                        dt = datetime.strptime(start_date_str, fmt)
-                        if "%Y" not in fmt and "%y" not in fmt:
-                            dt = dt.replace(year=self.get_pst_now().year)
-                        parsed_dt = dt.date()
-                        break
-                    except ValueError:
-                        continue
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%b %d", "%B %d"):
+                try:
+                    dt = datetime.strptime(start_date_str, fmt)
+                    if "%Y" not in fmt:
+                        dt = dt.replace(year=start_dt.year)
+                    start_dt = dt.date()
+                    break
+                except ValueError:
+                    pass
 
-            if parsed_dt:
-                start_dt = parsed_dt
-                print(f"📅 Parsed start date: {start_dt}")
-            else:
-                print(f"⚠️ Could not parse date '{start_date_str}'. Using today.")
-                start_dt = self.get_pst_now().date()
-        else:
-            start_dt = self.get_pst_now().date()
+        print(f"🚀 Starting Dispatch Board Automation for {days} days from {start_dt}...")
 
-        print(f"🚀 Starting Dispatch Board Display Automation for next {days} days...")
-        if dry_run:
-            print("🔍 DRY RUN MODE ACTIVATED - Skipping FieldEdge UI clicks.")
-        else:
+        if not dry_run:
             await self.initialize()
-            
             self.intercepted_board_by_date.clear()
             self.board_req.clear()
-            
-            async def handle_request(request):
-                if "GetDispatchBoardData" in request.url and request.method == "POST":
-                    self.board_req["url"] = request.url
-                    self.board_req["headers"] = request.headers
-                    self.board_req["post_data"] = request.post_data
-                    
+
+            async def handle_request(req):
+                if "GetDispatchBoardData" in req.url and req.method == "POST":
+                    self.board_req["url"] = req.url
+                    self.board_req["headers"] = req.headers
+                    self.board_req["post_data"] = req.post_data
+
             self.page.on("request", handle_request)
-            
-            # Response interception removed per user request. Board data is fetched on-demand via fetch_board_data_for_date.
-            
-            
             dispatch_url = self.rules.get('web_url', 'https://login.fieldedge.com/Dispatch')
-            print(f"Navigating to Dispatch Board: {dispatch_url}")
             await self.page.goto(dispatch_url, wait_until='domcontentloaded')
-            
             if "Login" in self.page.url:
                 await self.login_fieldedge()
 
-            print("Waiting for Dispatch Board UI to become interactable...")
-            try:
-                xpath = self.rules.get('dispatch_board_create_wo_btn_xpath')
-                if xpath:
-                    await self.page.wait_for_selector(xpath, state='visible', timeout=15000)
-                    print("Dispatch Board loaded successfully!")
-            except Exception:
-                print("Note: Create Work Order button not immediately found, but continuing script...")
-            
-            print("⏳ Waiting for Dispatch Board JSON API data to intercept...")
             for _ in range(50):
                 if self.board_req.get("url"):
                     break
                 await self.page.wait_for_timeout(200)
 
-            board_date_str = None
-            existing_wos = {}
-
         created_history = self._load_history()
         print(f"📚 Loaded {len(created_history)} recorded entries from Central Dashboard API.")
 
-        try:
-            for d in range(days):
-                current_date = start_dt + timedelta(days=d)
-                date_str = f"{current_date.month}/{current_date.day}/{current_date.strftime('%y')}"
-                db_date_key = current_date.strftime("%Y-%m-%d")
-                is_weekend = current_date.weekday() >= 5
+        for d in range(days):
+            current_date = start_dt + timedelta(days=d)
+            date_str = f"{current_date.month}/{current_date.day}/{current_date.strftime('%y')}"
+            db_date_key = current_date.strftime("%Y-%m-%d")
+            is_weekend = current_date.weekday() >= 5
 
-                skip_stage1 = False
-                if not dry_run and not force and self.is_date_fully_completed(
-                    history=created_history,
-                    db_date_key=db_date_key,
-                    static_headers=static_headers,
-                    truck_assign_headers=truck_assign_headers,
-                    tech_jobs=tech_jobs,
-                    active_techs=active_techs,
-                    is_weekend=is_weekend,
-                    skip_vehicle_on_weekends=skip_vehicle_on_weekends,
-                    force=force
-                ):
-                    print(f"\n⚡ [Smart Skip: Stage 1] All template items for {date_str} ({db_date_key}) are already recorded in history.")
-                    print(f"   Skipping Stage 1 template creation to preserve manual edits. Proceeding directly to Stage 2 (Asset Assignment)...\n")
-                    skip_stage1 = True
-                    if skip_asset:
-                        _records_processed += 1
-                        self.progress_info.update({
-                            "current_day": d + 1,
-                            "completed_days": d + 1,
-                            "remaining_days": max(0, days - (d + 1)),
-                            "percent_complete": round(((d + 1) / days) * 100, 1),
-                            "status_message": f"Completed Day {d + 1} of {days} ({date_str}) [Smart Skip]"
-                        })
-                        if on_progress:
-                            try:
-                                on_progress(self.progress_info)
-                            except Exception:
-                                pass
-                        continue
+            skip_stage1 = False
+            if not dry_run and not force and self.is_date_fully_completed(
+                created_history, db_date_key, static_headers, truck_assign_headers,
+                tech_jobs, active_techs, is_weekend, skip_vehicle_on_weekends, force
+            ):
+                print(f"\n⚡ [Smart Skip: Stage 1] All items for {date_str} ({db_date_key}) are already recorded in history.")
+                skip_stage1 = True
 
-                self.progress_info = {
-                    "current_day": d + 1,
-                    "total_days": days,
-                    "current_date": date_str,
-                    "completed_days": d,
-                    "remaining_days": days - (d + 1),
-                    "percent_complete": round(((d + 1) / days) * 100, 1),
-                    "status": "processing",
-                    "status_message": f"Processing Day {d + 1} of {days} ({date_str})"
-                }
-                if on_progress:
-                    try:
-                        on_progress(self.progress_info)
-                    except Exception:
-                        pass
-
-                print(f"\n--- Processing Date: {date_str} (Day {d + 1}/{days}) ---")
-
-                template_processed_counts = {}
-                if not skip_stage1:
-
-                    if not dry_run:
-                        b_date, e_wos = await self.get_or_fetch_board_data_for_date(current_date)
-                        if e_wos is None:
-                            print(f"⛔ [SAFETY GUARD] FieldEdge Dispatch Board API data could NOT be verified for {db_date_key} ({date_str})!")
-                            print(f"⛔ Skipping creation for date {db_date_key} to PREVENT DUPLICATE WORK ORDERS!")
-                            continue
-                        board_date_str = b_date or db_date_key
-                        existing_wos = e_wos
-
-                    for header in static_headers:
-                        name = header.get("name")
-                        start_time = header.get("start_time")
-                        duration = header.get("duration")
-                        priority = header.get("priority")
-                        h_tech = header.get("tech_name")
-                        h_task = header.get("task", task)
-
-                        if not dry_run:
-                            canon_target = self.canonical_str(name)
-                            is_service_wo = bool(
-                                header.get('is_service_needed_duplicate') or
-                                (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
-                            )
-                            is_oos_wo = bool(
-                                header.get('is_out_of_service') or
-                                (header.get('reason') and 'DO NOT DISPATCH' in str(header.get('priority', '')))
-                            )
-                            if is_service_wo:
-                                tracking_target = f"{canon_target}_serviceneeded"
-                            elif is_oos_wo:
-                                tracking_target = f"{canon_target}_outofservice"
-                            else:
-                                tracking_target = canon_target
-                            try:
-                                t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                                time_key = t_dt.strftime("%I:%M %p")
-                                if time_key.startswith("0"): time_key = time_key[1:]
-                            except Exception:
-                                time_key = ""
-                            key = f"{tracking_target}|{time_key}" if time_key else tracking_target
-                        
-                            canon_h_tech = self.canonical_str(h_tech or '')
-                        
-                            processed_key = (canon_h_tech, key)
-                            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                            target_count_idx = template_processed_counts[processed_key]
-                        
-                            if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, time_key=time_key):
-                                print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                                continue
-
-                            if is_service_wo:
-                                sn_existing_found = False
-                                for c_tk, w_list in existing_wos.items():
-                                    for w in w_list:
-                                        if not w.get("is_appointment") and self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
-                                            w_time = self.normalize_time_key(w.get("time_key", ""))
-                                            norm_target_time = self.normalize_time_key(time_key)
-                                            is_sn_slot = bool(norm_target_time and w_time == norm_target_time)
-                                            if w.get("is_service_needed") or is_sn_slot or c_tk in ("s4", "s3"):
-                                                sn_existing_found = True
-                                                break
-                                    if sn_existing_found:
-                                        break
-                                
-                                if sn_existing_found:
-                                    print(f"⏭️ Service Needed card for asset '{name}' ALREADY exists at {time_key} on the board for {date_str}. Skipping 2nd creation.")
-                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
-                                    continue
-
-                            if is_oos_wo:
-                                oos_existing_tech = None
-                                for c_tk, w_list in existing_wos.items():
-                                    for w in w_list:
-                                        if self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
-                                            oos_existing_tech = c_tk
-                                            break
-                                    if oos_existing_tech:
-                                        break
-                                
-                                if oos_existing_tech:
-                                    print(f"⏭️ Out of Service asset '{name}' ALREADY exists on the board (tech '{oos_existing_tech}') for {date_str}. Skipping new creation so Asset Scraper can re-assign/update it.")
-                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, 1, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
-                                    continue
-
-                            if not is_service_wo and not is_oos_wo:
-                                asset_already_oos = False
-                                for c_tk, w_list in existing_wos.items():
-                                    for w in w_list:
-                                        if not w.get("is_appointment") and self.check_item_match(w, canon_target, require_customer_match=True, match_any_status=True):
-                                            if w.get("is_out_of_service") and canon_target in oos_canonical_names:
-                                                asset_already_oos = True
-                                                break
-                                    if asset_already_oos:
-                                        break
-                                if asset_already_oos:
-                                    print(f"⏭️ Asset '{name}' is OUT OF SERVICE for {date_str}. Skipping standard static header creation.")
-                                    continue
-
-                            board_count = 0
-                            for canon_tech_key, wo_list in existing_wos.items():
-                                if canon_h_tech:
-                                    tech_match = (
-                                        canon_tech_key == canon_h_tech or
-                                        self.is_tech_match(canon_h_tech, canon_tech_key)
-                                    )
-                                else:
-                                    tech_match = not canon_tech_key
-
-                                if tech_match:
-                                    for wo in wo_list:
-                                        if not wo.get("is_appointment"):
-                                            if self.check_item_match(
-                                                wo,
-                                                canon_target,
-                                                time_key,
-                                                is_service_wo=is_service_wo,
-                                                is_oos_wo=is_oos_wo,
-                                                match_any_status=(is_service_wo or is_oos_wo)
-                                            ):
-                                                board_count += 1
-                                        else:
-                                            appt_matched = False
-                                            if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
-                                                try:
-                                                    target_t = datetime.strptime(self.normalize_time_key(time_key), "%I:%M %p").time()
-                                                    if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                        appt_matched = True
-                                                except Exception:
-                                                    pass
-                                            if not appt_matched and wo.get("time_key") and time_key:
-                                                if self.normalize_time_key(wo["time_key"]) == self.normalize_time_key(time_key):
-                                                    appt_matched = True
-                                            if appt_matched:
-                                                board_count += 1
-                         
-                            if board_count >= target_count_idx:
-                                print(f"⏭️ Header banner '{name}' (occurrence {target_count_idx} at {time_key}) already exists on the board for tech '{h_tech}'. Recording in persistent history & skipping creation.")
-                                self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
-                                continue
-
-                        if dry_run:
-                            print(f"  [Dry-Run] Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
-                        else:
-                            is_service_wo = bool(
-                                header.get('is_service_needed_duplicate') or
-                                (header.get('service_note') and ('SERVICE NEEDED' in str(header.get('priority', '')) or '7.12' in str(header.get('priority', ''))))
-                            )
-                            h_note = header.get("service_note") or header.get("reason")
-                            res = await self.fill_and_save_work_order(
-                                customer_name=name,
-                                task=h_task,
-                                lead_source=lead_source,
-                                priority=priority,
-                                target_date=date_str,
-                                start_time=start_time,
-                                duration=duration,
-                                tech_name=h_tech,
-                                immediate_action=immediate_action,
-                                summary_note=h_note
-                            )
-                            if not res:
-                                print(f"  🔁 Attempt 1 aborted/failed for '{name}'. Retrying with fresh attempt in 3s...")
-                                await self.close_create_wo_modal()
-                                await self.page.wait_for_timeout(1000)
-                                res = await self.fill_and_save_work_order(
-                                    customer_name=name,
-                                    task=h_task,
-                                    lead_source=lead_source,
-                                    priority=priority,
-                                    target_date=date_str,
-                                    start_time=start_time,
-                                    duration=duration,
-                                    tech_name=h_tech,
-                                    immediate_action=immediate_action,
-                                    summary_note=h_note
-                                )
-
-                            if res:
-                                self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
-                                opt_wo = {
-                                    "canon_customer": canon_target,
-                                    "canon_strings": [canon_target],
-                                    "canon_combined": canon_target,
-                                    "time_key": time_key,
-                                    "is_service_needed": is_service_wo,
-                                    "is_out_of_service": is_oos_wo,
-                                    "is_appointment": False
-                                }
-                                if canon_h_tech not in existing_wos:
-                                    existing_wos[canon_h_tech] = []
-                                existing_wos[canon_h_tech].append(opt_wo)
-
-                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, self.board_req)
-                                if f_date == db_date_key and f_wos:
-                                    for t_key, w_list in existing_wos.items():
-                                        if t_key not in f_wos:
-                                            f_wos[t_key] = w_list
-                                        else:
-                                            old_matching = [w for w in w_list if w.get("canon_customer") == canon_target]
-                                            new_matching = [w for w in f_wos[t_key] if w.get("canon_customer") == canon_target]
-                                            if len(old_matching) > len(new_matching):
-                                                diff = len(old_matching) - len(new_matching)
-                                                f_wos[t_key].extend(old_matching[:diff])
-                                    board_date_str, existing_wos = f_date, f_wos
-
-                    if skip_vehicle_on_weekends and current_date.weekday() >= 5:
-                        print(f"⏭️ Skipping internal vehicle work orders (truck_assign_headers) for weekend date {date_str} ({current_date.strftime('%A')}).")
-                    else:
-                        for header in truck_assign_headers:
-                            name = header.get("name")
-                            start_time = header.get("start_time")
-                            duration = header.get("duration")
-                            priority = header.get("priority")
-                            h_tech = (header.get("tech_name") or "").strip()
-                            h_task = header.get("task", task)
-
-                            # Guard: skip if unassigned or no valid technician
-                            if not h_tech or h_tech.lower() in ("unassigned", "none", "clear") or not header.get("active", True):
-                                print(f"⏭️ Skipping unassigned truck '{name}' (no technician assigned) from creation.")
-                                continue
-
-                            if not dry_run:
-                                canon_target = self.canonical_str(name)
-                                try:
-                                    t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                                    time_key = t_dt.strftime("%I:%M %p")
-                                    if time_key.startswith("0"): time_key = time_key[1:]
-                                except Exception:
-                                    time_key = ""
-                                key = f"{canon_target}|{time_key}" if time_key else canon_target
-                            
-                                canon_h_tech = self.canonical_str(h_tech or '')
-                            
-                                processed_key = (canon_h_tech, key)
-                                template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                                target_count_idx = template_processed_counts[processed_key]
-
-                                is_service_needed_asset = any(
-                                    self.canonical_str(s.get("asset_name", "")) == canon_target
-                                    for s in self.template_data.get("service_needed_assets", [])
-                                    if s.get("active", True)
-                                )
-                            
-                                if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, time_key=time_key):
-                                    print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                                    continue
-
-                                is_oos_asset = any(
-                                    self.canonical_str(s.get("asset_name", "")) == canon_target
-                                    for s in self.template_data.get("out_of_service_assets", [])
-                                    if s.get("active", True)
-                                )
-                                if is_oos_asset:
-                                    print(f"⏭️ Truck '{name}' is Out of Service for {date_str}. Skipping creating truck assign header on tech '{h_tech}'.")
-                                    continue
-
-                                truck_on_target_tech = False
-                                found_tech_name = None
-                                found_cust_name = None
-                                found_time = None
-                                if canon_h_tech in existing_wos:
-                                    norm_target_time = self.normalize_time_key(time_key)
-                                    for wo in existing_wos[canon_h_tech]:
-                                        if not wo.get("is_appointment"):
-                                            c_cust = wo.get("canon_customer", "")
-                                            w_time = wo.get("time_key", "")
-                                            wo_time_keys = wo.get("time_keys") or ({self.normalize_time_key(w_time)} if w_time else set())
-                                            norm_wo_time = self.normalize_time_key(w_time)
-                                            time_matched = not norm_target_time or not norm_wo_time or norm_target_time == norm_wo_time or (norm_target_time in wo_time_keys)
-                                            if c_cust and (c_cust == canon_target or c_cust in (f"truck{canon_target}", f"tr{canon_target}")) and time_matched:
-                                                truck_on_target_tech = True
-                                                found_tech_name = canon_h_tech
-                                                found_cust_name = c_cust
-                                                found_time = w_time
-                                                break
-
-                                if truck_on_target_tech:
-                                    print(f"⏭️ Truck '{name}' already exists on tech '{found_tech_name}' at {found_time} PST (matched: '{found_cust_name}') for {date_str}. Recording in history and skipping creation.")
-                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
-                                    continue
-
-                                if canon_h_tech:
-                                    trucks_for_this_tech = sum(1 for t in truck_assign_headers if self.is_tech_match(t.get("tech_name", ""), h_tech) or self.canonical_str(t.get("tech_name", "")) == canon_h_tech)
-                                    if trucks_for_this_tech <= 1 and canon_h_tech in existing_wos:
-                                        tech_already_has_truck = False
-                                        for wo in existing_wos[canon_h_tech]:
-                                            if wo.get("is_appointment"):
-                                                continue
-                                            c_cust = wo.get("canon_customer", "")
-                                            if any(self.canonical_str(t.get("name", "")) == c_cust for t in truck_assign_headers):
-                                                tech_already_has_truck = True
-                                                break
-                                        if tech_already_has_truck:
-                                            print(f"⚠️ Tech '{h_tech}' already has a truck assigned on {date_str}. Skipping creating '{name}' to prevent multiple trucks on one technician.")
-                                            continue
-
-                                board_count = 0
-                                for canon_tech_key, wo_list in existing_wos.items():
-                                    if canon_h_tech:
-                                        tech_match = (
-                                            canon_tech_key == canon_h_tech or
-                                            self.is_tech_match(canon_h_tech, canon_tech_key)
-                                        )
-                                    else:
-                                        tech_match = not canon_tech_key
-                                    if tech_match:
-                                         for wo in wo_list:
-                                             if not wo.get("is_appointment"):
-                                                 c_cust = wo.get("canon_customer", "")
-                                                 w_time = wo.get("time_key", "")
-                                                 wo_time_keys = wo.get("time_keys") or ({self.normalize_time_key(w_time)} if w_time else set())
-                                                 name_match = c_cust == canon_target or canon_target in wo.get("canon_strings", [])
-                                                 norm_target = self.normalize_time_key(time_key)
-                                                 norm_wo = self.normalize_time_key(w_time)
-                                                 time_match = not norm_target or not norm_wo or norm_target == norm_wo or (norm_target in wo_time_keys)
-                                                 if name_match and time_match:
-                                                     board_count += 1
-                                             else:
-                                                 appt_matched = False
-                                                 if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
-                                                     try:
-                                                         target_t = datetime.strptime(self.normalize_time_key(time_key), "%I:%M %p").time()
-                                                         if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                             appt_matched = True
-                                                     except Exception:
-                                                         pass
-                                                 if not appt_matched and wo.get("time_key") and time_key:
-                                                     if self.normalize_time_key(wo["time_key"]) == self.normalize_time_key(time_key):
-                                                         appt_matched = True
-                                                 if appt_matched:
-                                                     board_count += 1
-                             
-                                if board_count >= target_count_idx:
-                                    print(f"⏭️ Truck assign header '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech has appointment at {time_key}. Recording in persistent history & skipping creation.")
-                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
-                                    continue
-
-                            if dry_run:
-                                print(f"  [Dry-Run] Truck Assign Header: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {h_tech} | Task: {h_task}")
-                            else:
-                                res = await self.fill_and_save_work_order(
-                                    customer_name=name,
-                                    task=h_task,
-                                    lead_source=lead_source,
-                                    priority=priority,
-                                    target_date=date_str,
-                                    start_time=start_time,
-                                    duration=duration,
-                                    tech_name=h_tech,
-                                    immediate_action=immediate_action,
-                                    summary_note=header.get("service_note")
-                                )
-                                if res:
-                                    self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": h_tech, "time": time_key})
-                                    opt_wo = {
-                                        "canon_customer": canon_target,
-                                        "canon_strings": [canon_target],
-                                        "canon_combined": canon_target,
-                                        "time_key": time_key,
-                                        "is_service_needed": False,
-                                        "is_out_of_service": False,
-                                        "is_appointment": False
-                                    }
-                                    if canon_h_tech not in existing_wos:
-                                        existing_wos[canon_h_tech] = []
-                                    existing_wos[canon_h_tech].append(opt_wo)
-
-                                    f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, self.board_req)
-                                    if f_date == db_date_key and f_wos:
-                                        for t_key, w_list in existing_wos.items():
-                                            if t_key not in f_wos:
-                                                f_wos[t_key] = w_list
-                                            else:
-                                                old_matching = [w for w in w_list if w.get("canon_customer") == canon_target]
-                                                new_matching = [w for w in f_wos[t_key] if w.get("canon_customer") == canon_target]
-                                                if len(old_matching) > len(new_matching):
-                                                    diff = len(old_matching) - len(new_matching)
-                                                    f_wos[t_key].extend(old_matching[:diff])
-                                        board_date_str, existing_wos = f_date, f_wos
-
-                    for job in tech_jobs:
-                        if not job.get("active", True):
-                            continue
-                        t_tech = job.get("tech_name")
-                        if t_tech and template_techs:
-                            canon_job_tech = self.canonical_str(t_tech)
-                            tech_is_active = False
-                            for entry in template_techs:
-                                if not entry.get("active", True):
-                                    continue
-                                c_name = self.canonical_str(entry.get("name", ""))
-                                c_tname = self.canonical_str(entry.get("tech_name", ""))
-                                if (canon_job_tech == c_name or canon_job_tech in c_name or c_name in canon_job_tech or
-                                    canon_job_tech == c_tname or canon_job_tech in c_tname or c_tname in canon_job_tech):
-                                    tech_is_active = True
-                                    break
-                            if not tech_is_active:
-                                print(f"⏭️ Skipping tech job '{job.get('name')}' because assigned technician '{t_tech}' is inactive in template config.")
-                                continue
-
-                        name = job.get("name")
-                        start_time = job.get("start_time")
-                        duration = job.get("duration")
-                        priority = job.get("priority")
-                        j_task = job.get("task", task)
-
-                        if not dry_run:
-                            canon_target = self.canonical_str(name)
-                            try:
-                                t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                                time_key = t_dt.strftime("%I:%M %p")
-                                if time_key.startswith("0"): time_key = time_key[1:]
-                            except Exception:
-                                time_key = ""
-                            key = f"{canon_target}|{time_key}" if time_key else canon_target
-
-                            canon_t_tech = self.canonical_str(t_tech or '')
-                        
-                            processed_key = (canon_t_tech, key)
-                            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                            target_count_idx = template_processed_counts[processed_key]
-
-                            if not force and self.is_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, time_key=time_key):
-                                print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                                continue
-
-                            board_count = 0
-                            for canon_tech_key, wo_list in existing_wos.items():
-                                if canon_t_tech:
-                                    tech_match = (
-                                        canon_tech_key == canon_t_tech or
-                                        self.is_tech_match(canon_t_tech, canon_tech_key)
-                                    )
-                                else:
-                                    tech_match = not canon_tech_key
-                                if tech_match:
-                                     for wo in wo_list:
-                                         if not wo.get("is_appointment"):
-                                             c_cust = wo.get("canon_customer", "")
-                                             w_time = wo.get("time_key", "")
-                                             wo_time_keys = wo.get("time_keys") or ({self.normalize_time_key(w_time)} if w_time else set())
-                                             name_match = c_cust == canon_target or canon_target in wo.get("canon_strings", [])
-                                             norm_target = self.normalize_time_key(time_key)
-                                             norm_wo = self.normalize_time_key(w_time)
-                                             time_match = not norm_target or not norm_wo or norm_target == norm_wo or (norm_target in wo_time_keys)
-                                             if name_match and time_match:
-                                                 board_count += 1
-                                         else:
-                                             appt_matched = False
-                                             if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
-                                                 try:
-                                                     target_t = datetime.strptime(self.normalize_time_key(time_key), "%I:%M %p").time()
-                                                     if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                         appt_matched = True
-                                                 except Exception:
-                                                     pass
-                                             if not appt_matched and wo.get("time_key") and time_key:
-                                                 if self.normalize_time_key(wo["time_key"]) == self.normalize_time_key(time_key):
-                                                     appt_matched = True
-                                             if appt_matched:
-                                                 board_count += 1
-
-                            if board_count >= target_count_idx:
-                                print(f"⏭️ Tech job '{name}' (occurrence {target_count_idx} at {time_key}) already exists or tech has appointment at {time_key}. Recording in persistent history & skipping creation.")
-                                self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": t_tech, "time": time_key})
-                                continue
-
-                        if dry_run:
-                            print(f"  [Dry-Run] Tech Job: {name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech: {t_tech} | Task: {j_task}")
-                        else:
-                            res = await self.fill_and_save_work_order(
-                                customer_name=name,
-                                task=j_task,
-                                lead_source=lead_source,
-                                priority=priority,
-                                target_date=date_str,
-                                start_time=start_time,
-                                duration=duration,
-                                tech_name=t_tech,
-                                mark_completed=True,
-                                immediate_action=immediate_action,
-                                summary_note=job.get("service_note") or job.get("summary_note")
-                            )
-                            if res:
-                                self.record_wo_created(created_history, db_date_key, canon_t_tech, canon_target, target_count_idx, status="created", details={"name": name, "tech": t_tech, "time": time_key})
-                                opt_wo = {
-                                    "canon_customer": canon_target,
-                                    "canon_strings": [canon_target],
-                                    "canon_combined": canon_target,
-                                    "time_key": time_key,
-                                    "is_service_needed": False,
-                                    "is_out_of_service": False,
-                                    "is_appointment": False
-                                }
-                                if canon_t_tech not in existing_wos:
-                                    existing_wos[canon_t_tech] = []
-                                existing_wos[canon_t_tech].append(opt_wo)
-
-                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, self.board_req)
-                                if f_date == db_date_key and f_wos:
-                                    for t_key, w_list in existing_wos.items():
-                                        if t_key not in f_wos:
-                                            f_wos[t_key] = w_list
-                                        else:
-                                            old_matching = [w for w in w_list if w.get("canon_customer") == canon_target]
-                                            new_matching = [w for w in f_wos[t_key] if w.get("canon_customer") == canon_target]
-                                            if len(old_matching) > len(new_matching):
-                                                diff = len(old_matching) - len(new_matching)
-                                                f_wos[t_key].extend(old_matching[:diff])
-                                    board_date_str, existing_wos = f_date, f_wos
-
-                    for tech in active_techs:
-                        t_name = tech
-                    
-                        meta = tech_metadata.get(t_name) or tech_metadata.get(self.canonical_str(t_name)) or {}
-                        start_time = meta.get("start_time") or tech_defaults.get("start_time")
-                        duration = meta.get("duration") or tech_defaults.get("duration")
-                        t_assignment_name = meta.get("tech_name", tech)
-                        priority = tech_priorities.get(t_name) or tech_priorities.get(self.canonical_str(t_name)) or tech_defaults.get("priority")
-
-                        if not dry_run:
-                            canon_target = self.canonical_str(t_name)
-                            canon_t_assignment = self.canonical_str(t_assignment_name or '')
-                        
-                            processed_key = (canon_t_assignment, canon_target)
-                            template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
-                            target_count_idx = template_processed_counts[processed_key]
-
-                            time_key = ""
-                            if start_time:
-                                try:
-                                    t_dt = datetime.strptime(start_time.strip().upper(), "%I:%M %p")
-                                    time_key = t_dt.strftime("%I:%M %p")
-                                    if time_key.startswith("0"): time_key = time_key[1:]
-                                except Exception:
-                                    time_key = ""
-
-                            if not force and self.is_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, time_key=time_key):
-                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx} at {time_key}) was previously created and recorded in history. Skipping 2nd creation.")
-                                continue
-
-                            board_count = 0
-                            tech_off_for_day = False
-                            for canon_tech_key, wo_list in existing_wos.items():
-                                if canon_t_assignment:
-                                    tech_match = (
-                                        canon_tech_key == canon_t_assignment or
-                                        self.is_tech_match(canon_t_assignment, canon_tech_key)
-                                    )
-                                else:
-                                    tech_match = not canon_tech_key
-                                if tech_match:
-                                    for wo in wo_list:
-                                        if wo.get("is_appointment"):
-                                            appt_matched = False
-                                            if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
-                                                try:
-                                                    target_t = datetime.strptime(self.normalize_time_key(time_key), "%I:%M %p").time()
-                                                    if wo["start_time_obj"] <= target_t <= wo["end_time_obj"]:
-                                                        appt_matched = True
-                                                except Exception:
-                                                    pass
-                                            if not appt_matched and wo.get("time_key") and time_key:
-                                                if self.normalize_time_key(wo["time_key"]) == self.normalize_time_key(time_key):
-                                                    appt_matched = True
-                                            if appt_matched:
-                                                tech_off_for_day = True
-                                                break
-                                            continue
-                                        if self.check_item_match(wo, canon_target, time_key=time_key, require_customer_match=True, match_any_status=True):
-                                            board_count += 1
-                                    if tech_off_for_day:
-                                        break
-                                        
-                            if tech_off_for_day or board_count >= target_count_idx:
-                                print(f"  -> Completed WO for tech '{t_name}' (occurrence {target_count_idx} at {time_key}) skipped (tech has matching appointment or already on board). Recording in persistent history.")
-                                self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="existing_on_board", details={"name": t_name, "tech": t_assignment_name, "time": time_key})
-                                continue
-
-                        if dry_run:
-                            print(f"  [Dry-Run] Tech WO: {t_name} | Date: {date_str} | Time: {start_time} | Duration: {duration} | Priority: {priority} | Tech Name: {t_assignment_name}")
-                        else:
-                            res = await self.fill_and_save_work_order(
-                                customer_name=t_name,
-                                task=task,
-                                lead_source=lead_source,
-                                priority=priority,
-                                target_date=date_str,
-                                start_time=start_time,
-                                duration=duration,
-                                tech_name=t_assignment_name,
-                                mark_completed=True,
-                                immediate_action=immediate_action,
-                                task_type=task,
-                                summary_note=None
-                            )
-                            if res:
-                                self.record_wo_created(created_history, db_date_key, canon_t_assignment, canon_target, target_count_idx, status="created", details={"name": t_name, "tech": t_assignment_name, "time": time_key})
-                                opt_wo = {
-                                    "canon_customer": canon_target,
-                                    "canon_strings": [canon_target],
-                                    "canon_combined": canon_target,
-                                    "time_key": time_key,
-                                    "is_service_needed": False,
-                                    "is_out_of_service": False,
-                                    "is_appointment": False
-                                }
-                                if canon_t_assignment not in existing_wos:
-                                    existing_wos[canon_t_assignment] = []
-                                existing_wos[canon_t_assignment].append(opt_wo)
-
-                                f_date, f_wos = await self.fetch_board_data_for_date(db_date_key, self.board_req)
-                                if f_date == db_date_key and f_wos:
-                                    for t_key, w_list in existing_wos.items():
-                                        if t_key not in f_wos:
-                                            f_wos[t_key] = w_list
-                                        else:
-                                            old_matching = [w for w in w_list if w.get("canon_customer") == canon_target]
-                                            new_matching = [w for w in f_wos[t_key] if w.get("canon_customer") == canon_target]
-                                            if len(old_matching) > len(new_matching):
-                                                diff = len(old_matching) - len(new_matching)
-                                                f_wos[t_key].extend(old_matching[:diff])
-                                    board_date_str, existing_wos = f_date, f_wos
-
-                if not dry_run:
-                    _records_processed += 1
-
-                    if not skip_asset:
-                        formatted_current_date = current_date.strftime("%m/%d/%Y")
-                        print(f"\n" + "-" * 60)
-                        print(f"🚛 [Step 2: Asset Assignment] Checking & Reconciling truck assignments for {formatted_current_date}...")
-                        print(f"-" * 60)
-                        if on_progress:
-                            try:
-                                self.progress_info["status_message"] = f"Step 2: Reconciling Asset Assignments for Day {d + 1} ({date_str})"
-                                on_progress(self.progress_info)
-                            except Exception:
-                                pass
-                        try:
-                            if not hasattr(self, 'asset_scraper') or self.asset_scraper is None:
-                                try:
-                                    from asset_assignment_scraper import AssetAssignmentScraper
-                                except ImportError:
-                                    try:
-                                        from automation.scrapers.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
-                                    except ImportError:
-                                        from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
-                                self.asset_scraper = AssetAssignmentScraper(template_path=self.template_path)
-
-                            self.asset_scraper.playwright = self.playwright
-                            self.asset_scraper.browser = self.browser
-                            self.asset_scraper.context = getattr(self, 'context', None) or (self.page.context if self.page else None)
-                            self.asset_scraper.page = self.page
-                            self.asset_scraper.template_data = self.template_data
-
-                            recon_result = await self.asset_scraper.reconcile_single_date(
-                                date_str=formatted_current_date,
-                                click_wos=True
-                            )
-                            recon_cnt = recon_result.get('checked', 0)
-                            recon_fixed = recon_result.get('reassignments', 0)
-                            print(f"✅ [Step 2: Asset Assignment] Completed for {formatted_current_date}: Checked {recon_cnt} truck work orders, Reassigned {recon_fixed}.")
-                        except Exception as asset_err:
-                            print(f"⚠️ [Step 2: Asset Assignment] Note/Error on {formatted_current_date}: {asset_err}")
-
-                    self.record_wo_created(
-                        created_history,
-                        db_date_key,
-                        canon_tech="",
-                        canon_target="date_processing_complete",
-                        target_count_idx=1,
-                        status="completed",
-                        details={"name": "Date Processing Complete", "date": db_date_key}
-                    )
-                    print(f"🔒 [Date Completed] Marked date {db_date_key} as completed in persistent history.")
-                elif not skip_asset:
-                    formatted_current_date = current_date.strftime("%m/%d/%Y")
-                    print(f"  [Dry-Run] Step 2: Would reconcile Asset Assignments for {formatted_current_date}")
-
-                self.progress_info.update({
-                    "current_day": d + 1,
-                    "completed_days": d + 1,
-                    "remaining_days": max(0, days - (d + 1)),
-                    "percent_complete": round(((d + 1) / days) * 100, 1),
-                    "status_message": f"Completed Day {d + 1} of {days} ({date_str})"
-                })
-                if on_progress:
-                    try:
-                        on_progress(self.progress_info)
-                    except Exception:
-                        pass
-
-            print("\n🎉 Dispatch Board Display Automation & Asset Assignment Finished Successfully!")
-            self.progress_info = {
-                "current_day": days,
-                "total_days": days,
-                "current_date": date_str if 'date_str' in locals() else None,
-                "completed_days": days,
-                "remaining_days": 0,
-                "percent_complete": 100.0,
-                "status": "completed",
-                "status_message": f"Successfully completed all {days} days!"
-            }
+            self.progress_info.update({
+                "current_day": d + 1, "current_date": date_str, "completed_days": d,
+                "remaining_days": days - (d + 1), "percent_complete": round(((d + 1) / days) * 100, 1),
+                "status": "processing", "status_message": f"Processing Day {d + 1} of {days} ({date_str})"
+            })
             if on_progress:
+                on_progress(self.progress_info)
+
+            print(f"\n--- Processing Date: {date_str} (Day {d + 1}/{days}) ---")
+
+            if not skip_stage1:
+                existing_wos = {}
+                if not dry_run:
+                    b_date, e_wos = await self.get_or_fetch_board_data_for_date(current_date)
+                    if e_wos is None:
+                        print(f"⛔ Could NOT verify Dispatch Board data for {date_str}. Skipping to prevent duplicates.")
+                        continue
+                    existing_wos = e_wos
+
+                template_processed_counts: Dict[Tuple[str, str], int] = {}
+
+                async def _sync_item(
+                    item_name: str,
+                    item_tech: Optional[str],
+                    item_time: str,
+                    item_priority: str,
+                    item_duration: str = "1:00",
+                    item_task: str = task,
+                    item_lead: str = lead_source,
+                    item_action: str = immediate_action,
+                    item_summary: Optional[str] = None,
+                    is_sn: bool = False,
+                    is_oos: bool = False,
+                    is_completed: bool = False,
+                    check_single_truck: bool = False
+                ):
+                    canon_target = self.canonical_str(item_name)
+                    tracking_target = f"{canon_target}_serviceneeded" if is_sn else (f"{canon_target}_outofservice" if is_oos else canon_target)
+                    try:
+                        t_dt = datetime.strptime(item_time.strip().upper(), "%I:%M %p")
+                        time_key = t_dt.strftime("%I:%M %p").lstrip("0")
+                    except Exception:
+                        time_key = ""
+
+                    canon_h_tech = self.canonical_str(item_tech or '')
+                    key = f"{tracking_target}|{time_key}" if time_key else tracking_target
+                    processed_key = (canon_h_tech, key)
+                    template_processed_counts[processed_key] = template_processed_counts.get(processed_key, 0) + 1
+                    target_idx = template_processed_counts[processed_key]
+
+                    if not force and self.is_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_idx, time_key=time_key):
+                        print(f"⏭️ Item '{item_name}' (occurrence {target_idx} at {time_key}) was previously created. Skipping.")
+                        return
+
+                    if dry_run:
+                        print(f"  [Dry-Run] Would create '{item_name}' on tech '{item_tech}' at {item_time}.")
+                        return
+
+                    # Check technician single truck constraint
+                    if check_single_truck and canon_h_tech:
+                        trucks_in_template = sum(1 for t in truck_assign_headers if self.is_tech_match(t.get("tech_name", ""), item_tech) or self.canonical_str(t.get("tech_name", "")) == canon_h_tech)
+                        if trucks_in_template <= 1 and canon_h_tech in existing_wos:
+                            has_truck = any(any(self.canonical_str(t.get("name", "")) == wo.get("canon_customer") for t in truck_assign_headers) for wo in existing_wos[canon_h_tech] if not wo.get("is_appointment"))
+                            if has_truck:
+                                print(f"⚠️ Tech '{item_tech}' already has a truck assigned on {date_str}. Skipping '{item_name}'.")
+                                return
+
+                    # Scan board for existing matches
+                    board_count = 0
+                    for canon_tech_key, wo_list in existing_wos.items():
+                        tech_match = (canon_tech_key == canon_h_tech or self.is_tech_match(canon_h_tech, canon_tech_key)) if canon_h_tech else (not canon_tech_key)
+                        if tech_match:
+                            for wo in wo_list:
+                                if not wo.get("is_appointment"):
+                                    if self.check_item_match(wo, canon_target, time_key, is_sn, is_oos, match_any_status=(is_sn or is_oos)):
+                                        board_count += 1
+
+                    if board_count >= target_idx:
+                        print(f"⏭️ Item '{item_name}' (occurrence {target_idx}) already exists on board. Recording in history.")
+                        self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_idx, status="existing_on_board", details={"name": item_name, "tech": item_tech, "time": time_key})
+                        return
+
+                    created = await self.fill_and_save_work_order(
+                        customer_name=item_name,
+                        task=item_task,
+                        lead_source=item_lead,
+                        priority=item_priority,
+                        target_date=date_str,
+                        start_time=item_time,
+                        duration=item_duration,
+                        tech_name=item_tech,
+                        mark_completed=is_completed,
+                        immediate_action=item_action,
+                        summary_note=item_summary
+                    )
+                    if created:
+                        self.record_wo_created(created_history, db_date_key, canon_h_tech, tracking_target, target_idx, status="created", details={"name": item_name, "tech": item_tech, "time": time_key})
+
+                # Loop 1: Static Headers
+                for h in static_headers:
+                    is_sn = bool(h.get('is_service_needed_duplicate') or (h.get('service_note') and ('SERVICE NEEDED' in str(h.get('priority', '')) or '7.12' in str(h.get('priority', '')))))
+                    is_oos = bool(h.get('is_out_of_service') or (h.get('reason') and 'DO NOT DISPATCH' in str(h.get('priority', ''))))
+                    await _sync_item(
+                        item_name=h.get("name", ""),
+                        item_tech=h.get("tech_name"),
+                        item_time=h.get("start_time", "6:00 AM"),
+                        item_priority=h.get("priority", "[5] SHOP (Tracking)"),
+                        item_duration=h.get("duration", "1:00"),
+                        item_task=h.get("task", task),
+                        item_summary=h.get("service_note") or h.get("reason"),
+                        is_sn=is_sn, is_oos=is_oos
+                    )
+
+                # Loop 2: Truck Assign Headers
+                if not (is_weekend and skip_vehicle_on_weekends):
+                    for h in truck_assign_headers:
+                        await _sync_item(
+                            item_name=h.get("name", ""),
+                            item_tech=h.get("tech_name"),
+                            item_time=h.get("start_time", "6:00 AM"),
+                            item_priority=h.get("priority", "[5] SER TR (Asset Assignment)"),
+                            item_duration=h.get("duration", "1:00"),
+                            item_task=h.get("task", task),
+                            item_summary=h.get("service_note"),
+                            check_single_truck=True
+                        )
+
+                # Loop 3: Tech Jobs
+                for j in tech_jobs:
+                    if j.get("active", True):
+                        await _sync_item(
+                            item_name=j.get("name", ""),
+                            item_tech=j.get("tech_name"),
+                            item_time=j.get("start_time", "6:00 AM"),
+                            item_priority=j.get("priority", "[7] ROUTINE (S) (STATUS)"),
+                            item_duration=j.get("duration", "1:00"),
+                            item_task=j.get("task", task)
+                        )
+
+                # Loop 4: Active Tech Routines (Completed at 4:45 AM)
+                for t in active_techs:
+                    t_meta = next((entry for entry in template_techs if entry.get("name") == t), {})
+                    prio = t_meta.get("priority", "[7] ROUTINE (S) (STATUS)")
+                    dept = t_meta.get("department", "service")
+                    task_val = "8 - PUMP" if dept == "pump" else "8 - SERVICE"
+                    await _sync_item(
+                        item_name=t,
+                        item_tech=t,
+                        item_time="04:45 AM",
+                        item_priority=prio,
+                        item_duration="1:15",
+                        item_task=task_val,
+                        is_completed=True
+                    )
+
+            # Stage 2: Reconcile Asset Assignments
+            if not skip_asset and not dry_run:
                 try:
-                    on_progress(self.progress_info)
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"Scraping error: {e}")
-            _error_occurred = f"{str(e)}\n{traceback.format_exc()}"
-        finally:
-            if not dry_run:
-                await self.cleanup()
+                    if not self.asset_scraper:
+                        try:
+                            from asset_assignment_scraper import AssetAssignmentScraper
+                        except ImportError:
+                            from dispatch.asset_assignment_scraper import AssetAssignmentScraper  # type: ignore
+                        self.asset_scraper = AssetAssignmentScraper(template_path=self.template_path)
 
-            _elapsed = time.time() - _start_time
-            if not dry_run and hasattr(self, "log_finish"):
-                await self.log_finish(
-                    status="error" if _error_occurred else "success",
-                    error_message=_error_occurred,
-                    records_processed=_records_processed,
-                    elapsed_seconds=_elapsed,
-                    details=_details
-                )
-            if _error_occurred:
-                print(f"⚠️ Execution finished with ERROR ({round(_elapsed, 1)}s):")
-                print(_error_occurred)
-            else:
-                print(f"🎉 Execution completed successfully in {round(_elapsed, 1)}s (Processed {_records_processed} records)")
+                    self.asset_scraper.playwright = self.playwright
+                    self.asset_scraper.browser = self.browser
+                    self.asset_scraper.context = getattr(self, 'context', None) or (self.page.context if self.page else None)
+                    self.asset_scraper.page = self.page
+                    self.asset_scraper.template_data = self.template_data
 
-if __name__ == "__main__":
-    import os
-    import sys
-    import argparse
+                    fmt_date = current_date.strftime("%m/%d/%Y")
+                    recon = await self.asset_scraper.reconcile_single_date(date_str=fmt_date, click_wos=True)
+                    print(f"✅ [Step 2: Asset Assignment] Completed for {fmt_date}: Checked {recon.get('checked', 0)}, Reassigned {recon.get('reassignments', 0)}.")
+                except Exception as asset_err:
+                    print(f"⚠️ [Step 2: Asset Assignment] Note on {date_str}: {asset_err}")
 
-    _dispatch_dir = os.path.dirname(os.path.abspath(__file__))
-    if _dispatch_dir not in sys.path:
-        sys.path.insert(0, _dispatch_dir)
+            self.record_wo_created(created_history, db_date_key, "", "date_processing_complete", 1, status="completed", details={"name": "Date Processing Complete", "date": db_date_key})
+            print(f"🔒 Marked date {db_date_key} as completed in history.")
 
-    parser = argparse.ArgumentParser(description="Run Dispatch Board Display Automation Scraper (Standalone)")
-    parser.add_argument("--days", type=int, default=2, help="Number of days to process (default: 2)")
-    parser.add_argument("--live", action="store_true", help="Run live on FieldEdge (skips dry-run)")
-    parser.add_argument("--start-date", type=str, help="Starting date (e.g. 'August 15', '08/15/2026'). Defaults to today.")
-    parser.add_argument("--skip-asset", action="store_true", help="Skip running the asset assignment tool for each date")
-    args = parser.parse_args()
+            self.progress_info.update({
+                "current_day": d + 1, "completed_days": d + 1,
+                "remaining_days": max(0, days - (d + 1)),
+                "percent_complete": round(((d + 1) / days) * 100, 1),
+                "status_message": f"Completed Day {d + 1} of {days} ({date_str})"
+            })
+            if on_progress:
+                on_progress(self.progress_info)
 
-    scraper = DispatchBoardDisplayAutomationScraper()
-    asyncio.run(scraper.run(days=args.days, dry_run=not args.live, start_date_str=args.start_date, skip_asset=args.skip_asset))
+        if not dry_run:
+            await self.cleanup()
+        print("🎉 Dispatch Board Automation completed successfully!")

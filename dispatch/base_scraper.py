@@ -1,12 +1,15 @@
 """
 Base Scraper Class (Dispatch Automation Dedicated)
-Provides browser automation and FieldEdge login functionality for Dispatch Board Display Automation.
+Provides browser automation, FieldEdge login, and shared utilities for Dispatch Board Automations.
 """
 import os
+import re
 import time
 import json
 import asyncio
+import unicodedata
 from datetime import datetime
+from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, Page
 import pytz
@@ -16,16 +19,13 @@ os.environ['TZ'] = 'America/Los_Angeles'
 if hasattr(time, 'tzset'):
     time.tzset()
 
-# Load environment variables robustly from local dispatch dir
 _dispatch_dir = os.path.dirname(os.path.abspath(__file__))
 _env_path = os.path.join(_dispatch_dir, '.env')
 load_dotenv(dotenv_path=_env_path)
 
-# Configuration paths
 RULES_FILE_PATH = os.path.join(_dispatch_dir, "config", "scraper_rules.json")
 HEADLESS_MODE = os.getenv("HEADLESS", "true").strip().lower() in ("true", "1", "t", "yes")
 
-# Pacific Standard / Daylight Timezone helper functions
 PST_TZ = pytz.timezone("America/Los_Angeles")
 
 def get_pst_now():
@@ -39,9 +39,11 @@ def get_pst_today_str(fmt="%Y-%m-%d"):
 
 class BaseScraper:
     """
-    Base scraper class for Dispatch Board Display Automation.
+    Base scraper class containing shared Playwright browser controls,
+    FieldEdge authentication, API communication, and core string/equipment/tech matching.
     """
-    
+    _cached_api_token: Optional[str] = None
+
     @staticmethod
     def get_pst_now():
         return get_pst_now()
@@ -49,46 +51,34 @@ class BaseScraper:
     @staticmethod
     def get_pst_today_str(fmt="%Y-%m-%d"):
         return get_pst_today_str(fmt)
-    
+
     def __init__(self):
-        """Initialize scraper with browser configuration."""
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
         
-        # Credentials from environment
         self.fieldedge_email = os.environ.get("DASH_EMAIL", "")
         self.fieldedge_password = os.environ.get("DASH_PASSWORD", "")
-        
-        # Load scraping rules
         self.rules = self._load_rules()
-        self.scraper_name = "dispatch-board-display-automation"
-    
-    def _load_rules(self):
+        self.scraper_name = "dispatch-base-automation"
+
+    def _load_rules(self) -> Dict:
         """Load scraping rules from JSON configuration file."""
         potential_paths = [
             RULES_FILE_PATH,
             os.path.join(_dispatch_dir, "config", "scraper_rules.json"),
         ]
-        
-        rules_data = None
         for path in potential_paths:
             if os.path.exists(path):
                 try:
                     with open(path, 'r', encoding='utf-8') as f:
                         rules_data = json.load(f)
-                    print(f"✅ Rules loaded successfully from: {path}")
-                    break
+                    return rules_data[0] if isinstance(rules_data, list) and rules_data else rules_data
                 except Exception as e:
                     print(f"⚠️ Failed to load rules from {path}: {e}")
-        
-        if not rules_data:
-            print(f"❌ Rules file not found! Checked: {potential_paths}")
-            return {}
+        return {}
 
-        return rules_data[0] if isinstance(rules_data, list) and len(rules_data) > 0 else rules_data
-    
     async def initialize(self):
         """Launch and configure Playwright browser instance."""
         try:
@@ -118,7 +108,6 @@ class BaseScraper:
                     proxy_config["username"] = proxy_username
                 if proxy_password:
                     proxy_config["password"] = proxy_password
-                print(f"🔀 Proxy configured: {proxy_server}")
 
             launch_kwargs = dict(
                 headless=HEADLESS_MODE,
@@ -131,16 +120,13 @@ class BaseScraper:
 
             try:
                 self.browser = await self.playwright.chromium.launch(**launch_kwargs)
-                print("✅ Browser launched: system Google Chrome")
             except Exception as chrome_err:
-                print(f"⚠️ System Chrome not available ({chrome_err}). Falling back to bundled Chromium...")
                 fallback_kwargs = {k: v for k, v in launch_kwargs.items() if k != "channel"}
                 fallback_args = [a for a in chrome_args if a != "--headless=new"]
                 if HEADLESS_MODE:
                     fallback_args.append("--headless=new")
                 fallback_kwargs["args"] = fallback_args
                 self.browser = await self.playwright.chromium.launch(**fallback_kwargs)
-                print("✅ Browser launched: bundled Chromium (fallback)")
 
             context_kwargs = dict(
                 viewport={"width": viewport_width, "height": viewport_height},
@@ -154,17 +140,16 @@ class BaseScraper:
             )
             self.context = await self.browser.new_context(**context_kwargs)
 
-            # Block Pendo overlays
+            # Block Pendo tracking overlays to prevent intercepting clicks
             await self.context.route("**/*pendo*", lambda route: route.abort())
             await self.context.route("**/*app.pendo.io*", lambda route: route.abort())
 
             self.page = await self.context.new_page()
-
         except Exception as e:
             print(f"❌ Failed to initialize browser: {e}")
             raise
 
-    async def login_fieldedge(self, page: Page = None):
+    async def login_fieldedge(self, page: Optional[Page] = None):
         """Authenticate to FieldEdge dashboard."""
         FIELDEDGE_LOGIN_URL = self.rules.get('fieldedge_login_url', 'https://login.fieldedge.com/Account/Login')
         
@@ -204,8 +189,7 @@ class BaseScraper:
 
                     try:
                         await page.press(password_xpath, "Enter")
-                    except Exception as e:
-                        print(f"Failed to press Enter to login: {e}")
+                    except Exception:
                         await page.evaluate('''([xpath]) => {
                             const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
                             if (result.singleNodeValue) result.singleNodeValue.click();
@@ -222,112 +206,17 @@ class BaseScraper:
                     print("✅ FieldEdge login successful.")
                     _update_fe_status("Connected / Active Session")
                     return
-
                 except Exception as attempt_err:
                     print(f"⚠️ FieldEdge login attempt {attempt + 1} failed: {attempt_err}")
                     if attempt < max_retries - 1:
-                        print("🔄 Retrying FieldEdge login in 5 seconds...")
                         await asyncio.sleep(5)
                     else:
-                        print("❌ All FieldEdge login attempts failed.")
                         _update_fe_status(f"Login Failed ({attempt_err})")
                         raise attempt_err
-
         except Exception as e:
             print(f"FieldEdge login failed: {e}")
             _update_fe_status(f"Login Failed ({e})")
             raise
-
-
-    async def perform_actions_by_xpaths(self, name: str = '', action_list: list = None, value: str = None, raise_on_error: bool = False, page = None):
-        """Execute actions on UI elements by XPath."""
-        if action_list is None:
-            action_list = []
-            
-        xpaths = self.rules.get(name, action_list)
-        has_executed = False
-        
-        for item in xpaths:
-            action = item.get("action", "")
-            xpath = item.get("xpath", "")
-            js_code = item.get("js_code", "")
-            timeout = item.get("timeout", 2000)
-
-            target_page = page or self.page
-
-            if action == "wait":
-                adjusted_timeout = max(timeout, 2000) if os.name != "nt" else timeout
-                await asyncio.sleep(adjusted_timeout / 1000)
-                continue
-
-            if action == "js_code_run":
-                code_to_run = js_code or xpath
-                if not code_to_run:
-                    continue
-                try:
-                    await target_page.evaluate(code_to_run)
-                    await asyncio.sleep(0.5)
-                    has_executed = True
-                except Exception as e:
-                    if raise_on_error:
-                        raise Exception(f"Action '{action}' failed for script '{code_to_run}': {e}") from e
-                continue
-            
-            if not xpath:
-                continue
-            
-            element = target_page.locator(xpath)
-            
-            try:
-                wait_timeout = item.get("timeout", 15000)
-                try:
-                    await target_page.evaluate("""() => {
-                        const pendo = document.querySelectorAll('[id^="pendo-"], ._pendo-backdrop');
-                        pendo.forEach(el => el.remove());
-                    }""")
-                except Exception:
-                    pass
-
-                try:
-                    await target_page.wait_for_selector(xpath, state="attached", timeout=wait_timeout)
-                except Exception:
-                    pass
-
-                element_count = await element.count()
-                
-                if element_count > 0:
-                    target = element.first if element_count > 1 else element
-                    
-                    if action == "click":
-                        try:
-                            await target.click(timeout=10000)
-                        except Exception:
-                            await target.evaluate("el => el.click()", timeout=5000)
-                    
-                    elif action == "right_click":
-                        try:
-                            await target.click(button="right", timeout=10000)
-                        except Exception:
-                            await target.evaluate("""el => {
-                                el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
-                            }""", timeout=5000)
-                    
-                    elif action == "input":
-                        if value is not None:
-                            await target.fill(str(value))
-                            
-                    elif action == "vue_input":
-                        if value is not None:
-                            await target.evaluate("(node, val) => { node.value = val; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); }", str(value))
-                            
-                    await asyncio.sleep(0.5)
-                    has_executed = True
-            except Exception as e:
-                if raise_on_error:
-                    raise Exception(f"Action '{action}' failed for xpath '{xpath}': {e}") from e
-        
-        if not has_executed and raise_on_error:
-            raise Exception(f"Element not found or all actions failed for: {name or action_list}")
 
     async def cleanup(self):
         """Clean up browser resources."""
@@ -340,19 +229,183 @@ class BaseScraper:
         except Exception as e:
             print(f"Error during cleanup: {e}")
 
-    def normalize_tech_name(self, raw: str) -> str:
-        """Clean and standardize technician names."""
-        if not raw:
-            return "Unknown"
-        cleaned = str(raw).replace('\xa0', ' ').strip()
-        import re
-        cleaned = re.sub(r'\)$', '', cleaned).strip()
-        cleaned = re.sub(r'^T[A-Za-z]?\d+\s+', '', cleaned).strip()
+    # --- SHARED API & TEMPLATE HELPERS ---
 
-        lower_cleaned = cleaned.lower()
-        if any(variant in lower_cleaned for variant in ["skyler", "skylar", "skiler", "schyler"]):
-            return "03 - Skyler"
-        if "russell" in lower_cleaned:
-            return "Russell"
-            
-        return cleaned
+    @staticmethod
+    def _extract_jwt_from_response(data) -> Optional[str]:
+        token_keys = ("access", "access_token", "accessToken", "token", "jwt", "id_token", "idToken", "auth_token")
+        if isinstance(data, dict):
+            for k in token_keys:
+                v = data.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            for v in data.values():
+                if isinstance(v, (dict, list)):
+                    found = BaseScraper._extract_jwt_from_response(v)
+                    if found:
+                        return found
+        elif isinstance(data, list):
+            for v in data:
+                found = BaseScraper._extract_jwt_from_response(v)
+                if found:
+                    return found
+        return None
+
+    def _get_api_auth_headers(self) -> Dict[str, str]:
+        static_token = os.getenv("BACKEND_API_TOKEN", "").strip()
+        if static_token:
+            return {"Authorization": static_token if " " in static_token else f"Bearer {static_token}"}
+        if getattr(self, "_cached_api_token", None):
+            return {"Authorization": f"Bearer {self._cached_api_token}"}
+
+        email = os.getenv("BACKEND_API_EMAIL", "").strip()
+        password = os.getenv("BACKEND_API_PASSWORD", "")
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if not (email and password and api_url):
+            return {}
+
+        import urllib.request, urllib.error
+        base = api_url if api_url.endswith("/api") else f"{api_url}/api"
+        login_path = os.getenv("BACKEND_LOGIN_PATH", "/auth/login").strip() or "/auth/login"
+        endpoint = f"{base}/{login_path.lstrip('/')}"
+        body = json.dumps({"email": email, "password": password}).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers={"Content-Type": "application/json", "User-Agent": "SterlingAutomations/1.0"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+                token = None
+                try:
+                    token = self._extract_jwt_from_response(json.loads(raw))
+                except Exception:
+                    pass
+                if not token:
+                    for cookie in response.headers.get_all("Set-Cookie") or []:
+                        name, _, rest = cookie.partition("=")
+                        if name.strip().lower() in ("access", "access_token", "accesstoken", "token", "jwt"):
+                            token = rest.split(";", 1)[0].strip()
+                            break
+                if token:
+                    self._cached_api_token = token
+                    print(f"🔐 Authenticated with Dashboard API as {email} (JWT acquired).")
+                    return {"Authorization": f"Bearer {token}"}
+        except Exception as e:
+            print(f"⚠️ Dashboard API login error: {e}")
+        return {}
+
+    def _load_template(self, template_path: Optional[str] = None) -> Dict:
+        t_path = template_path or getattr(self, "template_path", "")
+        api_url = os.getenv("BACKEND_API_URL", "").rstrip("/")
+        if api_url:
+            try:
+                import urllib.request
+                endpoint = f"{api_url}/automation/dispatch-config/" if api_url.endswith('/api') else f"{api_url}/api/automation/dispatch-config/"
+                headers = {"User-Agent": "SterlingAutomations/1.0"}
+                headers.update(self._get_api_auth_headers())
+                req = urllib.request.Request(endpoint, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    if response.status == 200:
+                        remote_data = json.loads(response.read().decode('utf-8'))
+                        print(f"✅ Loaded live configuration from Dashboard API: {endpoint}")
+                        local_data = {}
+                        if t_path and os.path.exists(t_path):
+                            try:
+                                with open(t_path, "r", encoding="utf-8") as f:
+                                    local_data = json.load(f)
+                            except Exception:
+                                local_data = {}
+                        for key, value in remote_data.items():
+                            local_data[key] = value
+                        if t_path:
+                            try:
+                                with open(t_path, "w", encoding="utf-8") as f:
+                                    json.dump(local_data, f, indent=2, ensure_ascii=False)
+                            except Exception:
+                                pass
+                        return local_data
+            except Exception as e:
+                print(f"⚠️ Could not fetch live template from API: {e}. Falling back to local file.")
+
+        if t_path and os.path.exists(t_path):
+            with open(t_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+
+    # --- SHARED MATCHING LOGIC ---
+
+    @staticmethod
+    def canonical_str(text: str) -> str:
+        """Standardize a string by stripping non-alphanumerics and font styling (NFKD)."""
+        if not text:
+            return ""
+        norm = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(text))).lower()
+        return norm if norm else str(text).strip().lower()
+
+    @staticmethod
+    def is_tech_match(tech1: str, tech2: str) -> bool:
+        """
+        Strict exact match for technicians.
+        Technicians are searched using ONLY exact names from template JSON.
+        No substring, fuzzy, or partial prefix matching allowed.
+        """
+        if not tech1 or not tech2:
+            return False
+        t1 = re.sub(r'[\u00d7xX]$', '', str(tech1)).strip()
+        t2 = re.sub(r'[\u00d7xX]$', '', str(tech2)).strip()
+        if t1.lower() == t2.lower():
+            return True
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t1)).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t2)).lower()
+        return bool(c1 and c2 and c1 == c2)
+
+    @staticmethod
+    def is_same_equipment(name1: str, name2: str) -> bool:
+        """
+        Match equipment names strictly based on category and truck numbers.
+        Prevents cross-category matching between Pump Trucks, Service Trucks, and Excavators.
+        """
+        if not name1 or not name2:
+            return False
+        s1 = unicodedata.normalize('NFKD', str(name1)).strip()
+        s2 = unicodedata.normalize('NFKD', str(name2)).strip()
+
+        is_pump1 = "🚛" in s1 or any(x in s1.lower() for x in ("pump", "pt (", "pt/"))
+        is_serv1 = "🛻" in s1 or any(x in s1.lower() for x in ("ser tr", "service"))
+        is_exc1 = "🏗" in s1 or any(x in s1.lower() for x in ("exc", "u-17", "u-40", "u17", "u40"))
+        is_generic_truck1 = "truck" in s1.lower() and not (is_pump1 or is_serv1 or is_exc1)
+
+        is_pump2 = "🚛" in s2 or any(x in s2.lower() for x in ("pump", "pt (", "pt/"))
+        is_serv2 = "🛻" in s2 or any(x in s2.lower() for x in ("ser tr", "service"))
+        is_exc2 = "🏗" in s2 or any(x in s2.lower() for x in ("exc", "u-17", "u-40", "u17", "u40"))
+        is_generic_truck2 = "truck" in s2.lower() and not (is_pump2 or is_serv2 or is_exc2)
+
+        # Cross-category rejection
+        if is_pump1 and (is_serv2 or is_exc2):
+            return False
+        if is_serv1 and (is_pump2 or is_exc2):
+            return False
+        if is_exc1 and (is_pump2 or is_serv2):
+            return False
+
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', s1).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', s2).lower()
+        if c1 and c2 and c1 == c2:
+            return True
+
+        m1 = re.findall(r'\b\d{2,4}\b', s1)
+        m2 = re.findall(r'\b\d{2,4}\b', s2)
+        if m1 and m2:
+            same_number = bool(set(m1).intersection(set(m2)))
+            if same_number:
+                if (is_pump1 and is_pump2) or (is_serv1 and is_serv2) or (is_exc1 and is_exc2):
+                    return True
+                if (is_generic_truck1 and (is_pump2 or is_serv2)) or (is_generic_truck2 and (is_pump1 or is_serv1)):
+                    return True
+                if not (is_pump1 or is_serv1 or is_exc1) and not (is_pump2 or is_serv2 or is_exc2):
+                    return True
+
+        return False
