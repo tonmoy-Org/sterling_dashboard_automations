@@ -593,34 +593,71 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         try:
             dropdown = self.page.locator(dropdown_selector).first
             await dropdown.wait_for(state="visible", timeout=10000)
-            search_input = dropdown.locator("input.vs__search, input").first
+            await dropdown.scroll_into_view_if_needed()
+
+            if not is_customer:
+                is_customer = "customer" in dropdown_selector.lower()
+            if not is_tech:
+                is_tech = "primary tech" in dropdown_selector.lower() or "tech" in dropdown_selector.lower()
 
             # Check existing selection
             sel_el = dropdown.locator(".vs__selected, .selected-tag").first
+            dd_class = await dropdown.get_attribute("class") or ""
             if await sel_el.count() > 0 and await sel_el.is_visible():
                 cur_val = (await sel_el.text_content() or "").strip()
                 clean_cur = re.sub(r'[\u00d7xX]$', '', cur_val).strip()
 
-                already_matched = False
-                if is_tech:
-                    already_matched = self.is_tech_match(clean_cur, option_text) or self.is_tech_match(cur_val, option_text)
-                elif self.is_same_equipment(clean_cur, option_text) or clean_cur == option_text or self.canonical_str(clean_cur) == self.canonical_str(option_text):
-                    already_matched = True
+                is_placeholder = (
+                    "no-option-selected" in dd_class or
+                    not clean_cur or
+                    clean_cur.lower() in (
+                        "select", "select primary tech", "select tech", "select technician",
+                        "type to search", "none", "select..."
+                    ) or
+                    clean_cur.lower().startswith("select ")
+                )
 
-                if already_matched:
-                    print(f"  -> '{option_text}' already selected in dropdown ('{cur_val}'). Proceeding.")
-                    return True
+                if clean_cur and not is_placeholder:
+                    already_matched = False
+                    if is_tech:
+                        already_matched = self.is_tech_match(clean_cur, option_text) or self.is_tech_match(cur_val, option_text)
+                    elif self.is_same_equipment(clean_cur, option_text) or clean_cur == option_text or self.canonical_str(clean_cur) == self.canonical_str(option_text):
+                        already_matched = True
 
-                clear_btn = dropdown.locator(".vs__clear, button.close, button.vs__clear").first
-                if await clear_btn.count() > 0 and await clear_btn.is_visible():
-                    await clear_btn.click(force=True)
+                    if already_matched:
+                        print(f"  -> '{option_text}' already selected in dropdown ('{cur_val}'). Proceeding.")
+                        return True
+
+                    print(f"  -> Clearing existing mismatched selection '{cur_val}' (expected '{option_text}')...")
+                    clear_btn = dropdown.locator(".vs__clear, button.close, button.vs__clear").first
+                    if await clear_btn.count() > 0 and await clear_btn.is_visible():
+                        await clear_btn.click(force=True)
+                        await self.page.wait_for_timeout(200)
+
+            # Ensure dropdown menu is open before searching/selecting
+            menu = dropdown.locator("ul.vs__dropdown-menu, ul[role='listbox']").first
+            toggle = dropdown.locator(".vs__dropdown-toggle, .arrow_icon, .vs__open-indicator").first
+            is_open = (
+                await dropdown.locator(".vs__dropdown-toggle[aria-expanded='true'], .vs--open").count() > 0 or
+                (await menu.count() > 0 and await menu.is_visible())
+            )
+            if not is_open:
+                if await toggle.count() > 0:
+                    await toggle.click(force=True)
                 else:
-                    await search_input.click(force=True)
-                    await search_input.press("Backspace")
+                    await dropdown.click(force=True)
                 await self.page.wait_for_timeout(250)
 
-            await search_input.focus()
-            await search_input.fill("")
+            search_input = dropdown.locator("input.vs__search, input").first
+            if await search_input.count() == 0 or not await search_input.is_visible():
+                search_input = self.page.locator("input.vs__search:visible, input[type='search']:visible").first
+
+            if await search_input.count() > 0:
+                try:
+                    await search_input.focus()
+                    await search_input.fill("")
+                except Exception:
+                    pass
 
             # Prepare search term
             type_text = str(option_text).strip()
@@ -631,10 +668,25 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             target_canons = {self.canonical_str(v) for v in name_variants if self.canonical_str(v)}
             target_has_banner = False if is_tech else self.has_banner_prefix(option_text)
 
-            await search_input.fill(type_text)
+            if await search_input.count() > 0:
+                await search_input.fill(type_text)
+                await self.page.wait_for_timeout(250)
 
-            if press_enter or is_customer:
-                print(f"  🔍 Entered '{type_text}'. Pressing Enter to initiate search...")
+            # Ensure menu remains open after typing
+            is_open = (
+                await dropdown.locator(".vs__dropdown-toggle[aria-expanded='true'], .vs--open").count() > 0 or
+                (await menu.count() > 0 and await menu.is_visible())
+            )
+            if not is_open:
+                arrow = dropdown.locator(".arrow_icon, .vs__open-indicator, .vs__actions").first
+                if await arrow.count() > 0:
+                    await arrow.click(force=True)
+                else:
+                    await dropdown.click(force=True)
+                await self.page.wait_for_timeout(250)
+
+            if is_customer:
+                print(f"  🔍 Entered customer search '{type_text}'. Pressing Enter to initiate search...")
                 await search_input.press("Enter")
                 await self.page.wait_for_timeout(500)
                 try:
@@ -643,13 +695,20 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await spinner.first.wait_for(state="hidden", timeout=12000)
                 except Exception:
                     pass
+            else:
+                await self.page.wait_for_timeout(250)
+                try:
+                    await menu.wait_for(state="visible", timeout=3000)
+                except Exception:
+                    pass
 
-            options = dropdown.locator("ul.vs__dropdown-menu li:visible, ul[role='listbox'] li:visible, li.vs__dropdown-option:visible")
+            options = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
 
             async def _check_and_click_option(opt_candidate, is_fuzzy: bool = False) -> bool:
-                if not await opt_candidate.is_visible():
+                try:
+                    raw_text = (await opt_candidate.text_content() or "").strip()
+                except Exception:
                     return False
-                raw_text = (await opt_candidate.text_content() or "").strip()
                 if not raw_text:
                     return False
                 clean_opt = re.sub(r'[\u00d7xX]$', '', raw_text).strip()
@@ -676,7 +735,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 c_opt = self.canonical_str(clean_opt)
                 c_first = self.canonical_str(first_line)
                 if not is_fuzzy:
-                    if clean_opt == type_text or clean_opt in name_variants or c_opt in target_canons or c_first in target_canons:
+                    if (
+                        clean_opt == type_text or
+                        clean_opt.lower() == type_text.lower() or
+                        clean_opt in name_variants or
+                        c_opt in target_canons or
+                        c_first in target_canons
+                    ):
                         await opt_candidate.scroll_into_view_if_needed()
                         await opt_candidate.click(force=True)
                         return True
@@ -696,7 +761,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     if await _check_and_click_option(options.nth(i), is_fuzzy=False):
                         clicked = True
                         break
-                if clicked or count > 0:
+                if clicked or (count > 0 and not is_customer):
                     break
                 await self.page.wait_for_timeout(300)
 
@@ -722,11 +787,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             is_verified = False
             selected_val = ""
 
-            while time.time() - verify_start < (12.0 if press_enter else 5.0):
+            while time.time() - verify_start < (12.0 if is_customer else 5.0):
                 sel_check = dropdown.locator(".vs__selected, .selected-tag").first
                 if await sel_check.count() > 0:
                     selected_val = (await sel_check.text_content() or "").strip()
                     clean_val = re.sub(r'[\u00d7xX]$', '', selected_val).strip()
+
+                    # Ignore placeholder if still showing
+                    if not clean_val or clean_val.lower() in ("select", "select primary tech", "select tech", "select technician", "type to search"):
+                        await self.page.wait_for_timeout(200)
+                        continue
 
                     if is_tech:
                         if self.is_tech_match(clean_val, option_text) or self.is_tech_match(selected_val, option_text):
@@ -735,7 +805,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     else:
                         banner_ok = (self.has_banner_prefix(selected_val) == target_has_banner)
                         equip_ok = self.is_same_equipment(selected_val, option_text) if any(x in option_text for x in ("🚛", "🛻", "🏗")) else True
-                        if banner_ok and equip_ok and (clean_val == type_text or self.canonical_str(clean_val) in target_canons or clean_val in name_variants):
+                        if banner_ok and equip_ok and (
+                            clean_val == type_text or
+                            clean_val.lower() == type_text.lower() or
+                            self.canonical_str(clean_val) in target_canons or
+                            clean_val in name_variants
+                        ):
                             is_verified = True
                             break
                 await self.page.wait_for_timeout(200)
@@ -814,21 +889,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             await self.select_dropdown_option(ia_xpath, immediate_action, press_enter=False)
 
             # 3. Task
-            await self.select_dropdown_option(task_xpath, task, press_enter=False)
+            if not await self.select_dropdown_option(task_xpath, task, press_enter=False):
+                print(f"❌ Failed to select Task '{task}'. Aborting work order.")
+                await self.close_create_wo_modal()
+                return False
 
             # 4. Lead Source
             lead_xpath = self.rules.get('dispatch_board_lead_source_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Work Order Lead Source')]/following::div[contains(@class,'v-select')][1]")
-            await self.select_dropdown_option(lead_xpath, lead_source, press_enter=False)
+            if not await self.select_dropdown_option(lead_xpath, lead_source, press_enter=False):
+                print(f"❌ Failed to select Lead Source '{lead_source}'. Aborting work order.")
+                await self.close_create_wo_modal()
+                return False
 
             # 5. Priority
             prio_xpath = self.rules.get('dispatch_board_priority_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Priority')]/following::div[contains(@class,'v-select')][1]")
-            await self.select_dropdown_option(prio_xpath, priority, press_enter=False)
+            if not await self.select_dropdown_option(prio_xpath, priority, press_enter=False):
+                print(f"❌ Failed to select Priority '{priority}'. Aborting work order.")
+                await self.close_create_wo_modal()
+                return False
 
             # 6. Primary Tech
             tech_xpath = self.rules.get('dispatch_board_tech_name_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Primary Tech')]/following::div[contains(@class,'v-select')][1]")
             if tech_name:
                 print(f"  [6/7] Primary Tech: '{tech_name}'")
-                if not await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True, is_tech=True):
+                if not await self.select_dropdown_option(tech_xpath, tech_name, press_enter=False, is_tech=True):
                     print(f"❌ Failed to select technician '{tech_name}'. Aborting work order.")
                     await self.close_create_wo_modal()
                     return False
