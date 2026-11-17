@@ -12,7 +12,6 @@ except Exception:
     import pytz
     PACIFIC_TZ = pytz.timezone("America/Los_Angeles")
 
-DUMMY_HEADER_TECHS = ("s3", "s4", "s6", "s7", "t9", "t91", "f2", "p2")
 import time
 import traceback
 import urllib.request
@@ -141,7 +140,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     continue
 
                 rec_tech = v.get("canon_tech") or ""
-                tech_matched = (rec_tech == canon_tech or (rec_tech and canon_tech and (rec_tech in canon_tech or canon_tech in rec_tech)))
+                tech_matched = (rec_tech == canon_tech or self.is_tech_match(rec_tech, canon_tech))
                 if not tech_matched:
                     continue
 
@@ -457,27 +456,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         import unicodedata, re
         t1 = re.sub(r'[\u00d7xX]$', '', str(tech1)).strip()
         t2 = re.sub(r'[\u00d7xX]$', '', str(tech2)).strip()
+        if t1.lower() == t2.lower():
+            return True
         c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t1)).lower()
         c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t2)).lower()
-        if not c1 or not c2:
-            return False
-        if c1 == c2:
-            return True
-        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p4" matching "p4jacob"):
-        if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c1) and c2.startswith(c1):
-            return True
-        if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
-            return True
-        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', t1).lower()) if len(w) >= 3]
-        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', t2).lower()) if len(w) >= 3]
-        for w1 in words1:
-            for w2 in words2:
-                if w1 == w2 or (len(w1) >= 4 and w1 in w2) or (len(w2) >= 4 and w2 in w1):
-                    return True
-        if len(c1) >= 4 and len(c2) >= 4:
-            if c1 in c2 or c2 in c1:
-                return True
-        return False
+        return bool(c1 and c2 and c1 == c2)
 
     @staticmethod
     def is_same_equipment(name1: str, name2: str) -> bool:
@@ -1256,14 +1239,22 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             except Exception:
                 pass
 
-            target_has_banner = self.has_banner_prefix(option_text)
-            name_variants = self.extract_name_variants(option_text)
-            target_canons = set(self.canonical_str(v) for v in name_variants if self.canonical_str(v))
-            target_norms = set(unicodedata.normalize('NFKD', v).strip().lower() for v in name_variants if v)
-            is_time_target = bool(re.search(r'\b\d{1,2}:\d{2}\b', option_text)) or any(w in ('am', 'pm') for w in re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
-
-            clean_search = unicodedata.normalize('NFKD', option_text).strip()
-            clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
+            if is_tech:
+                target_has_banner = False
+                name_variants = [str(option_text).strip()]
+                target_canons = {self.canonical_str(option_text)}
+                target_norms = {unicodedata.normalize('NFKD', option_text).strip().lower()}
+                is_time_target = False
+                clean_search = unicodedata.normalize('NFKD', option_text).strip()
+                clean_core = clean_search
+            else:
+                target_has_banner = self.has_banner_prefix(option_text)
+                name_variants = self.extract_name_variants(option_text)
+                target_canons = set(self.canonical_str(v) for v in name_variants if self.canonical_str(v))
+                target_norms = set(unicodedata.normalize('NFKD', v).strip().lower() for v in name_variants if v)
+                is_time_target = bool(re.search(r'\b\d{1,2}:\d{2}\b', option_text)) or any(w in ('am', 'pm') for w in re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
+                clean_search = unicodedata.normalize('NFKD', option_text).strip()
+                clean_core = re.sub(r'^[a-zA-Z0-9]{1,3}\s+', '', clean_search).strip()
 
             type_text = re.sub(r'^[\s\u2000-\u200f]+|[\s\u2000-\u200f]+$', '', str(option_text)).strip('\r\n')
             await search_input.fill(type_text)
@@ -1309,7 +1300,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await self.page.wait_for_timeout(350)
 
                 # Fallback search if no match found with full term (e.g. searching with truck number without emoji)
-                if not has_match:
+                if not has_match and not is_tech:
                     fallback_terms = []
                     m_dig = re.search(r'\b\d{2,4}\b', clean_search)
                     if m_dig and m_dig.group(0) != type_text:
@@ -1448,6 +1439,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 return False
 
             async def _fuzzy_match_option(opt_el, strict_banner: bool = True) -> bool:
+                if is_tech:
+                    return False
                 if not await opt_el.is_visible():
                     return False
                 raw_text = await opt_el.text_content()
@@ -1475,20 +1468,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 is_cand_fleet = any(x in s_raw for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
                 if is_target_fleet or is_cand_fleet:
                     if self.is_same_equipment(option_text, s_raw) or self.is_same_equipment(option_text, first_line):
-                        await opt_el.scroll_into_view_if_needed()
-                        await opt_el.click(force=True)
-                        return True
-                    else:
-                        return False
-
-                # 2. Technician lock:
-                if is_tech:
-                    if (
-                        self.is_tech_match(clean_s, option_text) or
-                        self.is_tech_match(clean_first, option_text) or
-                        self.is_tech_match(s_raw, option_text) or
-                        self.is_tech_match(first_line, option_text)
-                    ):
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
@@ -1592,10 +1571,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     break
 
                     if not clicked:
-                        # Press Enter to select the highlighted matching option
-                        print(f"  -> Pressing Enter to select matching dropdown option for '{option_text}'...")
-                        await search_input.press("Enter")
-                        await self.page.wait_for_timeout(500)
+                        if not is_tech:
+                            # Press Enter to select the highlighted matching option
+                            print(f"  -> Pressing Enter to select matching dropdown option for '{option_text}'...")
+                            await search_input.press("Enter")
+                            await self.page.wait_for_timeout(500)
+                        else:
+                            print(f"⚠️ Could not find exact matching option for technician '{option_text}' in dropdown. Aborting selection.")
+                            return False
                 else:
                     print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
                     return False
@@ -1623,12 +1606,20 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     if is_target_fleet or is_sel_fleet:
                         equip_ok = self.is_same_equipment(selected_val, option_text)
 
-                    if not qualifier_conflict and not banner_conflict and equip_ok and (
+                    if is_tech:
+                        if (
+                            selected_val == option_text or
+                            clean_val == option_text or
+                            self.is_tech_match(clean_val, option_text) or
+                            self.is_tech_match(selected_val, option_text)
+                        ):
+                            is_verified = True
+                            break
+                    elif not qualifier_conflict and not banner_conflict and equip_ok and (
                         selected_val == option_text or
                         clean_val == option_text or
                         clean_sel == clean_opt or
                         self.is_same_equipment(selected_val, option_text) or
-                        (is_tech and (self.is_tech_match(clean_val, option_text) or self.is_tech_match(selected_val, option_text))) or
                         clean_sel in target_canons or
                         selected_val.strip() in name_variants or
                         clean_val.strip() in name_variants or
@@ -1785,8 +1776,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     selected_tech_text == tech_name or
                     clean_tech_val == tech_name or
                     clean_actual_tech == clean_target_tech or
-                    clean_actual_tech.startswith(clean_target_tech) or
-                    (len(clean_actual_tech) >= 4 and len(clean_target_tech) >= 4 and (clean_actual_tech in clean_target_tech or clean_target_tech in clean_actual_tech)) or
                     self.is_tech_match(clean_tech_val, tech_name) or
                     self.is_tech_match(selected_tech_text, tech_name)
                 )
@@ -1952,8 +1941,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     final_tech == tech_name or
                     clean_final_tech == tech_name or
                     clean_f == clean_t or
-                    clean_f.startswith(clean_t) or
-                    (len(clean_f) >= 4 and len(clean_t) >= 4 and (clean_f in clean_t or clean_t in clean_f)) or
                     self.is_tech_match(clean_final_tech, tech_name) or
                     self.is_tech_match(final_tech, tech_name)
                 )
@@ -2839,8 +2826,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if canon_h_tech:
                                     tech_match = (
                                         canon_tech_key == canon_h_tech or
-                                        canon_h_tech in canon_tech_key or
-                                        canon_tech_key in canon_h_tech or
                                         self.is_tech_match(canon_h_tech, canon_tech_key)
                                     )
                                 else:
@@ -2849,34 +2834,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 if tech_match:
                                     for wo in wo_list:
                                         if not wo.get("is_appointment"):
-                                            is_dummy_tech = (
-                                                canon_h_tech in DUMMY_HEADER_TECHS or
-                                                any(canon_h_tech.startswith(dt) for dt in DUMMY_HEADER_TECHS)
-                                            )
                                             if self.check_item_match(
                                                 wo,
                                                 canon_target,
                                                 time_key,
                                                 is_service_wo=is_service_wo,
                                                 is_oos_wo=is_oos_wo,
-                                                match_any_status=(is_service_wo or is_oos_wo or is_dummy_tech)
+                                                match_any_status=(is_service_wo or is_oos_wo)
                                             ):
                                                 board_count += 1
-                                            elif is_dummy_tech and not is_service_wo and not is_oos_wo:
-                                                # If this item name is unique on this technician column (only 1 occurrence in template),
-                                                # count it even if scheduled time was slightly adjusted on the board, but NEVER match
-                                                # cards sitting in Out of Service (1:45 PM) or Service Needed (3:30 PM) slots!
-                                                w_time_norm = self.normalize_time_key(wo.get("time_key", ""))
-                                                if w_time_norm not in ("1:45 PM", "3:30 PM", "1:45", "3:30"):
-                                                    if sum(1 for h in static_headers if self.canonical_str(h.get("tech_name", "")) == canon_h_tech and self.canonical_str(h.get("name", "")) == canon_target) == 1:
-                                                        if self.check_item_match(
-                                                            wo,
-                                                            canon_target,
-                                                            time_key=None,
-                                                            require_customer_match=True,
-                                                            match_any_status=True
-                                                        ):
-                                                            board_count += 1
                                         else:
                                             appt_matched = False
                                             if wo.get("start_time_obj") and wo.get("end_time_obj") and time_key:
@@ -3038,32 +3004,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                     self.record_wo_created(created_history, db_date_key, canon_h_tech, canon_target, target_count_idx, status="existing_on_board", details={"name": name, "tech": h_tech, "time": time_key})
                                     continue
 
-                                is_dummy_h_tech = (
-                                    not canon_h_tech or
-                                    canon_h_tech in DUMMY_HEADER_TECHS or
-                                    any(canon_h_tech.startswith(dt) for dt in DUMMY_HEADER_TECHS)
-                                )
-                                if not is_dummy_h_tech and canon_h_tech in existing_wos:
-                                    tech_already_has_truck = False
-                                    for wo in existing_wos[canon_h_tech]:
-                                        if wo.get("is_appointment"):
+                                if canon_h_tech:
+                                    trucks_for_this_tech = sum(1 for t in truck_assign_headers if self.is_tech_match(t.get("tech_name", ""), h_tech) or self.canonical_str(t.get("tech_name", "")) == canon_h_tech)
+                                    if trucks_for_this_tech <= 1 and canon_h_tech in existing_wos:
+                                        tech_already_has_truck = False
+                                        for wo in existing_wos[canon_h_tech]:
+                                            if wo.get("is_appointment"):
+                                                continue
+                                            c_cust = wo.get("canon_customer", "")
+                                            if any(self.canonical_str(t.get("name", "")) == c_cust for t in truck_assign_headers):
+                                                tech_already_has_truck = True
+                                                break
+                                        if tech_already_has_truck:
+                                            print(f"⚠️ Tech '{h_tech}' already has a truck assigned on {date_str}. Skipping creating '{name}' to prevent multiple trucks on one technician.")
                                             continue
-                                        c_cust = wo.get("canon_customer", "")
-                                        if any(self.canonical_str(t.get("name", "")) == c_cust for t in truck_assign_headers):
-                                            tech_already_has_truck = True
-                                            break
-                                    if tech_already_has_truck:
-                                        print(f"⚠️ Tech '{h_tech}' already has a truck assigned on {date_str}. Skipping creating '{name}' to prevent multiple trucks on one technician.")
-                                        continue
 
                                 board_count = 0
                                 for canon_tech_key, wo_list in existing_wos.items():
-                                    tech_match = (
-                                        not canon_h_tech or not canon_tech_key or
-                                        canon_tech_key == canon_h_tech or
-                                        canon_h_tech in canon_tech_key or
-                                        canon_tech_key in canon_h_tech
-                                    )
+                                    if canon_h_tech:
+                                        tech_match = (
+                                            canon_tech_key == canon_h_tech or
+                                            self.is_tech_match(canon_h_tech, canon_tech_key)
+                                        )
+                                    else:
+                                        tech_match = not canon_tech_key
                                     if tech_match:
                                          for wo in wo_list:
                                              if not wo.get("is_appointment"):
@@ -3187,12 +3151,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                             board_count = 0
                             for canon_tech_key, wo_list in existing_wos.items():
-                                tech_match = (
-                                    not canon_t_tech or not canon_tech_key or
-                                    canon_tech_key == canon_t_tech or
-                                    canon_t_tech in canon_tech_key or
-                                    canon_tech_key in canon_t_tech
-                                )
+                                if canon_t_tech:
+                                    tech_match = (
+                                        canon_tech_key == canon_t_tech or
+                                        self.is_tech_match(canon_t_tech, canon_tech_key)
+                                    )
+                                else:
+                                    tech_match = not canon_tech_key
                                 if tech_match:
                                      for wo in wo_list:
                                          if not wo.get("is_appointment"):
@@ -3302,13 +3267,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             board_count = 0
                             tech_off_for_day = False
                             for canon_tech_key, wo_list in existing_wos.items():
-                                tech_match = (
-                                    not canon_t_assignment or not canon_tech_key or
-                                    canon_tech_key == canon_t_assignment or
-                                    canon_t_assignment in canon_tech_key or
-                                    canon_tech_key in canon_t_assignment or
-                                    self.is_tech_match(canon_t_assignment, canon_tech_key)
-                                )
+                                if canon_t_assignment:
+                                    tech_match = (
+                                        canon_tech_key == canon_t_assignment or
+                                        self.is_tech_match(canon_t_assignment, canon_tech_key)
+                                    )
+                                else:
+                                    tech_match = not canon_tech_key
                                 if tech_match:
                                     for wo in wo_list:
                                         if wo.get("is_appointment"):

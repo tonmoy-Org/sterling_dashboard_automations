@@ -920,30 +920,11 @@ class AssetAssignmentScraper(BaseScraper):
         import unicodedata, re
         t1 = re.sub(r'[\u00d7xX]$', '', str(tech1)).strip()
         t2 = re.sub(r'[\u00d7xX]$', '', str(tech2)).strip()
+        if t1.lower() == t2.lower():
+            return True
         c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t1)).lower()
         c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t2)).lower()
-        if not c1 or not c2:
-            return False
-        if c1 == c2:
-            return True
-        # Code prefix matching (e.g. "p2" matching "p2asher", "f2" matching "f2kelvin", "p4" matching "p4jacob"):
-        if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c1) and c2.startswith(c1):
-            return True
-        if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
-            return True
-        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', t1).lower()) if len(w) >= 3]
-        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', t2).lower()) if len(w) >= 3]
-
-        for w1 in words1:
-            for w2 in words2:
-                if w1 == w2 or (len(w1) >= 4 and w1 in w2) or (len(w2) >= 4 and w2 in w1):
-                    return True
-
-        if len(c1) >= 4 and len(c2) >= 4:
-            if c1 in c2 or c2 in c1:
-                return True
-
-        return False
+        return bool(c1 and c2 and c1 == c2)
 
     @staticmethod
     def is_same_equipment(name1: str, name2: str) -> bool:
@@ -1182,13 +1163,10 @@ class AssetAssignmentScraper(BaseScraper):
         if not option_text:
             return False
 
-        import unicodedata, re
-        clean_text = unicodedata.normalize('NFKD', option_text).strip()
-        target_canon = self.canonical_str(option_text)
-        m_core = re.sub(r'^[a-z0-9]\s*', '', clean_text.lower())
-        core_tech = m_core if len(m_core) >= 3 else clean_text.lower()
+        target_text = str(option_text).strip()
+        target_canon = self.canonical_str(target_text)
 
-        print(f"  🔍 Selecting tech '{option_text}' (normalized: '{clean_text}') in Assignment card dropdown...")
+        print(f"  🔍 Selecting tech '{target_text}' in Assignment card dropdown...")
 
         try:
             await self.page.evaluate("""() => {
@@ -1218,34 +1196,35 @@ class AssetAssignmentScraper(BaseScraper):
             await self.page.wait_for_timeout(250)
 
             await self.page.evaluate("""(args) => {
-                const { text, clean } = args;
+                const { text } = args;
                 const input = document.querySelector('.assigned-tech_omVmC input.vs__search') || 
                               document.querySelector('.tech-dropdown_qufHC input') ||
                               document.querySelector('.assigned-tech_omVmC input') ||
                               document.querySelector('[data-edb-sidepanel-card*="Assignment"] input.vs__search');
                 if (input) {
                     input.focus();
-                    input.value = clean || text;
+                    input.value = text;
                     input.dispatchEvent(new Event('input', { bubbles: true }));
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 }
-            }""", {"text": option_text, "clean": clean_text})
-            await self.page.wait_for_timeout(250)
+            }""", {"text": target_text})
+            await self.page.wait_for_timeout(350)
 
             clicked = await self.page.evaluate("""(args) => {
-                const { targetText, targetCanon, coreTech } = args;
+                const { targetText, targetCanon } = args;
                 const norm = (s) => (s || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
 
                 const items = Array.from(document.querySelectorAll('.assigned-tech_omVmC ul[role="listbox"] li, .tech-dropdown_qufHC ul li, .vs__dropdown-menu li, ul[role="listbox"] li, li.vs__dropdown-option'));
                 if (!items.length) return false;
 
-                const cTarget = norm(targetCanon);
-                const cCore = norm(coreTech);
+                const cTarget = norm(targetCanon || targetText);
+                const rawTarget = (targetText || '').trim().toLowerCase();
 
                 for (const item of items) {
                     const txt = (item.textContent || item.innerText || '').trim();
-                    const cTxt = norm(txt);
-                    if (cTxt === cTarget || (cTarget && cTxt === cTarget) || (/^[a-z]{1,2}\\d{1,2}$/.test(cTarget) && cTxt.startsWith(cTarget))) {
+                    const cleanTxt = txt.replace(/[\u00d7xX]$/, '').trim();
+                    const cTxt = norm(cleanTxt);
+                    if ((cTxt && cTarget && cTxt === cTarget) || cleanTxt.toLowerCase() === rawTarget) {
                         item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
                         item.click();
                         item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
@@ -1254,37 +1233,8 @@ class AssetAssignmentScraper(BaseScraper):
                         return true;
                     }
                 }
-
-                if (cCore && cCore.length >= 3) {
-                    for (const item of items) {
-                        const txt = (item.textContent || item.innerText || '').trim();
-                        const cTxt = norm(txt);
-                        if (cTxt.includes(cCore)) {
-                            item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
-                            item.click();
-                            item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                            item.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                            item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                            return true;
-                        }
-                    }
-                }
-
-                for (const item of items) {
-                    const txt = (item.textContent || item.innerText || '').toLowerCase().trim();
-                    const normTxt = norm(txt);
-                    if (cTarget && cTarget.length >= 4 && normTxt.length >= 4 && (normTxt.includes(cTarget) || cTarget.includes(normTxt))) {
-                        item.scrollIntoView({ behavior: 'instant', block: 'nearest' });
-                        item.click();
-                        item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                        item.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                        item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                        return true;
-                    }
-                }
-
                 return false;
-            }""", {"targetText": option_text, "targetCanon": target_canon, "coreTech": core_tech})
+            }""", {"targetText": target_text, "targetCanon": target_canon})
 
             print(f"  -> Tech dropdown selection for '{option_text}': {'Success' if clicked else 'Failed'}")
             await self.page.wait_for_timeout(300)
@@ -1343,7 +1293,7 @@ class AssetAssignmentScraper(BaseScraper):
 
                         if (targetTech && cells.length > 6) {
                             const rawTech = (cells[6].textContent || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-                            if (rawTech && !rawTech.includes(targetTech) && !targetTech.includes(rawTech)) {
+                            if (rawTech && rawTech !== targetTech) {
                                 continue;
                             }
                         }
