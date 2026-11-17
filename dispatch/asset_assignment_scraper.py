@@ -918,8 +918,10 @@ class AssetAssignmentScraper(BaseScraper):
         if not tech1 or not tech2:
             return False
         import unicodedata, re
-        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech1))).lower()
-        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech2))).lower()
+        t1 = re.sub(r'[\u00d7xX]$', '', str(tech1)).strip()
+        t2 = re.sub(r'[\u00d7xX]$', '', str(tech2)).strip()
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t1)).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t2)).lower()
         if not c1 or not c2:
             return False
         if c1 == c2:
@@ -929,8 +931,8 @@ class AssetAssignmentScraper(BaseScraper):
             return True
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
             return True
-        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
-        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
+        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', t1).lower()) if len(w) >= 3]
+        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', t2).lower()) if len(w) >= 3]
 
         for w1 in words1:
             for w2 in words2:
@@ -2822,11 +2824,11 @@ class AssetAssignmentScraper(BaseScraper):
             await search_input.fill(wo_str)
             await search_input.press("Enter")
             print(f"  🔍 [Cancel WO #{wo_str}] Entered '{wo_str}' into search and pressed Enter. Waiting for results...")
-            await new_page.wait_for_timeout(800)
+            await new_page.wait_for_timeout(1200)
 
             target_row = None
             target_status = ""
-            for attempt in range(12):
+            for attempt in range(25):
                 rows = new_page.locator("table.fixed-table tbody.fixed-body tr.regular")
                 row_count = await rows.count()
                 for i in range(row_count):
@@ -2840,7 +2842,7 @@ class AssetAssignmentScraper(BaseScraper):
                         break
                 if target_row:
                     break
-                await new_page.wait_for_timeout(400)
+                await new_page.wait_for_timeout(500)
 
             if not target_row:
                 print(f"  ⚠️ [Cancel WO #{wo_str}] No table row found matching WO #{wo_str} in search results.")
@@ -2880,11 +2882,11 @@ class AssetAssignmentScraper(BaseScraper):
             print(f"  🖱️ [Cancel WO #{wo_str}] Opening work order details...")
             try:
                 await wo_span.click()
-                await new_page.wait_for_timeout(800)
+                await new_page.wait_for_timeout(1000)
             except Exception as e1:
                 print(f"  ℹ️ Direct click failed ({e1}). Trying double-click on row...")
                 await target_row.dblclick()
-                await new_page.wait_for_timeout(800)
+                await new_page.wait_for_timeout(1000)
 
             # Check if status on details page is already Canceled
             status_badge = wo_page.locator(".task-status, .work-order-status, [data-automation-id='status']").first
@@ -2899,10 +2901,10 @@ class AssetAssignmentScraper(BaseScraper):
                 "button#dispatch-summary-save-workorder, button[data-automation-id='save-workorder-button']"
             )
             try:
-                await wo_page.wait_for_selector(save_btn_selector, state="visible", timeout=20000)
+                await wo_page.wait_for_selector(save_btn_selector, state="visible", timeout=25000)
             except Exception:
-                print(f"  ⚠️ Save button not immediately visible for WO #{wo_str}, waiting 1.5s...")
-                await wo_page.wait_for_timeout(1500)
+                print(f"  ⚠️ Save button not immediately visible for WO #{wo_str}, waiting 2s...")
+                await wo_page.wait_for_timeout(2000)
 
             save_btn = wo_page.locator(save_btn_selector).first
             if await save_btn.count() == 0:
@@ -2912,7 +2914,7 @@ class AssetAssignmentScraper(BaseScraper):
             print(f"  💾 Clicking Save button on WO #{wo_str}...")
             await save_btn.click()
             print("  ⏳ Waiting for Save / Dispatch Summary modal to appear...")
-            await wo_page.wait_for_timeout(600)
+            await wo_page.wait_for_timeout(1000)
 
             radio_btn = self.rules.get("unassigned_canceled_radio_selector", ".field-radio-container:has-text('Canceled') .field-radio")
             notes_sel = self.rules.get("unassigned_notes_textarea_selector", "textarea[name='CancellationNotes']")
@@ -2922,14 +2924,14 @@ class AssetAssignmentScraper(BaseScraper):
             print(f"  🔘 Selecting 'Canceled' radio in Save modal...")
             modal = wo_page.locator(".modal_gRQBi, .modal, .modal-dialog, [role='dialog'], .dispatch-summary-modal, .v-modal").first
             try:
-                await wo_page.wait_for_selector(radio_btn, state="visible", timeout=7000)
+                await wo_page.wait_for_selector(radio_btn, state="visible", timeout=12000)
                 await wo_page.click(radio_btn)
             except Exception as inner_e:
                 print(f"  ⚠️ Primary radio selector failed ({inner_e}), trying modal-scoped fallback selector...")
                 radio_selected = False
                 try:
                     modal_radio = modal.locator(".field-radio-container:has-text('Canceled') .field-radio, input[value*='Cancel'], label:has-text('Canceled'), .field-radio").first
-                    await modal_radio.click(timeout=5000, force=True)
+                    await modal_radio.click(timeout=8000, force=True)
                     radio_selected = True
                 except Exception:
                     pass
@@ -2951,13 +2953,13 @@ class AssetAssignmentScraper(BaseScraper):
                     if not radio_selected:
                         print("  ⚠️ Could not select Canceled radio inside modal.")
 
-            await wo_page.wait_for_timeout(300)
+            await wo_page.wait_for_timeout(400)
 
             print(f"  📝 Entering cancellation reason: '{cancel_reason_text}'...")
             filled = False
             for target_sel in [notes_sel, "textarea[name='CancellationNotes']", "textarea[name='notes']", ".modal textarea", ".v-modal textarea", "textarea:visible"]:
                 try:
-                    await wo_page.wait_for_selector(target_sel, state="visible", timeout=3000)
+                    await wo_page.wait_for_selector(target_sel, state="visible", timeout=4000)
                     await wo_page.fill(target_sel, cancel_reason_text)
                     print(f"  ✅ Cancellation reason entered successfully using '{target_sel}'.")
                     filled = True
@@ -2973,17 +2975,17 @@ class AssetAssignmentScraper(BaseScraper):
                 except Exception as note_e:
                     print(f"  ❌ Could not fill cancellation notes: {note_e}")
 
-            await wo_page.wait_for_timeout(300)
+            await wo_page.wait_for_timeout(400)
 
             print(f"  ✅ Confirming cancellation for WO #{wo_str}...")
             try:
                 confirm_btn = wo_page.locator("button#confirm-save-dispatch-summary:visible").first
-                await confirm_btn.click(timeout=10000)
+                await confirm_btn.click(timeout=15000)
             except Exception:
                 print("  -> Fallback confirm button click...")
-                await wo_page.locator(f"{confirm_btn_sel} >> visible=true").first.click(timeout=10000)
+                await wo_page.locator(f"{confirm_btn_sel} >> visible=true").first.click(timeout=15000)
 
-            await wo_page.wait_for_timeout(1500)
+            await wo_page.wait_for_timeout(2000)
             print(f"  🎉 Successfully canceled WO #{wo_str}!")
             return True
 

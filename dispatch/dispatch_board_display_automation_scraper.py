@@ -455,8 +455,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
         if not tech1 or not tech2:
             return False
         import unicodedata, re
-        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech1))).lower()
-        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', str(tech2))).lower()
+        t1 = re.sub(r'[\u00d7xX]$', '', str(tech1)).strip()
+        t2 = re.sub(r'[\u00d7xX]$', '', str(tech2)).strip()
+        c1 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t1)).lower()
+        c2 = re.sub(r'[^a-zA-Z0-9]', '', unicodedata.normalize('NFKD', t2)).lower()
         if not c1 or not c2:
             return False
         if c1 == c2:
@@ -466,8 +468,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return True
         if re.match(r'^[a-zA-Z]{1,2}\d{1,2}$', c2) and c1.startswith(c2):
             return True
-        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech1)).lower()) if len(w) >= 3]
-        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', str(tech2)).lower()) if len(w) >= 3]
+        words1 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', t1).lower()) if len(w) >= 3]
+        words2 = [w for w in re.findall(r'[a-zA-Z0-9]+', unicodedata.normalize('NFKD', t2).lower()) if len(w) >= 3]
         for w1 in words1:
             for w2 in words2:
                 if w1 == w2 or (len(w1) >= 4 and w1 in w2) or (len(w2) >= 4 and w2 in w1):
@@ -1182,7 +1184,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             return False
         return ('|' in t) or bool(cls._BANNER_EMOJI_REGEX.search(str(t)))
 
-    async def select_dropdown_option(self, dropdown_selector: str, option_text: str, press_enter: bool = True) -> bool:
+    async def select_dropdown_option(
+        self,
+        dropdown_selector: str,
+        option_text: str,
+        press_enter: bool = True,
+        is_tech: bool = False,
+        is_customer: bool = False
+    ) -> bool:
         if not option_text:
             return True
 
@@ -1196,26 +1205,29 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             await dropdown.scroll_into_view_if_needed()
             await dropdown.click(force=True)
-            await self.page.wait_for_timeout(200)
+            await self.page.wait_for_timeout(250)
 
             search_input = dropdown.locator("input.vs__search, input[type='search'], input").first
             if await search_input.count() == 0 or not await search_input.is_visible():
                 search_input = self.page.locator("input.vs__search:visible, input[type='search']:visible").first
 
-            is_customer = "customer" in dropdown_selector.lower()
-            is_tech = "primary tech" in dropdown_selector.lower() or "tech" in dropdown_selector.lower()
+            if not is_customer:
+                is_customer = "customer" in dropdown_selector.lower()
+            if not is_tech:
+                is_tech = "primary tech" in dropdown_selector.lower() or "tech" in dropdown_selector.lower()
 
             # Pre-check: if dropdown already has an item selected
             existing_sel = dropdown.locator(".vs__selected, .selected-tag").first
             if await existing_sel.count() > 0:
                 cur_val = (await existing_sel.text_content() or "").strip()
                 if cur_val:
+                    clean_cur = re.sub(r'[\u00d7xX]$', '', cur_val).strip()
                     already_matched = False
-                    if cur_val == option_text or self.canonical_str(cur_val) == self.canonical_str(option_text):
+                    if cur_val == option_text or clean_cur == option_text or self.canonical_str(clean_cur) == self.canonical_str(option_text):
                         already_matched = True
                     elif self.is_same_equipment(cur_val, option_text):
                         already_matched = True
-                    elif is_tech and self.is_tech_match(cur_val, option_text):
+                    elif is_tech and (self.is_tech_match(clean_cur, option_text) or self.is_tech_match(cur_val, option_text)):
                         already_matched = True
 
                     if already_matched:
@@ -1229,7 +1241,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         else:
                             await search_input.click(force=True)
                             await search_input.press("Backspace")
-                        await self.page.wait_for_timeout(200)
+                        await self.page.wait_for_timeout(300)
 
             try:
                 await search_input.focus()
@@ -1248,28 +1260,28 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             type_text = re.sub(r'^[\s\u2000-\u200f]+|[\s\u2000-\u200f]+$', '', str(option_text)).strip('\r\n')
             await search_input.fill(type_text)
-            await self.page.wait_for_timeout(350)
+            await self.page.wait_for_timeout(1000)
 
             # Locate dropdown options (scoped to dropdown menu)
             options = dropdown.locator("ul.vs__dropdown-menu li, ul[role='listbox'] li, li.vs__dropdown-option")
             try:
-                await options.first.wait_for(state="visible", timeout=2000)
+                await options.first.wait_for(state="visible", timeout=6000)
             except Exception:
                 pass
 
             if (await options.count()) == 0:
                 options = self.page.locator("ul.vs__dropdown-menu:visible li, ul[role='listbox']:visible li, li.vs__dropdown-option:visible")
                 try:
-                    await options.first.wait_for(state="visible", timeout=1200)
+                    await options.first.wait_for(state="visible", timeout=4000)
                 except Exception:
                     pass
 
             if (await options.count()) == 0 and press_enter:
                 print(f"  -> No options visible for '{option_text}'. Pressing Enter to trigger server search...")
                 await search_input.press("Enter")
-                await self.page.wait_for_timeout(1000)
+                await self.page.wait_for_timeout(2000)
                 try:
-                    await options.first.wait_for(state="visible", timeout=3000)
+                    await options.first.wait_for(state="visible", timeout=8000)
                 except Exception:
                     pass
 
@@ -1283,12 +1295,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await search_input.focus()
                         await search_input.fill("")
                         await search_input.fill(fallback_var)
-                        await self.page.wait_for_timeout(250)
+                        await self.page.wait_for_timeout(500)
                         if press_enter:
                             await search_input.press("Enter")
-                            await self.page.wait_for_timeout(1000)
+                            await self.page.wait_for_timeout(2000)
                         try:
-                            await options.first.wait_for(state="visible", timeout=3000)
+                            await options.first.wait_for(state="visible", timeout=7000)
                         except Exception:
                             pass
                     except Exception:
@@ -1303,12 +1315,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await search_input.focus()
                         await search_input.fill("")
                         await search_input.fill(fallback_term)
-                        await self.page.wait_for_timeout(250)
+                        await self.page.wait_for_timeout(500)
                         if press_enter:
                             await search_input.press("Enter")
-                            await self.page.wait_for_timeout(1000)
+                            await self.page.wait_for_timeout(2000)
                         try:
-                            await options.first.wait_for(state="visible", timeout=3000)
+                            await options.first.wait_for(state="visible", timeout=7000)
                         except Exception:
                             pass
                     except Exception:
@@ -1323,11 +1335,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await search_input.focus()
                         await search_input.fill("")
                         await search_input.fill(keyword_fallback)
-                        await self.page.wait_for_timeout(250)
+                        await self.page.wait_for_timeout(500)
                         await search_input.press("Enter")
-                        await self.page.wait_for_timeout(1000)
+                        await self.page.wait_for_timeout(2000)
                         try:
-                            await options.first.wait_for(state="visible", timeout=3000)
+                            await options.first.wait_for(state="visible", timeout=7000)
                         except Exception:
                             pass
                     except Exception:
@@ -1339,9 +1351,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await search_input.focus()
                             await search_input.fill("")
                             await search_input.fill(clean_core)
-                            await self.page.wait_for_timeout(250)
+                            await self.page.wait_for_timeout(500)
                             try:
-                                await options.first.wait_for(state="visible", timeout=2000)
+                                await options.first.wait_for(state="visible", timeout=6000)
                             except Exception:
                                 pass
                         except Exception:
@@ -1354,9 +1366,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                                 await search_input.focus()
                                 await search_input.fill("")
                                 await search_input.fill(fallback_var)
-                                await self.page.wait_for_timeout(250)
+                                await self.page.wait_for_timeout(500)
                                 try:
-                                    await options.first.wait_for(state="visible", timeout=3000)
+                                    await options.first.wait_for(state="visible", timeout=6000)
                                 except Exception:
                                     pass
                             except Exception:
@@ -1401,7 +1413,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 # 2. Technician lock:
                 if is_tech:
-                    if self.is_tech_match(s_raw, option_text) or self.is_tech_match(first_line, option_text):
+                    if (
+                        self.is_tech_match(clean_s, option_text) or
+                        self.is_tech_match(clean_first, option_text) or
+                        self.is_tech_match(s_raw, option_text) or
+                        self.is_tech_match(first_line, option_text)
+                    ):
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
@@ -1421,6 +1438,8 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     c_raw == target_canon or
                     c_first in target_canons or
                     c_raw in target_canons or
+                    self.is_tech_match(clean_s, option_text) or
+                    self.is_tech_match(clean_first, option_text) or
                     self.is_tech_match(s_raw, option_text) or
                     self.is_tech_match(first_line, option_text)
                 ):
@@ -1438,7 +1457,9 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 s_raw = raw_text.strip()
                 if s_raw == raw_target:
                     return False
+                clean_s = re.sub(r'[\u00d7xX]$', '', s_raw).strip()
                 first_line = [l.strip() for l in s_raw.splitlines() if l.strip()][0] if s_raw else ""
+                clean_first = re.sub(r'[\u00d7xX]$', '', first_line).strip()
                 norm_raw = unicodedata.normalize('NFKD', s_raw).strip().lower()
                 norm_first = unicodedata.normalize('NFKD', first_line).strip().lower()
                 c_raw = self.canonical_str(s_raw)
@@ -1463,7 +1484,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 # 2. Technician lock:
                 if is_tech:
-                    if self.is_tech_match(s_raw, option_text) or self.is_tech_match(first_line, option_text):
+                    if (
+                        self.is_tech_match(clean_s, option_text) or
+                        self.is_tech_match(clean_first, option_text) or
+                        self.is_tech_match(s_raw, option_text) or
+                        self.is_tech_match(first_line, option_text)
+                    ):
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
@@ -1488,7 +1514,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await opt_el.click(force=True)
                     return True
 
-                if self.is_tech_match(s_raw, option_text) or self.is_tech_match(s_raw, clean_search) or any(self.is_tech_match(s_raw, v) for v in name_variants):
+                if (
+                    self.is_tech_match(clean_s, option_text) or
+                    self.is_tech_match(clean_s, clean_search) or
+                    self.is_tech_match(s_raw, option_text) or
+                    self.is_tech_match(s_raw, clean_search) or
+                    any(self.is_tech_match(clean_s, v) for v in name_variants) or
+                    any(self.is_tech_match(s_raw, v) for v in name_variants)
+                ):
                     await opt_el.scroll_into_view_if_needed()
                     await opt_el.click(force=True)
                     return True
@@ -1499,8 +1532,6 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                         await opt_el.scroll_into_view_if_needed()
                         await opt_el.click(force=True)
                         return True
-
-                return False
 
                 return False
 
@@ -1521,7 +1552,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     if await menu_container.count() > 0:
                         for scroll_step in range(3):
                             await self.page.evaluate("""(menu) => { if (menu) menu.scrollTop += 300; }""", await menu_container.element_handle())
-                            await self.page.wait_for_timeout(150)
+                            await self.page.wait_for_timeout(200)
                             count_now = await options.count()
                             clicked = await _scan_options(lambda opt: _exact_match_option(opt, strict_banner=True), count_now)
                             if not clicked:
@@ -1536,23 +1567,30 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     selected_check = dropdown.locator(".vs__selected, .selected-tag").first
                     if await selected_check.count() > 0 and await selected_check.is_visible():
                         sel_val = (await selected_check.text_content() or "").strip()
-                        c_sel = self.canonical_str(sel_val)
+                        clean_sel_val = re.sub(r'[\u00d7xX]$', '', sel_val).strip()
+                        c_sel = self.canonical_str(clean_sel_val)
                         t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
-                        s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', sel_val.lower()))
+                        s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', clean_sel_val.lower()))
+                        if is_tech and (self.is_tech_match(clean_sel_val, option_text) or self.is_tech_match(sel_val, option_text)):
+                            return True
                         banner_ok = (self.has_banner_prefix(sel_val) == target_has_banner)
-                        if banner_ok and (('am' in t_words) == ('am' in s_words) and ('pm' in t_words) == ('pm' in s_words)) and (c_sel == target_canon or self.is_tech_match(sel_val, option_text)):
+                        if banner_ok and (('am' in t_words) == ('am' in s_words) and ('pm' in t_words) == ('pm' in s_words)) and (c_sel == target_canon or self.is_tech_match(clean_sel_val, option_text)):
                             return True
                     if await options.count() > 0:
                         for idx_opt in range(await options.count()):
                             opt_cand = options.nth(idx_opt)
                             if await opt_cand.is_visible():
                                 f_raw = (await opt_cand.text_content() or "").strip()
+                                clean_f_raw = re.sub(r'[\u00d7xX]$', '', f_raw).strip()
+                                if is_tech and (self.is_tech_match(clean_f_raw, option_text) or self.is_tech_match(f_raw, option_text)):
+                                    await opt_cand.click(force=True)
+                                    return True
                                 t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', raw_target.lower()))
                                 f_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', f_raw.lower()))
                                 time_ok = not is_time_target or ((('am' in t_words) == ('am' in f_words)) and (('pm' in t_words) == ('pm' in f_words)))
                                 banner_ok = (self.has_banner_prefix(f_raw) == target_has_banner)
-                                c_f = self.canonical_str(f_raw)
-                                if time_ok and banner_ok and (c_f in target_canons or c_f == target_canon or self.is_tech_match(f_raw, option_text)):
+                                c_f = self.canonical_str(clean_f_raw)
+                                if time_ok and banner_ok and (c_f in target_canons or c_f == target_canon or self.is_tech_match(clean_f_raw, option_text)):
                                     await opt_cand.click(force=True)
                                     return True
                     print(f"  -> Press-Enter fallback: No valid option was selected for '{option_text}'. Aborting to prevent misassignment.")
@@ -1561,7 +1599,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     print(f"⚠️ Could not find exact or canonical match for option '{option_text}' in dropdown ({dropdown_selector}). Aborting selection to prevent misassignment.")
                     return False
 
-            verify_budget = 8.0 if press_enter else 2.5
+            verify_budget = 15.0 if press_enter else 6.0
             verify_start = time.time()
             is_verified = False
             selected_val = ""
@@ -1570,13 +1608,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 selected_el = dropdown.locator(".vs__selected, .selected-tag, .vs__selected-options").first
                 if await selected_el.count() > 0:
                     selected_val = (await selected_el.text_content() or "").strip()
-                    clean_sel = self.canonical_str(selected_val)
+                    clean_val = re.sub(r'[\u00d7xX]$', '', selected_val).strip()
+                    clean_sel = self.canonical_str(clean_val)
                     clean_opt = self.canonical_str(option_text)
                     t_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', option_text.lower()))
                     s_words = set(re.findall(r'\b[a-zA-Z0-9]+\b', selected_val.lower()))
                     qualifier_conflict = is_time_target and ((('am' in t_words) != ('am' in s_words)) or (('pm' in t_words) != ('pm' in s_words)))
                     sel_has_banner = self.has_banner_prefix(selected_val)
-                    banner_conflict = (target_has_banner != sel_has_banner)
+                    banner_conflict = False if is_tech else (target_has_banner != sel_has_banner)
                     equip_ok = True
                     is_target_fleet = any(x in option_text for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
                     is_sel_fleet = any(x in selected_val for x in ("🚛", "🛻", "🏗", "▭", "🔲", "🔻", "⚠️", "👥"))
@@ -1585,17 +1624,21 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                     if not qualifier_conflict and not banner_conflict and equip_ok and (
                         selected_val == option_text or
+                        clean_val == option_text or
                         clean_sel == clean_opt or
                         self.is_same_equipment(selected_val, option_text) or
-                        (is_tech and self.is_tech_match(selected_val, option_text)) or
+                        (is_tech and (self.is_tech_match(clean_val, option_text) or self.is_tech_match(selected_val, option_text))) or
                         clean_sel in target_canons or
                         selected_val.strip() in name_variants or
+                        clean_val.strip() in name_variants or
                         any(v.lower() == selected_val.strip().lower() for v in name_variants) or
-                        selected_val.strip().lower() == option_text.strip().lower()
+                        any(v.lower() == clean_val.strip().lower() for v in name_variants) or
+                        selected_val.strip().lower() == option_text.strip().lower() or
+                        clean_val.strip().lower() == option_text.strip().lower()
                     ):
                         is_verified = True
                         break
-                await self.page.wait_for_timeout(150)
+                await self.page.wait_for_timeout(250)
 
             if not is_verified:
                 print(f"❌ Selection verification failed: expected '{option_text}', but dropdown selected '{selected_val}'. Aborting selection.")
@@ -1604,7 +1647,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await clear_btn.click(force=True)
                 return False
 
-            await self.page.wait_for_timeout(200)
+            await self.page.wait_for_timeout(350)
             return True
         except Exception as e:
             print(f"⚠️ Failed to select '{option_text}' in dropdown ({dropdown_selector}): {e}")
@@ -1630,11 +1673,11 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if not opened:
                 return False
 
-            await self.page.wait_for_timeout(300)
+            await self.page.wait_for_timeout(600)
 
             print(f"  [1/7] Customer: '{customer_name}'")
             customer_xpath = self.rules.get('dispatch_board_customer_xpath', "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Customer Name')]/following::div[contains(@class,'v-select')][1]")
-            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True)
+            success = await self.select_dropdown_option(customer_xpath, customer_name, press_enter=True, is_customer=True)
             if not success:
                 print(f"⚠️ Failed to select Customer '{customer_name}'. Aborting.")
                 return False
@@ -1642,10 +1685,10 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             print(f"  -> Waiting for customer data and background spinners to finish...")
             import time
             _load_start = time.time()
-            _max_load_wait = 45
+            _max_load_wait = 60
             _form_ready = False
 
-            await self.page.wait_for_timeout(300)
+            await self.page.wait_for_timeout(400)
 
             while (time.time() - _load_start) < _max_load_wait:
                 try:
@@ -1666,7 +1709,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     if await dialog_confirm.count() > 0 and await dialog_confirm.is_visible():
                         print("  -> Dismissing customer dialog/alert with Confirm button...")
                         await dialog_confirm.click(force=True)
-                        await self.page.wait_for_timeout(300)
+                        await self.page.wait_for_timeout(400)
                         continue
 
                     if active_spinners == 0 and task_vis and not task_disabled:
@@ -1679,14 +1722,14 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 except Exception:
                     pass
 
-                await self.page.wait_for_timeout(200)
+                await self.page.wait_for_timeout(300)
 
             if not _form_ready:
                 print(f"  ❌ Form not ready after {_max_load_wait}s (Customer '{customer_name}' data did not load or spinners hung). Aborting safely.")
                 await self.close_create_wo_modal()
                 return False
 
-            await self.page.wait_for_timeout(350)
+            await self.page.wait_for_timeout(500)
 
             print(f"  [2/7] Immediate Action: '{immediate_action}'")
             ia_xpath = self.rules.get(
@@ -1694,7 +1737,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Immediate Action')]/following::div[contains(@class,'v-select')][1]"
             )
             await self.select_dropdown_option(ia_xpath, immediate_action, press_enter=False)
-            await self.page.wait_for_timeout(200)
+            await self.page.wait_for_timeout(350)
 
             print(f"  [3/7] Task: '{task}'")
             task_xpath = self.rules.get(
@@ -1702,7 +1745,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Task') and not(contains(normalize-space(),'Duration'))]/following::div[contains(@class,'v-select')][1]"
             )
             await self.select_dropdown_option(task_xpath, task, press_enter=False)
-            await self.page.wait_for_timeout(200)
+            await self.page.wait_for_timeout(350)
 
             print(f"  [4/7] Lead Source: '{lead_source}'")
             lead_xpath = self.rules.get(
@@ -1710,7 +1753,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Work Order Lead Source')]/following::div[contains(@class,'v-select')][1]"
             )
             await self.select_dropdown_option(lead_xpath, lead_source, press_enter=False)
-            await self.page.wait_for_timeout(200)
+            await self.page.wait_for_timeout(350)
 
             print(f"  [5/7] Priority: '{priority}'")
             priority_xpath = self.rules.get(
@@ -1718,7 +1761,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Priority')]/following::div[contains(@class,'v-select')][1]"
             )
             await self.select_dropdown_option(priority_xpath, priority, press_enter=False)
-            await self.page.wait_for_timeout(200)
+            await self.page.wait_for_timeout(350)
 
             if tech_name:
                 print(f"  [6/7] Primary Tech: '{tech_name}'")
@@ -1726,7 +1769,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     'dispatch_board_tech_name_xpath',
                     "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Primary Tech')]/following::div[contains(@class,'v-select')][1]"
                 )
-                tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True)
+                tech_selected = await self.select_dropdown_option(tech_xpath, tech_name, press_enter=True, is_tech=True)
                 if not tech_selected:
                     print(f"❌ Failed to match and select expected technician '{tech_name}'. Aborting work order to prevent wrong/duplicate assignment.")
                     await self.close_create_wo_modal()
@@ -1734,13 +1777,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
                 tech_container = self.page.locator(tech_xpath).first
                 selected_tech_text = (await tech_container.locator(".vs__selected").text_content() or "").strip()
-                clean_actual_tech = self.canonical_str(selected_tech_text)
+                clean_tech_val = re.sub(r'[\u00d7xX]$', '', selected_tech_text).strip()
+                clean_actual_tech = self.canonical_str(clean_tech_val)
                 clean_target_tech = self.canonical_str(tech_name)
                 tech_verified = (
                     selected_tech_text == tech_name or
+                    clean_tech_val == tech_name or
                     clean_actual_tech == clean_target_tech or
                     clean_actual_tech.startswith(clean_target_tech) or
                     (len(clean_actual_tech) >= 4 and len(clean_target_tech) >= 4 and (clean_actual_tech in clean_target_tech or clean_target_tech in clean_actual_tech)) or
+                    self.is_tech_match(clean_tech_val, tech_name) or
                     self.is_tech_match(selected_tech_text, tech_name)
                 )
                 if not tech_verified:
@@ -1752,15 +1798,15 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                 try:
                     date_input_xpath = self.rules.get('dispatch_board_date_input_xpath', "//input[@name='Start Date']")
                     date_field = self.page.locator(date_input_xpath).first
-                    await date_field.wait_for(state="visible", timeout=5000)
-                    for _ in range(15):
+                    await date_field.wait_for(state="visible", timeout=8000)
+                    for _ in range(35):
                         is_disabled = await date_field.get_attribute("disabled")
                         if is_disabled is None:
                             print(f"  -> Date field enabled. Ready.")
                             break
-                        await self.page.wait_for_timeout(150)
+                        await self.page.wait_for_timeout(200)
                 except Exception:
-                    await self.page.wait_for_timeout(200)
+                    await self.page.wait_for_timeout(300)
 
             print(f"  [7/7] Date: {target_date} | Time: {start_time} | Duration: {duration}")
             try:
@@ -1768,12 +1814,12 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     self.rules.get('dispatch_board_date_input_xpath', "//input[@name='Start Date']")
                 ).first
                 try:
-                    await date_input.wait_for(state="visible", timeout=3000)
-                    for _ in range(10):
+                    await date_input.wait_for(state="visible", timeout=6000)
+                    for _ in range(25):
                         is_disabled = await date_input.get_attribute("disabled")
                         if is_disabled is None:
                             break
-                        await self.page.wait_for_timeout(150)
+                        await self.page.wait_for_timeout(200)
                 except Exception:
                     pass
 
@@ -1785,13 +1831,13 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await self.page.keyboard.press("Enter")
                     await date_input.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
                     await self.page.keyboard.press("Tab")
-                    await self.page.wait_for_timeout(150)
+                    await self.page.wait_for_timeout(200)
 
                 time_input = self.page.locator(
                     self.rules.get('dispatch_board_time_input_xpath',
                         "//div[@class[contains(.,'field-title')] and contains(normalize-space(),'Start Time')]/following::input[1]")
                 ).first
-                if await time_input.is_visible(timeout=1500) and not await time_input.get_attribute("disabled"):
+                if await time_input.is_visible(timeout=3500) and not await time_input.get_attribute("disabled"):
                     await time_input.click(force=True)
                     await self.page.keyboard.press("Control+A")
                     await self.page.keyboard.press("Backspace")
@@ -1799,7 +1845,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                     await self.page.keyboard.press("Enter")
                     await time_input.evaluate(f"el => {{ el.value = '{start_time}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
                     await self.page.keyboard.press("Tab")
-                    await self.page.wait_for_timeout(150)
+                    await self.page.wait_for_timeout(200)
 
                     try:
                         actual_start_time = await time_input.input_value()
@@ -1814,7 +1860,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
                             await self.page.keyboard.press("Enter")
                             await time_input.evaluate(f"el => {{ el.value = '{start_time}'; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}")
                             await self.page.keyboard.press("Tab")
-                            await self.page.wait_for_timeout(150)
+                            await self.page.wait_for_timeout(200)
                     except Exception:
                         pass
 
@@ -1898,13 +1944,16 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
 
             if tech_name:
                 final_tech = (await self.page.locator(tech_xpath).locator(".vs__selected").text_content() or "").strip()
-                clean_f = self.canonical_str(final_tech)
+                clean_final_tech = re.sub(r'[\u00d7xX]$', '', final_tech).strip()
+                clean_f = self.canonical_str(clean_final_tech)
                 clean_t = self.canonical_str(tech_name)
                 final_verified = (
                     final_tech == tech_name or
+                    clean_final_tech == tech_name or
                     clean_f == clean_t or
                     clean_f.startswith(clean_t) or
                     (len(clean_f) >= 4 and len(clean_t) >= 4 and (clean_f in clean_t or clean_t in clean_f)) or
+                    self.is_tech_match(clean_final_tech, tech_name) or
                     self.is_tech_match(final_tech, tech_name)
                 )
                 if not final_verified:
@@ -1955,7 +2004,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             ]:
                 try:
                     loc = self.page.locator(save_sel).last
-                    if await loc.count() > 0 and await loc.is_visible(timeout=3000):
+                    if await loc.count() > 0 and await loc.is_visible(timeout=6000):
                         save_btn = loc
                         break
                 except Exception:
@@ -1964,7 +2013,7 @@ class DispatchBoardDisplayAutomationScraper(BaseScraper):
             if not save_btn:
                 save_btn = self.page.locator("//button[contains(@class,'confirm') and .//span[normalize-space()='Save']]").last
                 try:
-                    await save_btn.wait_for(state="visible", timeout=5000)
+                    await save_btn.wait_for(state="visible", timeout=8000)
                 except Exception:
                     print(f"⚠️ Save button not visible for '{customer_name}'. Aborting.")
                     return False
